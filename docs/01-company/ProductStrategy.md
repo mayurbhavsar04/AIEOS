@@ -3,20 +3,20 @@ title: Product Strategy
 version: 1.0
 status: Draft
 owner: Founding Team
-last_updated: 2026-07-17
+last_updated: 2026-07-20
 ---
 
 # Product Strategy
 
 ## Strategic choice
 
-AEOS will enter the market through a narrow operating wedge: build an autonomous AI YouTube Employee for ourselves, validate it on one fully AI-generated YouTube news channel, improve it through real operation, and only then productize the proven capability for external users.
+AIEOS will enter the market through a narrow operating wedge: build an autonomous AI YouTube Employee for ourselves, validate it on one fully AI-generated YouTube news channel, improve it through real operation, and only then productize the proven capability for external users.
 
 This sequence turns internal operation into product discovery. It gives the team direct evidence about content performance, workflow reliability, human intervention, safety controls, and operating cost before making a SaaS promise.
 
 ## Initial customer and users
 
-The **initial customer** is AEOS itself, operating one AI-generated YouTube news channel. Internal operators are responsible for setting policy, reviewing escalations, and assessing outcomes while the YouTube Employee earns autonomy.
+The **initial customer** is AIEOS itself, operating one AI-generated YouTube news channel. Internal operators are responsible for setting policy, reviewing escalations, and assessing outcomes while the YouTube Employee earns autonomy.
 
 The **first external target users**, after internal validation, are small news and information publishers that run repeatable YouTube workflows, need consistent output, and can define a clear editorial scope. They are expected to value an operated workflow more than a collection of disconnected AI generation tools.
 
@@ -36,7 +36,7 @@ For the internal deployment, it will work toward three Shorts per day and one lo
 
 ## Differentiation
 
-AEOS will differentiate the first product through operational reliability rather than generation novelty:
+AIEOS will differentiate the first product through operational reliability rather than generation novelty:
 
 - end-to-end workflow ownership instead of isolated generation features;
 - deterministic enforcement of permissions, state, validations, safety rules, and business constraints;
@@ -116,6 +116,6 @@ The larger risks are **distribution and content quality**. The channel must earn
 
 ## Platform discipline
 
-AEOS has a broad platform vision, but the YouTube Employee is the proof point that determines what the platform actually needs. Building generalized infrastructure too early would slow learning, encode untested assumptions, and divert effort from content quality, distribution, and operational reliability.
+AIEOS has a broad platform vision, but the YouTube Employee is the proof point that determines what the platform actually needs. Building generalized infrastructure too early would slow learning, encode untested assumptions, and divert effort from content quality, distribution, and operational reliability.
 
 Version 1 should implement the clearest solution for the single internal channel while maintaining sensible component boundaries and deterministic controls. A capability becomes part of the reusable platform after repeated use demonstrates a stable pattern. The platform will be extracted from working products; the first product will not be forced to validate an imagined platform.

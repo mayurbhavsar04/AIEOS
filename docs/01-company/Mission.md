@@ -3,14 +3,14 @@ title: Mission
 version: 1.0
 status: Draft
 owner: Founding Team
-last_updated: 2026-07-17
+last_updated: 2026-07-20
 ---
 
 # Mission
 
 ## Company mission
 
-AEOS will build and validate reliable autonomous AI Employees that own well-defined business workflows and deliver measurable outcomes under explicit human-governed constraints.
+AIEOS will build and validate reliable autonomous AI Employees that own well-defined business workflows and deliver measurable outcomes under explicit human-governed constraints.
 
 We will advance this mission by operating the first AI Employee ourselves, learning from real failures and results, and turning proven patterns into a reusable platform. AI will perform probabilistic reasoning and content generation; deterministic software will enforce permissions, workflow state, validations, safety rules, and business constraints.
 

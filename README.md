@@ -1,6 +1,6 @@
-# AEOS
+# AIEOS
 
-AEOS (AI Employee Operating System) is a platform for building reliable autonomous AI Employees. It is intended to support specialized employees across business functions such as content operations, marketing, sales, restaurant operations, and customer support.
+AIEOS (AI Employee Operating System) is a platform for building reliable autonomous AI Employees. It is intended to support specialized employees across business functions such as content operations, marketing, sales, restaurant operations, and customer support.
 
 > **Project status:** Pre-execution / Sprint 0. The repository currently defines the company and product foundations; implementation has not started.
 
@@ -8,7 +8,7 @@ AEOS (AI Employee Operating System) is a platform for building reliable autonomo
 
 Generative AI can produce useful reasoning and content, but an AI Employee must do more than generate an answer. It must pursue a business outcome repeatedly, operate within explicit permissions, validate its work, recover from failures, and make its performance understandable to people.
 
-AEOS addresses that gap by combining probabilistic AI capabilities with deterministic controls. AI will handle tasks such as reasoning and content generation. Software will enforce workflow state, permissions, validations, safety rules, and business constraints.
+AIEOS addresses that gap by combining probabilistic AI capabilities with deterministic controls. AI will handle tasks such as reasoning and content generation. Software will enforce workflow state, permissions, validations, safety rules, and business constraints.
 
 ## Initial product
 
@@ -18,7 +18,7 @@ The intended publishing workflow will become fully autonomous while maintaining 
 
 ## Long-term direction
 
-The YouTube Employee is the starting point, not the limit of AEOS. The platform is expected to grow around reusable agents, skills, workflows, memory, tools, analytics, and provider-independent AI capabilities. Each addition must follow demonstrated product needs rather than speculative platform design.
+The YouTube Employee is the starting point, not the limit of AIEOS. The platform is expected to grow around reusable agents, skills, workflows, memory, tools, analytics, and provider-independent AI capabilities. Each addition must follow demonstrated product needs rather than speculative platform design.
 
 ## Repository scope
 
@@ -35,8 +35,8 @@ This engineering repository will serve as the source of truth for:
 | Stage | Focus | Status |
 | --- | --- | --- |
 | Milestone 1 | Company foundation: vision, mission, values, and product strategy | Draft |
-| Milestone 2 | Product requirements and operating model | Planned |
-| Milestone 3 | Architecture, standards, APIs, and data design | Planned |
+| Milestone 2 | Engineering handbook and operating standards | Draft |
+| Milestone 3 | Architecture, ADRs, APIs, and data design | Planned |
 | Milestone 4 | Delivery roadmap, runbooks, and implementation | Planned |
 
 The sequence may change as internal operation produces evidence. Reliability and measurable outcomes take priority over completing a predetermined feature list.
@@ -48,3 +48,15 @@ The sequence may change as internal operation produces evidence. Reliability and
 - [Mission](docs/01-company/Mission.md)
 - [Values](docs/01-company/Values.md)
 - [Product strategy](docs/01-company/ProductStrategy.md)
+
+## Engineering handbook
+
+- [Handbook overview](docs/02-engineering-handbook/README.md)
+- [Engineering principles](docs/02-engineering-handbook/Principles.md)
+- [Coding standards](docs/02-engineering-handbook/CodingStandards.md)
+- [Prompt standards](docs/02-engineering-handbook/PromptStandards.md)
+- [Git workflow](docs/02-engineering-handbook/GitWorkflow.md)
+- [Security](docs/02-engineering-handbook/Security.md)
+- [Testing](docs/02-engineering-handbook/Testing.md)
+- [Observability](docs/02-engineering-handbook/Observability.md)
+- [Deployment](docs/02-engineering-handbook/Deployment.md)

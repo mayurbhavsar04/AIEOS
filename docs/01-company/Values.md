@@ -3,12 +3,12 @@ title: Values
 version: 1.0
 status: Draft
 owner: Founding Team
-last_updated: 2026-07-17
+last_updated: 2026-07-20
 ---
 
 # Values
 
-These values are decision rules for how AEOS builds and operates AI Employees. Each value is actionable: expected behaviours show what it requires, and warning signs identify conduct that should trigger correction.
+These values are decision rules for how AIEOS builds and operates AI Employees. Each value is actionable: expected behaviours show what it requires, and warning signs identify conduct that should trigger correction.
 
 ## 1. Responsible autonomy
 
