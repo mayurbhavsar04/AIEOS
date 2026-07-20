@@ -36,8 +36,10 @@ This engineering repository will serve as the source of truth for:
 | --- | --- | --- |
 | Milestone 1 | Company foundation: vision, mission, values, and product strategy | Draft |
 | Milestone 2 | Engineering handbook and operating standards | Draft |
-| Milestone 3 | Architecture, ADRs, APIs, and data design | Planned |
-| Milestone 4 | Delivery roadmap, runbooks, and implementation | Planned |
+| Milestone 3A | Platform blueprint and system architecture | Draft |
+| Milestone 3B | Detailed architecture and ADRs | Planned |
+| Milestone 4 | APIs and data design | Planned |
+| Milestone 5 | Delivery roadmap, runbooks, and implementation | Planned |
 
 The sequence may change as internal operation produces evidence. Reliability and measurable outcomes take priority over completing a predetermined feature list.
 
@@ -60,3 +62,9 @@ The sequence may change as internal operation produces evidence. Reliability and
 - [Testing](docs/02-engineering-handbook/Testing.md)
 - [Observability](docs/02-engineering-handbook/Observability.md)
 - [Deployment](docs/02-engineering-handbook/Deployment.md)
+
+## Architecture
+
+- [Architecture overview](docs/03-architecture/README.md)
+- [Engineering blueprint](docs/03-architecture/EngineeringBlueprint.md)
+- [System architecture](docs/03-architecture/SystemArchitecture.md)
