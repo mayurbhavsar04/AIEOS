@@ -151,11 +151,13 @@ Workflow states are **Created**, **Running**, **Waiting**, **Paused**, **Retryin
 
 ## 11. Workflow-Step Lifecycle
 
-Workflow-step states are **Pending**, **Ready**, **Dispatched**, **Running**, **Waiting**, **Retrying**, **Succeeded**, **Failed**, **TimedOut**, **Cancelled**, **Skipped**, and **Compensated**. The Workflow Engine owns step state. Succeeded, Failed, TimedOut, Cancelled, Skipped, and Compensated are terminal for one step attempt or disposition; a new attempt MUST have a distinct Execution ID.
+Workflow-step states are **Pending**, **Ready**, **Dispatched**, **Running**, **Waiting**, **Retrying**, **Succeeded**, **Failed**, **TimedOut**, **Cancelled**, **Skipped**, and **Compensated**. The Workflow Engine owns step state and evaluates every normalized execution-attempt outcome against the approved retry policy. When an attempt fails or times out and another attempt is permitted, the Workflow Engine transitions the step from Running to Retrying and creates a distinct new attempt before returning the step to Dispatched. When retry is not permitted, the Workflow Engine transitions the step to Failed or TimedOut. Succeeded, Failed, TimedOut, Cancelled, Skipped, and Compensated are terminal step dispositions only after the Workflow Engine determines that no further transition is allowed.
+
+A Workflow step MUST NOT reuse or revive a failed or timed-out attempt. Every retry MUST create a new Execution ID and a monotonically increasing attempt number within the Workflow-step execution context. Correlation ID and Workflow ID MUST remain stable across retries. Causation ID MUST identify the Event or decision that created the new attempt. Prior failed and timed-out attempts remain immutable and auditable.
 
 ## 12. Skill Execution-Attempt Lifecycle
 
-Attempt states are **Requested**, **Resolved**, **Validating**, **Ready**, **Executing**, **Succeeded**, **Failed**, **TimedOut**, and **Cancelled**. The Skill Registry resolves approved identity, version, contracts, Capabilities, and allowed Tools. The Skill Runtime owns attempt state, validates input before execution, and SHALL produce either a normalized success or normalized failure. Partial internal failure MUST NOT be reported as success.
+Attempt states are **Requested**, **Resolved**, **Validating**, **Ready**, **Executing**, **Succeeded**, **Failed**, **TimedOut**, and **Cancelled**. **Succeeded**, **Failed**, **TimedOut**, and **Cancelled** are terminal attempt states. A terminal attempt MUST NOT transition to Retrying or be revived. The Skill Registry resolves approved identity, version, contracts, Capabilities, and allowed Tools. The Skill Runtime owns attempt state, validates input before execution, and SHALL produce either a normalized success or normalized failure. Partial internal failure MUST NOT be reported as success. Retry is a Workflow-step decision that creates a distinct execution attempt; it is not an execution-attempt state transition.
 
 ## 13. Capability Invocation
 
@@ -209,7 +211,7 @@ Retry decision ownership is not the same as retry-safe execution ownership.
 | **Infrastructure** | MAY redeliver messages but MUST NOT make Workflow-level retry decisions. |
 | **Calling client or ingress boundary** | Owns a new or repeated client request under its contract. |
 
-Nested retry amplification MUST be prevented. Every retry SHALL be bounded. Exhaustion SHALL produce a normalized failure.
+Nested retry amplification MUST be prevented. Every retry SHALL be bounded. Exhaustion SHALL produce a normalized failure. A failed or timed-out attempt remains terminal and immutable; the Workflow Engine represents an approved retry by transitioning the Workflow step to Retrying and creating a new attempt with a new Execution ID and attempt number.
 
 ## 19. Idempotency
 
@@ -270,6 +272,10 @@ No diagram may show Commands passing through the Event Bus.
 - [ ] Skills do not orchestrate Skills or directly access AI providers.
 - [ ] Workflow Engine owns orchestration, durable state, and retry decisions.
 - [ ] Skill Runtime owns execution-attempt state and retry-safe execution only.
+- [ ] Failed and timed-out execution attempts are terminal and never transition to Retrying.
+- [ ] Workflow-step retryability is evaluated only by the Workflow Engine after a normalized attempt outcome.
+- [ ] Every retry creates a distinct Execution ID with a monotonically increasing attempt number while preserving Correlation ID and Workflow ID and recording the creating decision through Causation ID.
+- [ ] Prior failed and timed-out attempts remain immutable and auditable.
 - [ ] AI Gateway owns provider interaction.
 - [ ] Event Bus transports Events only.
 - [ ] Commands and Events are distinct.
