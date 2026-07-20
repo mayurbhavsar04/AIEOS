@@ -16,6 +16,16 @@ An ES exists to prevent implementation from becoming an unreviewed architecture 
 
 Codex implements approved Engineering Specifications. Codex does not invent architecture. When a specification is incomplete, ambiguous, or inconsistent with approved architecture, Codex MUST stop and request clarification rather than silently choose a new design.
 
+## Related Documents
+
+| Relationship | Document |
+| --- | --- |
+| **Company Foundation** | [Company Foundation](../01-company/README.md) |
+| **Engineering Governance** | [Engineering Handbook](../02-engineering-handbook/README.md) |
+| **Architecture** | [Architecture v1.0](../03-architecture/README.md) |
+| **First Specification** | [ES-001 — Execution Core](ES-001-Execution-Core.md) |
+| **Related Pull Request** | [PR #3 — Establish Engineering Specification process](https://github.com/mayurbhavsar04/AIEOS/pull/3) |
+
 ## Engineering Lifecycle
 
 Every material engineering change SHALL follow this lifecycle:
@@ -105,6 +115,33 @@ ES-001-Execution-Core.md
 
 Identifiers MUST NOT be reused, renumbered, or reassigned after publication. A replacement ES receives a new identifier and references the superseded specification.
 
+## Required Document Relationships
+
+Every ES SHALL include a **Related Documents** section near its metadata. The section SHALL identify:
+
+- **PRD:** the Product Requirement that authorizes the work;
+- **Architecture:** the approved architecture documents that constrain the work;
+- **ADRs:** accepted or required Architecture Decision Records;
+- **Future Specifications:** known specifications that will extend, implement, or supersede the ES; and
+- **Related Pull Requests:** Pull Requests that establish, revise, implement, or validate the ES.
+
+Each relationship MUST use a stable repository link or Pull Request URL when the artifact exists. If it does not yet exist, the ES MUST say `Pending` or `None` and explain the expected relationship. An ES MUST NOT invent a document identifier, approval, or link to make the section appear complete.
+
+Traceability SHALL be updated when a related artifact is created, replaced, archived, or materially changed.
+
+## Required Version History
+
+Every ES SHALL include a **Version History** section near its Related Documents section. The history SHALL contain:
+
+| Field | Requirement |
+| --- | --- |
+| **Version** | The document version affected by the recorded change. |
+| **Date** | The change date in `YYYY-MM-DD` format. |
+| **Author** | The accountable authoring role or person. |
+| **Notes** | A concise description of the material change. |
+
+The first row SHALL record the initial version. Later rows SHALL preserve earlier history and record material scope, constraint, ownership, acceptance-criteria, or status changes. Editorial corrections MAY remain within the current version when they do not change meaning.
+
 ## Repository Structure
 
 Engineering Specifications live in one version-controlled directory:
@@ -159,5 +196,11 @@ Once architecture is approved, implementation SHALL treat it as fixed. A materia
 | Specification | Title | Status |
 | --- | --- | --- |
 | [ES-001](ES-001-Execution-Core.md) | Execution Core | Draft |
+
+## Version History
+
+| Version | Date | Author | Notes |
+| --- | --- | --- | --- |
+| 1.0 | 2026-07-20 | Founding Team | Initial ES process, including mandatory traceability and specification version history. |
 
 Return to the [repository overview](../../README.md), [Engineering Handbook](../02-engineering-handbook/README.md), or [Architecture](../03-architecture/README.md).
