@@ -104,7 +104,7 @@ flowchart TB
     WS["Workspace"]
     MGR["Manager"]
     WF["Workflow Engine"]
-    SX["Skill Execution"]
+    SX["Skill Runtime"]
     SCH["Scheduler"]
     EB["Event Bus"]
     SR["Skill Registry"]
@@ -116,6 +116,7 @@ flowchart TB
     CFG["Configuration"]
     LOG["Logging"]
     EXT["External AI Providers"]
+    TOOL["Controlled Tools"]
     API["Third-party APIs"]
     STORE["Durable Storage"]
 
@@ -128,14 +129,15 @@ flowchart TB
     WF --> SX
     SX --> SR
     SX --> CR
-    CR --> AI
     SX --> AI
     AI --> EXT
     WF --> EB
+    SX --> EB
     SCH --> WF
     EB --> AN
     EB --> NOT
-    SX --> API
+    SX --> TOOL
+    TOOL --> API
     MEM --> STORE
     WF --> STORE
     AN --> STORE
@@ -144,15 +146,17 @@ flowchart TB
     CFG -.-> AUTH
     CFG -.-> MGR
     CFG -.-> WF
+    CFG -.-> SX
     CFG -.-> AI
     AUTH -.-> LOG
     MGR -.-> LOG
     WF -.-> LOG
+    SX -.-> LOG
     AI -.-> LOG
     NOT -.-> LOG
 ```
 
-Solid lines represent primary commands or data access. Dotted lines represent configuration or telemetry relationships. The diagram shows logical relationships, not deployment units or direct database permissions.
+Solid lines represent primary commands, events, or controlled data access. Dotted lines represent configuration or telemetry relationships. The Workflow Engine dispatches tasks and owns orchestration state; the Skill Runtime resolves approved Skill metadata, enforces the permitted execution context, and performs the task. The Skill Registry remains a catalog and does not execute Skills. The diagram shows logical relationships, not deployment units or direct database permissions.
 
 ## Communication model
 
@@ -170,9 +174,9 @@ Events support workflow progression, analytics, notification, audit, and extensi
 
 ### Asynchronous workflows and long-running jobs
 
-Media generation, research, review, publication, and analytics collection may outlive a user request or runtime process. The Workflow Engine persists state before dispatch, correlates attempts, records checkpoints, and progresses from validated results or events. Clients observe durable state instead of holding connections open indefinitely.
+Media generation, research, review, publication, and analytics collection may outlive a user request or process. The Workflow Engine persists state and dispatches a correlated task execution command to the Skill Runtime. The Skill Runtime resolves the approved Skill definition, enforces allowed capabilities and Tools, validates inputs and outputs, and publishes task lifecycle events. The Workflow Engine progresses durable state only from validated results or events. Clients observe durable state instead of holding connections open indefinitely.
 
-Each task defines timeout, retry eligibility, maximum attempts, idempotency behavior, and terminal outcomes. Expensive completed work is referenced from a checkpoint rather than regenerated after unrelated failure.
+Each task defines timeout, retry eligibility, maximum attempts, idempotency behavior, and terminal outcomes. The Skill Runtime applies timeout, cancellation, correlation, and retry-safe execution within an attempt; the Workflow Engine owns retry decisions and workflow state. Expensive completed work is referenced from a checkpoint rather than regenerated after unrelated failure.
 
 ### Failure recovery
 
@@ -188,8 +192,11 @@ sequenceDiagram
     participant App as Application
     participant Manager
     participant Workflow as Workflow Engine
-    participant Skill as Skill Runtime
-    participant Gateway as AI Gateway or Tool
+    participant Runtime as Skill Runtime
+    participant Registry as Skill Registry
+    participant Capability as Capability Registry
+    participant Gateway as AI Gateway
+    participant Tools as Controlled Tools
     participant Bus as Event Bus
     participant Analytics
     participant Notify as Notification
@@ -198,10 +205,21 @@ sequenceDiagram
     App->>Manager: Submit authenticated command
     Manager->>Workflow: Start or resume approved workflow
     Workflow-->>Bus: WorkflowStarted
-    Workflow->>Skill: Execute versioned task
-    Skill->>Gateway: Request approved capability or effect
-    Gateway-->>Skill: Validated result or typed failure
-    Skill-->>Bus: TaskCompleted or TaskFailed
+    Workflow->>Runtime: Dispatch correlated task execution command
+    Runtime->>Registry: Resolve approved Skill definition and contract
+    Registry-->>Runtime: Versioned metadata, capabilities, and allowed Tools
+    Runtime->>Runtime: Validate input and restrict execution context
+    alt AI capability required
+        Runtime->>Capability: Resolve approved capability implementation
+        Capability-->>Runtime: Eligible capability route or unavailable result
+        Runtime->>Gateway: Invoke approved AI capability
+        Gateway-->>Runtime: Validated result or typed failure
+    else Controlled Tool required
+        Runtime->>Tools: Invoke allowed Tool with validated input
+        Tools-->>Runtime: Validated result or typed failure
+    end
+    Runtime->>Runtime: Validate output and execution limits
+    Runtime-->>Bus: TaskCompleted, TaskFailed, TaskTimedOut, or TaskCancelled
     Bus-->>Workflow: Deliver task event
     Workflow->>Workflow: Persist transition and checkpoint
     Bus-->>Analytics: Record operational and cost signals

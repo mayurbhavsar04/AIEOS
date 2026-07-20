@@ -104,11 +104,11 @@ The following are logical services. Version 1 does not require separate deployme
 
 ### Workflow Engine
 
-- **Responsibility:** Execute versioned workflow definitions; persist state, transitions, checkpoints, attempts, timeouts, cancellation, and compensation.
+- **Responsibility:** Orchestrate versioned workflow definitions; own durable workflow state, transitions, checkpoints, retry decisions, cancellation, and compensation.
 - **Inputs:** Start, pause, resume, cancel, and transition commands; events; workflow definitions; validated task results.
-- **Outputs:** Task commands, state and lifecycle events, checkpoint records, typed failures.
-- **Dependencies:** Event Bus, Scheduler, Skill Registry, Configuration, Logging.
-- **Must never:** Embed domain content generation, infer permissions from prompts, or report completion before required durable effects are confirmed.
+- **Outputs:** Task execution commands to Skill Runtime, state and workflow lifecycle events, checkpoint records, typed failures.
+- **Dependencies:** Skill Runtime, Event Bus, Scheduler, Configuration, Logging.
+- **Must never:** Execute Skills, call the AI Gateway or Tools directly, embed domain content generation, infer permissions from prompts, or report completion before required durable effects are confirmed.
 
 ### Capability Registry
 
@@ -124,7 +124,17 @@ The following are logical services. Version 1 does not require separate deployme
 - **Inputs:** Skill definitions, versions, evaluation status, lifecycle changes.
 - **Outputs:** Resolved skill definition, contract metadata, compatibility and availability events.
 - **Dependencies:** Capability Registry, Configuration, Logging.
-- **Must never:** Store workflow instance state, execute arbitrary unregistered code, or let a skill expand its own permissions.
+- **Must never:** Execute Skills, store workflow instance state, dispatch tasks, or let a Skill expand its own permissions. It owns metadata and catalog lifecycle only.
+
+### Skill Runtime
+
+- **Responsibility:** Execute versioned Skills within a restricted execution context while enforcing their approved contracts, capabilities, Tools, limits, and correlation requirements.
+- **Inputs:** Task execution commands from the Workflow Engine; approved Skill identifier and version; validated task input; execution policy; timeout, cancellation, idempotency, and correlation context.
+- **Outputs:** Typed Skill results or failures; validated output; usage and correlation metadata; task started, completed, failed, timed-out, and cancelled lifecycle events.
+- **Dependencies:** Skill Registry, Capability Registry, AI Gateway, Event Bus, Configuration, Logging, and controlled Tools.
+- **Must never:** Define workflow order or durable workflow state, change retry policy, execute an unapproved Skill version, expand a Skill's permissions, invoke undeclared capabilities or Tools, bypass input or output validation, expose credentials, or bypass platform authorization and safety controls.
+
+The Skill Runtime resolves the approved definition from the Skill Registry before execution, validates inputs against that definition, and constrains the execution context to declared capabilities and Tools. It invokes the AI Gateway or controlled third-party Tools as permitted, validates the result, and publishes correlated task lifecycle events. Timeout, cancellation, and retry-safe behavior apply at the execution-attempt boundary; the Workflow Engine remains responsible for workflow-level retry decisions and state transitions.
 
 ### AI Gateway
 
