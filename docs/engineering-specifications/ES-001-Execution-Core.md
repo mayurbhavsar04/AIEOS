@@ -23,6 +23,22 @@ last_updated: 2026-07-20
 | **Depends On** | [Milestone 3A Engineering Blueprint](../03-architecture/EngineeringBlueprint.md) and [System Architecture](../03-architecture/SystemArchitecture.md) |
 | **Architecture Status** | Milestone 3A Architecture v1.0 baseline; approval required before this ES advances to Approved |
 
+## Related Documents
+
+| Relationship | Artifact |
+| --- | --- |
+| **PRD** | Pending — no approved PRD exists for Milestone 3B; ES-001 remains documentation-only and MUST NOT authorize product implementation. |
+| **Architecture** | [Milestone 3A Engineering Blueprint](../03-architecture/EngineeringBlueprint.md) and [System Architecture](../03-architecture/SystemArchitecture.md) |
+| **ADRs** | Pending — Milestone 3B SHALL create only the ADRs required by the execution-core documentation. |
+| **Future Specifications** | Pending — a separately approved ES SHALL define any implementation work. No identifier has been assigned. |
+| **Related Pull Requests** | [PR #2 — AIEOS Platform Blueprint](https://github.com/mayurbhavsar04/AIEOS/pull/2) and [PR #3 — Engineering Specification process](https://github.com/mayurbhavsar04/AIEOS/pull/3) |
+
+## Version History
+
+| Version | Date | Author | Notes |
+| --- | --- | --- | --- |
+| 1.0 | 2026-07-20 | CTO / Architect | Initial version defining the Milestone 3B Execution Core documentation specification. |
+
 ## Objective
 
 Milestone 3B SHALL define the execution backbone of AIEOS at documentation level. It SHALL convert the approved Milestone 3A component boundaries into implementation-ready component contracts, shared execution standards, and Architecture Decision Records (ADRs).
