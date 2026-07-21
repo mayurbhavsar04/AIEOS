@@ -80,7 +80,7 @@ Deferred choices MUST NOT be inferred from diagrams or examples.
 
 The canonical domain reference SHALL define exactly one preferred meaning for:
 
-`Request`, `Manager`, `Workflow Definition`, `Workflow Instance`, `Workflow Step`, `Command`, `Event`, `Skill`, `Skill Version`, `Skill Runtime`, `Execution Attempt`, `Capability`, `Capability Contract`, `AI Gateway`, `Provider Adapter`, `AI Provider`, `Artifact`, `Memory`, `Context`, `Session`, `User`, `Tenant`, `Workspace`, `Human Approval`, and `Policy`.
+`Request`, `Manager`, `Workflow Definition`, `Workflow Instance`, `Workflow Step`, `Command`, `Event`, `Skill`, `Skill Version`, `Skill Runtime`, `Execution Attempt`, `Capability`, `Capability Contract`, `AI Gateway`, `Provider Adapter`, `AI Provider`, `AI Invocation`, `Artifact`, `Memory`, `Context`, `Session`, `User`, `Tenant`, `Workspace`, `Human Approval`, `Policy`, and `Policy Version`.
 
 Each entry SHALL state its classification, owner, identity where applicable, lifecycle where applicable, relationships, and material invariants. The reference SHALL list prohibited or ambiguous synonyms and prescribe replacements.
 
@@ -120,22 +120,34 @@ The reference SHALL define these typed identities and value objects:
 - `RequestId`
 - `WorkflowId`
 - `WorkflowDefinitionId`
+- `WorkflowDefinitionVersionId`
 - `WorkflowStepId`
 - `ExecutionId`
 - `AttemptNumber`
+- `AIInvocationId`
 - `CommandId`
 - `EventId`
 - `SkillId`
 - `SkillVersionId`
 - `CapabilityId`
+- `CapabilityContractVersionId`
+- `MemoryId`
 - `ArtifactId`
 - `SessionId`
+- `UserId`
+- `HumanApprovalId`
+- `PolicyId`
+- `PolicyVersionId`
 - `TenantId`
 - `WorkspaceId`
 - `CorrelationId`
 - `CausationId`
 
-Identifiers MUST be opaque and stable within their defined scope. `AttemptNumber` SHALL increase monotonically within a Workflow-step execution context and MUST NOT replace `ExecutionId`. `CorrelationId` SHALL remain stable across one Workflow's work. `CausationId` SHALL identify the Command, Event, or recorded decision that directly caused the new record or transition.
+Identifiers MUST be opaque, immutable, and stable within their defined scope. The canonical reference SHALL state each identifier's owner, scope, creation point, stability, lifecycle, and Tenant or Workspace relationship where applicable. No identifier may be reused for a replacement object or encode membership ambiguously.
+
+`AttemptNumber` SHALL increase monotonically within a Workflow-step execution context and MUST NOT replace `ExecutionId`. `CorrelationId` SHALL remain stable across one Workflow's work. `CausationId` SHALL identify the Command, Event, or recorded decision that directly caused the new record or transition.
+
+`UserId` SHALL remain stable across Sessions and distinct from membership and service identities. `HumanApprovalId` SHALL identify one approval lifecycle; waiting and resume preserve it, while reissue after a terminal approval creates a new ID. `PolicyId` SHALL remain stable across immutable revisions identified by `PolicyVersionId`, and executions or decisions SHALL reference the exact applied version. `AIInvocationId` SHALL identify one provider-independent invocation inside one Execution Attempt; bounded provider transport retries remain within it, while child provider-attempt identity remains deferred.
 
 ## 8. Commands and Events
 
@@ -144,6 +156,8 @@ Commands SHALL be directed, imperative requests named with a verb and domain obj
 Events SHALL be immutable past-tense facts named with a domain object and outcome, for example `WorkflowStarted`, `ExecutionAttemptFailed`, `HumanApprovalGranted`, and `ArtifactPublished`.
 
 Every Command SHALL have one accountable target and owner. Every Event SHALL have one authoritative producer. Commands MUST NOT pass through the Event Bus. Events SHALL be published through the Event Bus and MUST NOT disguise an instruction to a named consumer.
+
+`AcceptRequest` SHALL target Manager only. Manager owns Request interpretation and acceptance or rejection, and MAY subsequently issue the distinct `StartWorkflow` Command to Workflow Engine. Manager SHALL be the sole authoritative producer of `RequestRejected`; Workflow-level rejection or failure SHALL use distinct Workflow Event names after Workflow ownership begins.
 
 ES-003 SHALL define names and ownership only. Complete envelopes remain deferred.
 

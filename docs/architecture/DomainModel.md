@@ -44,9 +44,9 @@ An Aggregate is not a service, process, table, or deployment unit. A component m
 
 | Term | Classification | Canonical definition and owner |
 | --- | --- | --- |
-| **Request** | Entity | Caller intent accepted at the platform boundary and tracked independently from Workflow state. Its ingress owner is defined by the calling contract; Manager coordinates interpretation. |
+| **Request** | Entity | Caller intent submitted at the platform boundary and tracked independently from Workflow state. Manager owns interpretation and acceptance or rejection; an accepted Request may cause a distinct `StartWorkflow` Command. |
 | **Manager** | Platform component | Interprets goals, initiates approved Workflows, manages interaction, and presents outcomes. It does not execute Skills or own Workflow state. |
-| **Workflow Definition** | Entity, versioned definition | Immutable-at-version description of ordered and conditional work. Workflow Engine governs use and compatibility. |
+| **Workflow Definition** | Aggregate Root, Entity | Stable logical definition identified by `WorkflowDefinitionId` and composed of immutable versions identified by `WorkflowDefinitionVersionId`. Workflow Engine governs use and compatibility. |
 | **Workflow Instance** | Aggregate Root, Entity | One durable execution of a specific Workflow Definition version. Workflow Engine is its sole state owner. |
 | **Workflow Step** | Entity inside Workflow Aggregate | One defined unit of orchestration within a Workflow Instance. Workflow Engine owns its state and disposition. |
 | **Command** | Immutable directed message record | A request for one accountable target to perform an action. It may be accepted or rejected and never passes through Event Bus. |
@@ -56,19 +56,21 @@ An Aggregate is not a service, process, table, or deployment unit. A component m
 | **Skill Runtime** | Platform component | Executes one approved Skill Version inside a restricted, retry-safe attempt boundary. It does not orchestrate Workflows or invent retries. |
 | **Execution Attempt** | Aggregate Root, Entity | One bounded attempt to execute one Workflow Step using one Skill Version. Skill Runtime owns its attempt lifecycle; the completed history is immutable. |
 | **Capability** | Aggregate Root, Entity | Stable provider-neutral identity for an operation available to Skills. Capability Registry owns its catalog lifecycle. |
-| **Capability Contract** | Immutable Value Object | Versioned input, output, constraint, and compatibility definition for a Capability. It contains no product orchestration. |
+| **Capability Contract** | Immutable Value Object | Versioned input, output, constraint, and compatibility definition for a Capability. Its immutable version is identified by `CapabilityContractVersionId`; it contains no product orchestration. |
 | **AI Gateway** | Platform component | The only platform boundary through which AI Providers are selected and accessed; it normalizes requests, results, errors, and usage. |
 | **Provider Adapter** | Boundary adapter | Translates between AI Gateway contracts and one AI Provider's protocol and formats. It owns no business decision. |
 | **AI Provider** | External system | External source of AI capability accessed only through AI Gateway. Its formats and credentials remain outside the domain. |
+| **AI Invocation** | Entity inside Execution Aggregate | One provider-independent AI invocation attempt owned by AI Gateway and identified by `AIInvocationId`. It belongs to one Execution Attempt; bounded provider transport retries remain inside this invocation. |
 | **Artifact** | Aggregate Root, Entity | A Workspace-owned produced or acquired content item or evidence object with identity, provenance, validation, and external-effect lifecycle. It is not Workflow state. |
-| **Memory** | Aggregate Root, Entity | Scoped durable knowledge or operational context with provenance, access, retention, and lifecycle controlled by Memory Service. |
+| **Memory** | Aggregate Root, Entity | Scoped durable knowledge or operational context identified by `MemoryId`, with provenance, access, retention, and lifecycle controlled by Memory Service. |
 | **Context** | Value Object | Immutable-at-dispatch collection of scoped references and constraints supplied for a decision or execution. It is not durable truth by itself. |
 | **Session** | Aggregate Root, Entity | Authentication continuity for an actor across interactions. Authentication owns its lifecycle; a Session does not grant business authority by itself. |
-| **User** | Entity | Human identity capable of authenticated interaction. Permissions remain scoped through Tenant, Workspace, and Policy. |
+| **User** | Entity | Human identity identified by stable `UserId` and capable of authenticated interaction. Sessions and Tenant or Workspace memberships remain separate. |
 | **Tenant** | Aggregate Root, Entity | Top-level future organizational isolation identity. Version 1 retains explicit Tenant scope without exposing multi-tenant SaaS features. |
 | **Workspace** | Aggregate Root, Entity | Resource, membership-reference, Employee, and Policy scope within a Tenant. Workspace component owns its boundary. |
-| **Human Approval** | Entity inside Workflow Aggregate | Auditable human decision requested by a Workflow Step and correlated to the preserved Workflow state. |
-| **Policy** | Versioned Value Object | Deterministic constraints governing allowed actions, providers, Tools, approval, retry, limits, and escalation. Policy cannot grant itself broader authority. |
+| **Human Approval** | Entity inside Workflow Aggregate | One auditable approval-request lifecycle identified by `HumanApprovalId`, requested by a Workflow Step and correlated to preserved Workflow state. |
+| **Policy** | Aggregate Root, Entity | Stable logical policy identified by `PolicyId` and composed of immutable Policy Versions. It governs deterministic constraints for actions, providers, Tools, approval, retry, limits, and escalation. |
+| **Policy Version** | Immutable Entity inside Policy Aggregate | One immutable policy revision identified by `PolicyVersionId`. Executions and decisions reference the exact version applied. |
 
 ## 5. Prohibited or Ambiguous Synonyms
 
@@ -160,25 +162,35 @@ Consistency is enforced inside each Aggregate. Cross-Aggregate progress uses Com
 
 ## 8. Identity Model
 
-| Identity | Identifies | Scope and rule |
-| --- | --- | --- |
-| `RequestId` | Request | Stable for one caller intent record. |
-| `WorkflowId` | Workflow Instance | Stable for the full Workflow lifecycle and all retries. |
-| `WorkflowDefinitionId` | Workflow Definition | Stable identity; a separate version selects immutable definition content. |
-| `WorkflowStepId` | Workflow Step | Unique within its Workflow Instance context. |
-| `ExecutionId` | Execution Attempt | New for every attempt; never reused. |
-| `AttemptNumber` | Attempt ordinal | Value Object increasing monotonically within one Workflow Step. |
-| `CommandId` | Command | Unique for one logical directed request; redelivery retains identity. |
-| `EventId` | Event | Unique immutable fact identity; correction creates a new EventId. |
-| `SkillId` | Skill | Stable across Skill Versions. |
-| `SkillVersionId` | Skill Version | Identifies one immutable-at-version contract and behavior. |
-| `CapabilityId` | Capability | Stable provider-neutral capability identity. |
-| `ArtifactId` | Artifact | Stable across Artifact lifecycle transitions. |
-| `SessionId` | Session | Stable until terminal expiry or revocation. |
-| `TenantId` | Tenant | Required for Tenant-scoped ownership. |
-| `WorkspaceId` | Workspace | Required for Workspace-scoped resources. |
-| `CorrelationId` | Related operation chain | Stable across one Workflow and its retries. |
-| `CausationId` | Immediate cause | Identifies the Command, Event, or recorded decision that triggered a new fact or action. |
+All identifiers are opaque, immutable values. An identifier is never reassigned to a replacement object. Tenant- or Workspace-scoped objects carry the corresponding `TenantId` and `WorkspaceId` as separate scope, never encoded inside another identifier.
+
+| Identity | Identifies and owner | Scope | Creation and stability | Lifecycle and relationships |
+| --- | --- | --- | --- | --- |
+| `RequestId` | One Request; Manager owns acceptance state | Tenant and Workspace when applicable | Created when caller intent is recorded; stable and immutable | Persists through the Request lifecycle and references any authorized Workflow created from it. |
+| `WorkflowId` | One Workflow Instance; Workflow Engine | Tenant and Workspace | Created with the instance; stable and immutable | Persists through the full Workflow lifecycle and every retry. |
+| `WorkflowDefinitionId` | One logical Workflow Definition; Workflow Engine | Platform or Workspace according to registration policy | Created when the logical definition is registered; stable and immutable across versions | Persists while immutable definition versions are added or retired. |
+| `WorkflowDefinitionVersionId` | One immutable Workflow Definition version; Workflow Engine | One `WorkflowDefinitionId` | Created for each approved definition revision; immutable | Every Workflow Instance references the exact version used for its full lifecycle. |
+| `WorkflowStepId` | One Workflow Step; Workflow Engine | Unique within one Workflow Instance | Created with or derived from the versioned Workflow plan; stable and immutable | Persists for the step lifecycle and relates all of its Execution Attempts. |
+| `ExecutionId` | One Execution Attempt; Skill Runtime | One Workflow Step in one Tenant and Workspace | Created by Workflow Engine for every requested attempt; never reused | Terminal attempt history remains immutable; retry creates a new `ExecutionId`. |
+| `AttemptNumber` | Attempt ordinal; Workflow Engine assigns it | One Workflow Step | Created with an Execution Attempt and increases monotonically | Value Object; it never replaces `ExecutionId`. |
+| `AIInvocationId` | One provider-independent AI Invocation; AI Gateway | One Execution Attempt in the same Tenant and Workspace | Created when AI Gateway accepts an invocation; stable and immutable | Bounded provider transport retries and failover remain under this ID. Child provider-attempt identity is deferred; a new logical invocation receives a new ID. |
+| `CommandId` | One logical Command; its accountable target processes it | Dispatch scope | Created when the Command is recorded; stable and immutable | Redelivery retains the same ID; a new logical request receives a new ID. |
+| `EventId` | One Event; authoritative producer | Event stream scope plus Tenant and Workspace when applicable | Created when the fact is recorded; immutable | Correction creates a new Event with a new ID and superseding relationship. |
+| `SkillId` | One logical Skill; Skill Registry | Registry scope | Created at Skill registration; stable across versions | Persists while Skill Versions are added or retired. |
+| `SkillVersionId` | One Skill Version; Skill Registry | One `SkillId` | Created for each immutable approved version; immutable | Executions reference the exact version used. |
+| `CapabilityId` | One logical Capability; Capability Registry | Registry scope | Created at Capability registration; stable across implementations | Persists while contracts and eligible implementations evolve. |
+| `CapabilityContractVersionId` | One Capability Contract version; Capability Registry | One `CapabilityId` | Created for each immutable contract revision; immutable | Skills and implementations reference the exact compatible version. |
+| `MemoryId` | One Memory Aggregate Root; Memory Service | Explicit Tenant and Workspace where applicable | Created with the Memory object; stable and immutable | Persists for that Memory lifecycle and is never reused for replacement Memory. |
+| `ArtifactId` | One Artifact; Workspace component | Exactly one Tenant and Workspace | Created when produced or acquired; stable and immutable | Persists across validation, publication, failure, and archival transitions. |
+| `SessionId` | One Session; Authentication | Actor plus permitted Tenant and Workspace context | Created when the Session is issued; immutable | Stable until terminal expiry or revocation; a new Session receives a new ID. |
+| `UserId` | One User; Authentication identity boundary | Platform identity; memberships separately reference Tenant and Workspace | Created when the User is recognized; stable and immutable across Sessions | Distinct from `SessionId` and service identities; membership is never encoded in it. |
+| `HumanApprovalId` | One Human Approval lifecycle; Workflow Engine | One Workflow Step in one Tenant and Workspace | Created when approval is first requested; stable and immutable | Waiting and resume preserve it. After Granted, Rejected, Expired, or Cancelled, a reissued approval creates a new ID. |
+| `PolicyId` | One logical Policy; Workspace component | Tenant and Workspace | Created when the logical Policy is registered; stable and immutable across versions | Persists while Policy Versions are revised. |
+| `PolicyVersionId` | One Policy Version; Workspace component | One `PolicyId` | Created for every immutable revision; immutable | Commands, executions, approvals, and decisions reference the exact version applied. |
+| `TenantId` | One Tenant; Workspace component | Platform | Created with the Tenant; stable and immutable | Required for Tenant-scoped ownership. |
+| `WorkspaceId` | One Workspace; Workspace component | Exactly one Tenant | Created with the Workspace; stable and immutable | Required for Workspace-scoped resources. |
+| `CorrelationId` | One related operation chain | One Workflow and its retries | Created at correlation ingress or Workflow start; immutable | Remains stable across the Workflow and its retries. |
+| `CausationId` | Immediate cause of a record or transition | One causal edge | Assigned when the caused record is created; immutable | References the Command, Event, or recorded decision that directly caused it. |
 
 ```mermaid
 flowchart LR
@@ -197,7 +209,7 @@ flowchart LR
 
 | Command | Accountable target | Meaning |
 | --- | --- | --- |
-| `AcceptRequest` | Manager or ingress contract owner | Validate whether caller intent may enter goal interpretation. |
+| `AcceptRequest` | Manager | Validate and accept caller intent for goal interpretation. Manager may then issue a distinct `StartWorkflow` Command. |
 | `StartWorkflow` | Workflow Engine | Create a Workflow Instance from an approved definition and context. |
 | `DispatchExecutionAttempt` | Skill Runtime | Execute one specified Skill Version attempt under supplied Policy and Context. |
 | `PauseWorkflow` | Workflow Engine | Request a valid pause transition. |
@@ -213,7 +225,7 @@ Command names use imperative verb + singular domain object. A Command has one ac
 | Event | Authoritative producer | Meaning |
 | --- | --- | --- |
 | `RequestReceived` | Ingress contract owner | Caller intent was recorded. |
-| `RequestRejected` | Ingress contract owner or Manager | Request was rejected under validated rules. |
+| `RequestRejected` | Manager | Request was rejected during Manager-owned interpretation or acceptance. Workflow-level outcomes use distinct Workflow Events. |
 | `WorkflowStarted` | Workflow Engine | Workflow Instance entered Running. |
 | `WorkflowPaused` | Workflow Engine | Persisted Workflow entered Paused. |
 | `WorkflowResumed` | Workflow Engine | Persisted Workflow resumed valid execution. |
@@ -474,7 +486,6 @@ Deferred specifications SHALL define:
 
 - Which future contract coordinates an approved external-effect result with the Workspace-owned Artifact transition?
 - Does a Request remain an ingress-owned Entity or become a dedicated Aggregate when one Request may create multiple Workflow Instances?
-- Which immutable identifier represents an AI Invocation in the shared identity standard?
 - Which Policy categories require independent version identities?
 
 These questions do not change current boundaries. They MUST be resolved by later specifications or an ADR when a frozen boundary would change.
