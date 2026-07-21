@@ -22,9 +22,9 @@ Related sources are [ES-007](../engineering-specifications/ES-007-Error-and-Resu
 
 | Field | Requirement | Rule |
 | --- | --- | --- |
-| `ResultId` | Required | Immutable identity of one outcome record. |
+| `ResultId` | Required | Immutable identity of exactly one acknowledgement, progress, or terminal outcome record. |
 | `ResultStatus` | Required | One canonical status. |
-| `OutcomeCategory` | Required | Acknowledgement, Success, PartialSuccess, Rejection, Failure, Cancellation, or Timeout. |
+| `OutcomeCategory` | Required | Acknowledgement, Progress, Success, PartialSuccess, Rejection, Failure, Cancellation, or Timeout. |
 | `SubjectReference` | Required | Typed reference to the affected operation or subject. |
 | `TenantId` | Required when scoped | Verified scope, never a payload claim. |
 | `WorkspaceId` | Required when scoped | Verified scope consistent with Tenant. |
@@ -36,32 +36,45 @@ Related sources are [ES-007](../engineering-specifications/ES-007-Error-and-Resu
 | `StartedAt` | Conditional | Absent for rejection before execution. |
 | `CompletedAt` | Required when terminal | Time terminal disposition became authoritative. |
 | `ValueReference` | Conditional | Typed value or Artifact reference. |
-| `ErrorId` | Required when unsuccessful | Canonical Error reference. |
+| `ErrorId` | Required for `Rejected`, `Failed`, `Cancelled`, and `TimedOut`; conditional for `PartiallySucceeded` | Canonical Error reference; aggregate partial-success rules apply. |
 | `Warnings` | Optional | Structured non-fatal warnings. |
 | `Metadata` | Optional | Minimized, non-authoritative context. |
 | `ContractVersion` | Required | Result contract interpretation version. |
+| `PredecessorResultId` | Conditional | Previous immutable Result for the same subject. |
+| `ParentResultId` | Conditional | Aggregate or parent Result for child lineage. |
+| `ChildResultReferences` | Required for `PartiallySucceeded` | Complete immutable references to direct child Results. |
+| `DispositionCounts` | Required for `PartiallySucceeded` | `Total`, `Succeeded`, `Failed`, `Cancelled`, `TimedOut`, `Rejected`, and `PartiallySucceeded` counts. |
 
-Identity, subject, producer, scope, lineage, and contract version are immutable. A terminal Result has one terminal status. An unsuccessful terminal Result references one Error. `Succeeded` means all required effects completed and validated. `PartiallySucceeded` exposes every unsuccessful subset. `Accepted` and `InProgress` are non-terminal.
+Identity, subject, producer, scope, lineage, and contract version are immutable. A Result record never changes status. Acknowledgement, optional progress, and terminal completion are separate Results with separate `ResultId` values, joined by stable subject and correlation context plus `PredecessorResultId` where applicable. A terminal Result has one terminal status. `Rejected`, `Failed`, `Cancelled`, and `TimedOut` reference one Error; `PartiallySucceeded` follows its aggregate Error rule. `Succeeded` means all required effects completed and validated. `PartiallySucceeded` exposes every unsuccessful subset. `Accepted` and `InProgress` are non-terminal records, not mutable phases of a terminal Result.
 
-## 3. Result Lifecycle
+## 3. Immutable Result Record Sequence
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Accepted: responsibility accepted
-    Accepted --> InProgress: work starts
-    Accepted --> Cancelled: cancellation completes first
-    Accepted --> TimedOut: boundary expires
-    InProgress --> Succeeded
-    InProgress --> PartiallySucceeded
-    InProgress --> Failed
-    InProgress --> Cancelled
-    InProgress --> TimedOut
-    Succeeded --> [*]
-    PartiallySucceeded --> [*]
-    Failed --> [*]
-    Cancelled --> [*]
-    TimedOut --> [*]
+flowchart LR
+    ACCEPTED["Result A<br/>Accepted / Acknowledgement<br/>immutable"] -->|PredecessorResultId| PROGRESS["Result B<br/>InProgress / Progress<br/>immutable and optional"]
+    ACCEPTED -->|PredecessorResultId when no progress| TERMINAL["Result C<br/>terminal outcome<br/>immutable"]
+    PROGRESS -->|PredecessorResultId| TERMINAL
+    TERMINAL --> SUCCESS["Succeeded / Success"]
+    TERMINAL --> PARTIAL["PartiallySucceeded / PartialSuccess"]
+    TERMINAL --> FAILED["Failed / Failure"]
+    TERMINAL --> CANCELLED["Cancelled / Cancellation"]
+    TERMINAL --> TIMEOUT["TimedOut / Timeout"]
 ```
+
+Each node is a distinct record with a distinct `ResultId`; the arrows express lineage and never mutation.
+
+| `ResultStatus` | Required `OutcomeCategory` |
+| --- | --- |
+| `Accepted` | `Acknowledgement` |
+| `InProgress` | `Progress` |
+| `Succeeded` | `Success` |
+| `PartiallySucceeded` | `PartialSuccess` |
+| `Rejected` | `Rejection` |
+| `Failed` | `Failure` |
+| `Cancelled` | `Cancellation` |
+| `TimedOut` | `Timeout` |
+
+Every other pairing is invalid. Producers MUST reject invalid pairs. `InProgress` is permitted only for interfaces that explicitly support progress.
 
 Rejection precedes execution:
 
@@ -114,7 +127,22 @@ The most specific category applies. Names never include providers, SDK types, pr
 
 ## 6. Retry Classification and New Attempts
 
-Classifications are `NeverRetry`, `Retryable`, `RetryableAfterDelay`, `RetryableAfterCondition`, and `RequiresPolicyEvaluation`. They are evidence, never authority.
+| Classification | Meaning |
+| --- | --- |
+| `NeverRetry` | Repetition under unchanged inputs and policy cannot produce an acceptable outcome. |
+| `Retryable` | Workflow Engine may consider a new attempt immediately. |
+| `RetryableAfterDelay` | Workflow Engine may consider a new attempt only after an approved delay or backoff. |
+| `RetryableAfterCondition` | Workflow Engine may consider a new attempt only after a named observable prerequisite is satisfied. |
+| `RequiresPolicyEvaluation` | The producer cannot safely decide retryability without Workflow Engine policy and context. |
+
+| Severity | Meaning |
+| --- | --- |
+| `Informational` | Limited unsuccessful outcome with no broader integrity, security, or availability impact. |
+| `Warning` | Scoped failure or degradation requiring attention while broader integrity and availability remain intact. |
+| `Error` | Operation cannot complete and requires handling within its scope. |
+| `Critical` | Security, isolation, data-integrity, or sustained-availability risk requiring immediate escalation. |
+
+Severity describes impact; retry classification describes advisory retry evidence. Each Error has exactly one canonical value for each field. Neither field implies the other, and neither grants retry authority. Unknown producer values fail validation; compatible consumers preserve them only under conservative, non-retrying handling.
 
 ```mermaid
 flowchart LR
@@ -189,16 +217,18 @@ Timeout detection belongs to the ES-006 boundary owner. `TimedOut` and `Cancelle
 
 ```mermaid
 flowchart TB
-    AGG["Declared aggregate operation"] --> I1["Item: Succeeded"]
-    AGG --> I2["Item: Failed + ErrorId"]
-    AGG --> I3["Item: Cancelled + ErrorId"]
-    I1 --> SUMMARY["Aggregate: PartiallySucceeded"]
-    I2 --> SUMMARY
-    I3 --> SUMMARY
-    SUMMARY --> AUDIT["Immutable lineage and counts"]
+    AGG["Aggregate Result<br/>PartiallySucceeded"] --> REFS["Complete ChildResultReferences"]
+    REFS --> I1["Child Result: Succeeded"]
+    REFS --> I2["Child Result: Failed + ErrorId"]
+    REFS --> I3["Child Result: Cancelled + ErrorId"]
+    AGG --> COUNTS["DispositionCounts<br/>Total = sum and reference count"]
+    AGG --> TOPERR["Optional aggregate ErrorId<br/>never replaces child Errors"]
+    AGG --> VALUE["Optional ValueReference<br/>successful output only"]
 ```
 
-Partial success is valid only when the contract permits independent item outcomes. It requires at least one success and one unsuccessful child, exposes each disposition, and never claims atomic success. Workflow Engine decides whether failed subsets produce new attempts.
+Partial success is valid only when the contract permits independent item outcomes. It requires at least one success and one unsuccessful child and never claims atomic success. `ChildResultReferences` lists every direct immutable child. `DispositionCounts` contains `Total`, `Succeeded`, `Failed`, `Cancelled`, `TimedOut`, `Rejected`, and `PartiallySucceeded`; `Total` equals both the child-reference count and the sum of dispositions. Nested partial Results count once and are not double-counted.
+
+Every unsuccessful child exposes its own `ErrorId`. A top-level `ErrorId` is optional only when an aggregate-level Error exists; when present it summarizes aggregate impact and links to, but never replaces, child Errors. It is otherwise prohibited. `ValueReference`, metadata, and warnings cannot hide failure. Workflow Engine alone decides whether failed subsets produce new attempts.
 
 ## 10. AI Provider Error Normalization
 
@@ -289,15 +319,16 @@ ES-007 propagates only outcome/error identity, subject, producer, scope, correla
 5. Skill Runtime and Capability Registry never initiate retries.
 6. AI Gateway never creates a Workflow retry.
 7. Acknowledgement is not terminal completion.
-8. Rejection precedes execution; failure follows acceptance.
-9. Manager remains sole authoritative owner of `RequestRejected`.
-10. `CausationId` references Command, Event, or Recorded Decision only; `RequestId` is context.
-11. Event Bus transports Events only.
-12. Results and Errors are not a new transport category.
-13. Partial success never hides unsuccessful subsets.
-14. Provider-specific formats do not escape AI Gateway.
-15. Tenant and Workspace isolation applies to outcomes and cause chains.
-16. Semantic deviations require applicable review and ADR governance.
+8. Acknowledgement, progress, and terminal completion are distinct immutable Results with distinct identities.
+9. Rejection precedes execution; failure follows acceptance.
+10. Manager remains sole authoritative owner of `RequestRejected`.
+11. `CausationId` references Command, Event, or Recorded Decision only; `RequestId` is context.
+12. Event Bus transports Events only.
+13. Results and Errors are not a new transport category.
+14. Partial success never hides unsuccessful subsets and always supplies complete child references and consistent disposition counts.
+15. Provider-specific formats do not escape AI Gateway.
+16. Tenant and Workspace isolation applies to outcomes and cause chains.
+17. Semantic deviations require applicable review and ADR governance.
 
 ## 18. Non-Goals and Review Checklist
 

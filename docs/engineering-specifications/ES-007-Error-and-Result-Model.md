@@ -80,9 +80,9 @@ The canonical Result SHALL contain:
 
 | Field | Requirement | Semantics |
 | --- | --- | --- |
-| `ResultId` | Required | Immutable identity of one terminal or explicitly acknowledged outcome record. |
+| `ResultId` | Required | Immutable identity of exactly one acknowledgement, progress, or terminal outcome record. A later record MUST use a new `ResultId`. |
 | `ResultStatus` | Required | Canonical status defined by this specification. |
-| `OutcomeCategory` | Required | Success, Failure, Rejection, Cancellation, Timeout, PartialSuccess, or Acknowledgement. |
+| `OutcomeCategory` | Required | Success, Failure, Rejection, Cancellation, Timeout, PartialSuccess, Progress, or Acknowledgement. |
 | `SubjectReference` | Required | Typed identity of the Command, operation, Workflow, step, Execution Attempt, AI Invocation, Memory, or Capability operation described. |
 | `TenantId` | Required when scoped | Verified Tenant scope; never inferred from payload. |
 | `WorkspaceId` | Required when scoped | Verified Workspace scope; MUST agree with Tenant scope. |
@@ -94,16 +94,22 @@ The canonical Result SHALL contain:
 | `StartedAt` | Conditional | Start of authoritative work; absent for rejection before work starts. |
 | `CompletedAt` | Required for terminal Result | Time the terminal disposition became authoritative. |
 | `ValueReference` | Conditional | Typed value or Artifact reference for successful content; minimized and scope-safe. |
-| `ErrorId` | Required for unsuccessful terminal Result | Reference to one canonical Error. |
+| `ErrorId` | Required for `Rejected`, `Failed`, `Cancelled`, and `TimedOut`; conditional for `PartiallySucceeded` | Reference to one canonical Error. Partial-success rules define when an aggregate Error is permitted. |
 | `Warnings` | Optional | Non-fatal structured warnings that do not conceal failure. |
 | `Metadata` | Optional | Minimized, non-authoritative context; no secrets or credentials. |
 | `ContractVersion` | Required | Version used to interpret the envelope. |
+| `PredecessorResultId` | Conditional | Immediately preceding Result for the same subject when an acknowledgement or progress record is followed by another immutable Result. |
+| `ParentResultId` | Conditional | Aggregate Result that owns this child Result, or the parent Result for a derived sub-operation. |
+| `ChildResultReferences` | Required for `PartiallySucceeded` | Complete, immutable references to every direct child Result represented by the aggregate disposition. |
+| `DispositionCounts` | Required for `PartiallySucceeded` | Counts for `Total`, `Succeeded`, `Failed`, `Cancelled`, `TimedOut`, `Rejected`, and `PartiallySucceeded`. |
 
 Result invariants:
 
 - `ResultId`, scope, subject, producer, identity lineage, and contract version are immutable after creation.
+- A Result record never changes status. Acknowledgement, optional progress, and terminal completion are distinct immutable Results with distinct `ResultId` values.
+- Results for one subject MAY form a lineage through `PredecessorResultId`; all records retain the same subject and correlation context.
 - A terminal Result has exactly one terminal status.
-- An unsuccessful terminal Result references an Error.
+- A `Rejected`, `Failed`, `Cancelled`, or `TimedOut` Result references an Error. A `PartiallySucceeded` Result follows the aggregate Error rules in Section 10.
 - A successful Result MUST NOT contain a hidden unsuccessful sub-operation unless its status is `PartiallySucceeded`.
 - Acknowledgement MUST NOT be represented as terminal completion.
 - A Result is not a Command or Event and does not create a new transport category.
@@ -124,6 +130,21 @@ Canonical statuses are:
 | `TimedOut` | Yes | The owning timeout boundary declared terminal expiration. |
 
 An asynchronous AI acknowledgement returns `Accepted` with `AIInvocationId`; its later terminal completion is a distinct Result. A synchronous AI operation returns a terminal Result and MUST NOT label it an acknowledgement.
+
+The canonical status-to-category mapping is exhaustive:
+
+| `ResultStatus` | Required `OutcomeCategory` | Validity rule |
+| --- | --- | --- |
+| `Accepted` | `Acknowledgement` | Non-terminal acknowledgement only. |
+| `InProgress` | `Progress` | Non-terminal progress record only when the interface declares progress support. |
+| `Succeeded` | `Success` | Terminal; no unsuccessful child outcome. |
+| `PartiallySucceeded` | `PartialSuccess` | Terminal aggregate with explicit child Results and disposition counts. |
+| `Rejected` | `Rejection` | Terminal; authoritative execution did not begin. |
+| `Failed` | `Failure` | Terminal; accepted execution began and failed. |
+| `Cancelled` | `Cancellation` | Terminal cancellation disposition. |
+| `TimedOut` | `Timeout` | Terminal timeout disposition. |
+
+All other `ResultStatus` and `OutcomeCategory` combinations are invalid and MUST be rejected during contract validation. `Progress` is a canonical category only for `InProgress`; it MUST NOT be used for acknowledgement or completion.
 
 ## 6. Canonical Error Contract
 
@@ -184,11 +205,24 @@ Taxonomy codes MUST remain provider-neutral and stable. Components SHOULD choose
 
 Canonical advisory classifications are:
 
-- `NeverRetry`;
-- `Retryable`;
-- `RetryableAfterDelay`;
-- `RetryableAfterCondition`; and
-- `RequiresPolicyEvaluation`.
+| Classification | Canonical meaning |
+| --- | --- |
+| `NeverRetry` | Repeating the same logical operation under unchanged inputs and policy cannot produce an acceptable outcome. |
+| `Retryable` | A new Workflow attempt may be considered immediately; no minimum delay or external prerequisite is asserted. |
+| `RetryableAfterDelay` | A new Workflow attempt may be considered only after the policy-selected delay or backoff requirement is satisfied. |
+| `RetryableAfterCondition` | A new Workflow attempt may be considered only after a named, observable prerequisite changes or becomes true. |
+| `RequiresPolicyEvaluation` | The producing boundary cannot safely classify retryability without Workflow Engine policy and context; this is not permission to retry. |
+
+Canonical severities are:
+
+| `ErrorSeverity` | Canonical meaning |
+| --- | --- |
+| `Informational` | The unsuccessful outcome is recorded for completeness but does not threaten integrity, security, or availability beyond the affected operation. |
+| `Warning` | The affected operation is unsuccessful or degraded and requires attention, but platform integrity and broader service availability remain intact. |
+| `Error` | The operation cannot complete and requires caller, policy, or operational handling within its current scope. |
+| `Critical` | The failure threatens security, data integrity, isolation, or sustained availability and requires immediate escalation under approved policy. |
+
+`ErrorSeverity` MUST describe impact, not retryability. `RetryClassification` MUST describe retry evidence, not operational urgency. Both fields MUST contain exactly one canonical value. Unknown values MUST fail strict producer validation; a compatible consumer MAY preserve an unknown additive value but MUST normalize handling conservatively without treating it as retry permission. `Critical` MUST NOT imply retry, and `Retryable` MUST NOT reduce severity.
 
 Retry classification is evidence supplied to Workflow Engine policy; it is never authority to retry. Workflow Engine alone decides whether a new Workflow attempt is allowed and creates its new `ExecutionId`, `AttemptNumber`, and logical Command. Skill Runtime and Capability Registry never initiate retries. AI Gateway retry is bounded inside one AI Invocation and one Workflow Execution Attempt. Terminal attempts remain immutable.
 
@@ -204,8 +238,8 @@ If completion and cancellation race, the component that owns the affected lifecy
 
 `PartiallySucceeded` is valid only for a contract that explicitly declares aggregate partial completion. It requires:
 
-- item or sub-operation Results;
-- counts or references proving which parts succeeded, failed, cancelled, or timed out;
+- complete `ChildResultReferences` to immutable direct child Results;
+- `DispositionCounts` containing `Total`, `Succeeded`, `Failed`, `Cancelled`, `TimedOut`, `Rejected`, and `PartiallySucceeded`;
 - at least one success and one unsuccessful outcome;
 - an Error for every unsuccessful subset;
 - no claim that required atomic effects succeeded;
@@ -213,6 +247,17 @@ If completion and cancellation race, the component that owns the affected lifecy
 - Workflow Engine policy evaluation before retrying a failed subset.
 
 Retrying a subset creates new Execution identities where a Workflow retry is involved. A plain `Succeeded` Result MUST NOT hide partial failure.
+
+Partial-success invariants are:
+
+- `Total` MUST equal the number of `ChildResultReferences` and the sum of all disposition counts.
+- `Succeeded` MUST be greater than zero, and the sum of all non-success disposition counts MUST be greater than zero.
+- Every child reference MUST resolve to a terminal Result in the same Tenant and Workspace scope and under the aggregate subject or declared sub-operation lineage.
+- A child `PartiallySucceeded` Result counts once in the aggregate `PartiallySucceeded` disposition; its descendants MUST NOT be double-counted by the parent.
+- `ValueReference` MAY describe only successful aggregate output and MUST NOT contain or conceal child failure data.
+- Every unsuccessful child MUST expose its own `ErrorId` according to its terminal status.
+- The top-level `ErrorId` is optional for `PartiallySucceeded`. When present, it MUST reference an aggregate Error that summarizes aggregate-level impact and links to child Errors without replacing them. It MUST NOT be the only representation of child failures.
+- The top-level `ErrorId` is prohibited when no aggregate-level Error exists; metadata and warnings MUST NOT substitute for child Errors.
 
 ## 11. Rejection Versus Failure
 
@@ -297,7 +342,11 @@ This specification traces to Architecture v1.0, Domain v1.0, and ES-001 through 
 - [ ] Both requested documents exist and follow repository conventions.
 - [ ] Result and Error fields, requiredness, immutability, and invariants are explicit.
 - [ ] Acknowledgement, terminal completion, rejection, failure, cancellation, timeout, and partial success are distinct.
-- [ ] Every unsuccessful terminal Result references a canonical Error.
+- [ ] Acknowledgement, progress, and terminal completion are distinct immutable Results with distinct `ResultId` values and explicit lineage.
+- [ ] Every `ResultStatus` maps to exactly one valid `OutcomeCategory`; invalid combinations are rejected.
+- [ ] Every `Rejected`, `Failed`, `Cancelled`, or `TimedOut` Result references a canonical Error; `PartiallySucceeded` follows its explicit aggregate Error rule.
+- [ ] Every `ErrorSeverity` and `RetryClassification` value has provider-neutral semantics and validation rules; classification remains advisory only.
+- [ ] Partial success exposes complete child Result references, consistent disposition counts, child Errors, and explicit top-level Error rules.
 - [ ] Taxonomy is stable and provider-neutral.
 - [ ] `CausationId` permits only Command, Event, or Recorded Decision; `RequestId` remains context.
 - [ ] Workflow Engine alone owns retry decisions and every Workflow retry creates a new `ExecutionId`.
@@ -308,7 +357,7 @@ This specification traces to Architecture v1.0, Domain v1.0, and ES-001 through 
 - [ ] Result/Error representation does not bypass Command/Event contracts.
 - [ ] Tenant and Workspace isolation and redaction are explicit.
 - [ ] ES-008 is not pre-empted.
-- [ ] All nine Mermaid diagrams match prose and parse.
+- [ ] All Mermaid diagrams match prose and parse.
 - [ ] Relative links resolve and `git diff --check` passes.
 - [ ] Frozen baselines remain unchanged and no ADR is required.
 
