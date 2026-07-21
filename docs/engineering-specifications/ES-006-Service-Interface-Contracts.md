@@ -123,7 +123,7 @@ Skill Runtime MUST NOT independently retry, modify retry policy, choose Workflow
 
 ### 5.4 AI Gateway
 
-The deliverable SHALL define provider-neutral AI invocation acceptance, policy validation, provider/model selection within approved policy, invocation, bounded provider retry or failover, cancellation where contractually supported, normalized result reporting, and usage metadata.
+The deliverable SHALL define provider-neutral AI invocation acceptance, policy validation, provider/model selection within approved policy, invocation, bounded provider retry or failover, cancellation where contractually supported, normalized result reporting, and usage metadata. For an asynchronous binding, acceptance SHALL return an `AIInvocationId` acknowledgement and terminal completion SHALL arrive later through the approved completion contract. For a synchronous binding, the operation SHALL return the terminal normalized outcome and MUST NOT label that outcome an acknowledgement.
 
 `AIInvocationId` SHALL identify one provider-independent invocation. Provider formats and credentials MUST NOT cross the Gateway boundary. Detailed failure taxonomy is deferred to ES-007.
 
@@ -145,13 +145,14 @@ The canonical deliverable SHALL define:
 
 - directed Command dispatch with one accountable target;
 - Event publication through Event Bus only after an authoritative fact exists;
-- abstract synchronous or asynchronous completion semantics without choosing transport;
+- abstract synchronous or asynchronous completion semantics without choosing transport, with acknowledgement kept distinct from terminal completion;
 - immutable propagation of identity, authorization scope, correlation, causation, policy-version, and contract-version context;
 - explicit authority retention or handoff at every boundary;
 - component-local idempotency within the owned effect boundary;
 - cancellation propagation without confusing cancellation with timeout;
 - timeout ownership for ingress, Workflow waiting, Execution Attempt, AI Invocation, and Memory or Capability operation boundaries;
 - Workflow Engine ownership of all Workflow retry decisions;
+- duplicate-safe Capability resolution within one immutable `ExecutionId`, without granting Skill Runtime or Capability Registry authority to create a new Workflow attempt;
 - tenant and Workspace validation at every trust boundary; and
 - compatibility negotiation that fails deliberately rather than weakening semantics.
 
