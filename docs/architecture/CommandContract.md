@@ -39,7 +39,7 @@ The envelope is immutable after creation. Optional means the field MAY be absent
 | `CommandType` | Required | Stable imperative name using verb plus singular domain object, such as `StartWorkflow` or `DispatchExecutionAttempt`. |
 | `CommandVersion` | Required | Version of the complete Command contract: envelope interpretation plus payload schema for this `CommandType`. |
 | `CorrelationId` | Required | Stable identifier for the related operation chain. For Workflow work, it remains stable across the Workflow and its retries. |
-| `CausationId` | Required | Identifier of the Command, Event, Request, or recorded decision that directly caused this Command. It MUST NOT be self-referential. |
+| `CausationId` | Required | Identifier of the Command, Event, or recorded decision that directly caused this Command. It MUST NOT be self-referential. For a request-originated Command, it references the recorded acceptance or dispatch decision; `RequestId` remains separate Request context. |
 | `WorkflowId` | Conditionally required | Required when the Command addresses or results from an existing Workflow Instance; absent when no Workflow exists yet, including an initial `StartWorkflow`. |
 | `WorkflowStepId` | Conditionally required | Required when the Command addresses one Workflow Step. It MUST identify a step in `WorkflowId`. Otherwise absent. |
 | `ExecutionId` | Conditionally required | Required when the Command addresses or creates one Execution Attempt. It MUST identify one attempt for `WorkflowStepId`. Otherwise absent. |
