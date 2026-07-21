@@ -73,13 +73,13 @@ The canonical context SHALL support:
 | `ContractVersion` | Required for the observed contract/interface. |
 | `ObservedAt` | Required timestamp for the observation. |
 | `EnvironmentIdentity`, `DeploymentIdentity` | Required abstract operational identity; MUST NOT imply topology. |
-| `DataClassification`, `RedactionStatus` | Required whenever diagnostic attributes may carry protected data. |
+| `DataClassification`, `RedactionStatus` | Required on every observation. `DataClassification` declares the highest classification represented by the observation; `NonSensitive` is the canonical value when no protected data is present. `RedactionStatus` declares whether redaction was required and applied, using `NotRequired` or `Applied`. These fields MUST NOT be omitted. A producer MUST NOT emit protected data with `NonSensitive` or `NotRequired`. |
 
-Identifiers SHALL retain their frozen meanings. Missing optional identity MUST remain absent rather than fabricated. Context propagation conveys lineage, not authority.
+Identifiers SHALL retain their frozen meanings. Missing optional identity MUST remain absent rather than fabricated. Context propagation conveys lineage, not authority. Producers MUST validate both classification fields before emission. An observation with absent, unknown, or internally inconsistent `DataClassification` or `RedactionStatus` is invalid and MUST NOT be represented as contract-conforming telemetry.
 
 ## 4. Logging Contract
 
-Log records SHALL include immutable record identity, `ObservedAt`, canonical severity, component, operation, context, safe message, machine-readable attributes, and redaction status. When source event time differs, `OccurredAt` MAY be recorded separately.
+Log records SHALL include immutable `LogRecordId`, `ObservedAt`, canonical severity, component, operation, context, safe message, machine-readable attributes, `DataClassification`, and `RedactionStatus`. `LogRecordId` uniquely identifies one logical Log Record within AIEOS, is assigned when that record is created, and MUST remain immutable. It is independent of `ObservedAt`, `OccurredAt`, correlation, causation, component identity, and trace context; those fields describe the record but do not determine its identity. Re-emission creates a new Log Record with a new `LogRecordId` while preserving applicable lineage. When source event time differs, `OccurredAt` MAY be recorded separately.
 
 Canonical severity is exhaustive:
 
@@ -123,7 +123,7 @@ Audit Records differ from:
 - Domain Events, which record authoritative domain facts; and
 - Recorded Decisions, which may cause Commands or Events and are valid causation targets.
 
-An Audit Record observes a decision; it does not become that Recorded Decision. Required security Audit Records MUST NOT be removed by telemetry sampling.
+An Audit Record observes a decision; it does not become that Recorded Decision. Required security Audit Records MUST NOT be removed by telemetry sampling. When approved policy makes an Audit Record mandatory for a governed effect, durable acceptance of that Audit Record is a precondition to authorizing or committing the effect. If acceptance cannot be established, the owning component MUST surface a normalized failure before the effect becomes authoritative and MUST escalate the unavailable mandatory evidence according to approved policy. This rule preserves mandatory audit intent without making observability the owner of business behavior.
 
 ## 8. Operational Signals and Health
 
@@ -166,7 +166,7 @@ Memory telemetry MAY describe operation kind, version conflict, latency, and nor
 
 ## 13. Sampling and Retention
 
-Sampling policy SHALL be explicit, versioned, propagated, and observable. Deterministic sampling SHOULD be preferred for correlated work. Security-critical Audit Records and other policy-required evidence MUST always be captured and MUST NOT be dropped by log or trace sampling.
+Sampling policy SHALL be explicit, versioned, propagated, and observable. Deterministic sampling SHOULD be preferred for correlated work. Security-critical Audit Records and other policy-required evidence MUST always be captured and MUST NOT be dropped by log or trace sampling. "Always captured" means that a policy-mandated Audit Record receives durable acceptance before its governed effect becomes authoritative; it does not promise that an unavailable audit boundary can be ignored or repaired by mutating an already-authoritative outcome.
 
 Retention SHALL follow abstract data-classification, legal, security, minimization, and deletion constraints. ES-008 does not choose durations, tiers, or storage products.
 
@@ -176,7 +176,7 @@ Every observability schema SHALL have stable identity and version. Additive opti
 
 ## 15. Observability Failure Behavior
 
-Telemetry failure MUST NOT silently change a business outcome, create a retry decision, or convert failure to success. Critical Audit Record emission failure SHALL be surfaced according to approved policy; ES-008 does not decide whether business work may proceed. Backpressure/drop policy SHALL prioritize required evidence, bound resource use, expose degraded observability, and prevent recursive failure storms.
+Telemetry failure MUST NOT silently change a business outcome, mutate an already-authoritative Result, create a retry decision, or convert failure to success. For policy-mandated Audit Records, durable acceptance MUST be established before the governed effect is authorized or committed. If acceptance fails, the owning component MUST return or emit the applicable normalized failure before that effect becomes authoritative and MUST surface the audit failure for policy-defined escalation. For non-mandatory telemetry, continuation behavior remains governed by approved policy. ES-008 does not select storage, retry, escalation, or transport implementation and does not grant observability independent business or retry authority. Backpressure/drop policy SHALL prioritize required evidence, bound resource use, expose degraded observability, and prevent recursive failure storms.
 
 ## 16. Required Diagrams
 
@@ -210,6 +210,8 @@ The milestone is accepted only when:
 - [ ] Workflow Engine remains sole retry-decision owner and every retry creates a new `ExecutionId`.
 - [ ] ES-007 types are referenced without redefinition.
 - [ ] severity, health, metric, audit, sampling, security, and failure semantics are testable.
+- [ ] every observation carries valid `DataClassification` and `RedactionStatus`, and every Log Record has immutable `LogRecordId`.
+- [ ] mandatory Audit Record acceptance precedes the governed effect and failure is normalized without mutating authoritative Results or creating retry authority.
 - [ ] Tenant/Workspace isolation and redaction are explicit.
 - [ ] no vendor or implementation choice appears.
 - [ ] all Mermaid diagrams parse, relative links resolve, terminology is consistent, and `git diff --check` passes.

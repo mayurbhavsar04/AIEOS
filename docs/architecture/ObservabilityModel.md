@@ -45,13 +45,13 @@ flowchart LR
 
 ## 3. Canonical Context
 
-Every observation has `ComponentIdentity`, `OperationName`, `ContractVersion`, `ObservedAt`, abstract `EnvironmentIdentity` and `DeploymentIdentity`, plus classification/redaction status. Scoped work requires verified `TenantId` and `WorkspaceId`. `CorrelationId` follows the logical work. `CausationId` references only a Command, Event, or Recorded Decision. `RequestId` remains context only.
+Every observation has `ComponentIdentity`, `OperationName`, `ContractVersion`, `ObservedAt`, abstract `EnvironmentIdentity` and `DeploymentIdentity`, `DataClassification`, and `RedactionStatus`. `DataClassification` declares the highest classification represented by the observation; `NonSensitive` is the canonical value when no protected data is present. `RedactionStatus` declares whether redaction was required and applied, using `NotRequired` or `Applied`. Neither field may be omitted, and a producer may not emit protected data with `NonSensitive` or `NotRequired`. An observation with missing, unknown, or inconsistent classification/redaction metadata is not contract conforming. Scoped work requires verified `TenantId` and `WorkspaceId`. `CorrelationId` follows the logical work. `CausationId` references only a Command, Event, or Recorded Decision. `RequestId` remains context only.
 
 Subject identities are included when applicable: `CommandId`, `EventId`, `WorkflowId`, `WorkflowStepId`, `ExecutionId`, `AIInvocationId`, `ResultId`, and `ErrorId`. Absence is explicit; telemetry never invents identity. Context propagation communicates lineage, never authorization or mutation authority.
 
 ## 4. Logging
 
-Logs are immutable structured observations with safe human message and bounded machine-readable attributes. `ObservedAt` records observation time; optional `OccurredAt` records source occurrence time. Canonical severities are:
+Logs are immutable structured observations with immutable `LogRecordId`, safe human message, and bounded machine-readable attributes. `LogRecordId` uniquely identifies one logical Log Record within AIEOS, is assigned at record creation, and never changes. It is independent of timestamps, correlation, causation, component identity, and trace context. Re-emission creates a new Log Record with a new `LogRecordId` while preserving applicable lineage. Every Log Record also carries `DataClassification` and `RedactionStatus`. `ObservedAt` records observation time; optional `OccurredAt` records source occurrence time. Canonical severities are:
 
 | Severity | Precise meaning |
 | --- | --- |
@@ -181,7 +181,7 @@ flowchart LR
     AUD -.->|"not a Domain Event or Recorded Decision"| EVID
 ```
 
-An Audit Record contains immutable `AuditRecordId`, actor, action, target, verified scope, decision/outcome, policy or authorization reference, correlation and causation, timestamp, required justification, minimized metadata, and optional before/after references. It is tamper-evident at the contract level. Required Audit Records are never removed by telemetry sampling.
+An Audit Record contains immutable `AuditRecordId`, actor, action, target, verified scope, decision/outcome, policy or authorization reference, correlation and causation, timestamp, required justification, minimized metadata, and optional before/after references. It is tamper-evident at the contract level. Required Audit Records are never removed by telemetry sampling. When policy makes an Audit Record mandatory for a governed effect, durable audit acceptance is a precondition to authorizing or committing that effect. If acceptance cannot be established, the owning component surfaces a normalized failure before the effect becomes authoritative and escalates the unavailable evidence according to approved policy. Observability neither invents the business decision nor gains retry authority.
 
 ## 13. Operational Signals and Health
 
@@ -213,7 +213,7 @@ flowchart LR
     CTX -.->|"cannot suppress"| AUD
 ```
 
-Sampling is explicit, versioned, propagated, and observable. Deterministic sampling is preferred for correlated work. Required security evidence is always captured. Retention follows data classification, legal/security constraints, minimization, and deletion requirements; durations and storage tiers remain undecided.
+Sampling is explicit, versioned, propagated, and observable. Deterministic sampling is preferred for correlated work. Required security evidence is always captured: policy-mandated Audit Records receive durable acceptance before their governed effects become authoritative. Failure to obtain acceptance prevents that effect from becoming authoritative rather than permitting evidence loss or later mutation of an authoritative Result. Retention follows data classification, legal/security constraints, minimization, and deletion requirements; durations and storage tiers remain undecided.
 
 ## 15. Cancellation and Timeout
 
@@ -256,7 +256,7 @@ It prohibits secrets, credentials, raw prompts, Memory contents, provider payloa
 
 Observability schemas have stable identity and explicit version. Additive optional fields are compatible when unknown fields are tolerated. Removal, rename, meaning/requiredness changes, severity or health semantic changes, and metric type/unit changes are breaking. Deprecated fields remain interpretable during their declared compatibility window.
 
-Telemetry failure cannot silently change business outcomes or create retry authority. Critical Audit Record failure is surfaced according to approved policy. Backpressure/drop handling prioritizes required evidence, bounds resource use, declares degraded observability, and prevents recursive failure storms.
+Telemetry failure cannot silently change business outcomes, mutate an already-authoritative Result, or create retry authority. For a policy-mandated Audit Record, durable acceptance precedes authorization or commitment of the governed effect. Acceptance failure produces the applicable normalized failure before that effect becomes authoritative and is surfaced for policy-defined escalation. Non-mandatory telemetry continuation remains policy-governed. This model does not prescribe storage, transport, retry, or escalation implementation. Backpressure/drop handling prioritizes required evidence, bounds resource use, declares degraded observability, and prevents recursive failure storms.
 
 ## 19. Architectural Invariants
 
@@ -272,6 +272,8 @@ Telemetry failure cannot silently change business outcomes or create retry autho
 10. Provider-specific formats do not escape AI Gateway.
 11. Tenant/Workspace isolation applies to every observation and access path.
 12. Required Audit Records cannot be dropped by telemetry sampling.
+13. Every observation has valid `DataClassification` and `RedactionStatus`; every Log Record has immutable `LogRecordId`.
+14. A policy-mandated Audit Record is durably accepted before its governed effect becomes authoritative.
 
 ## 20. Extension and Non-Goals
 
