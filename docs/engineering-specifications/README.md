@@ -1,9 +1,9 @@
 ---
 title: Engineering Specifications
-version: 1.0
-status: Draft
+version: 1.1
+status: Approved
 owner: Founding Team
-last_updated: 2026-07-20
+last_updated: 2026-07-21
 ---
 
 # Engineering Specifications
@@ -191,6 +191,10 @@ An implementation MUST NOT alter approved names, boundaries, dependencies, or ow
 
 Once architecture is approved, implementation SHALL treat it as fixed. A material change requires the approved decision process before the implementation continues.
 
+### Domain v1.0 Freeze Governance
+
+Changes to canonical domain concepts, aggregate ownership, identities, commands, events, or invariants require architecture review. Changes that alter established semantics or cross aggregate boundaries must be introduced through an ADR. Editorial clarifications that do not change canonical meaning do not require an ADR but still require normal review.
+
 ## Current Specifications
 
 | Specification | Title | Status |
@@ -201,6 +205,7 @@ Once architecture is approved, implementation SHALL treat it as fixed. A materia
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.1 | 2026-07-21 | Founding Team | Added Domain v1.0 freeze governance following Milestone 3C completion. |
 | 1.0 | 2026-07-20 | Founding Team | Initial ES process, including mandatory traceability and specification version history. |
 
 Return to the [repository overview](../../README.md), [Engineering Handbook](../02-engineering-handbook/README.md), or [Architecture](../03-architecture/README.md).
