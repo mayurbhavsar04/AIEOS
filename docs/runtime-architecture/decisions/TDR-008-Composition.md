@@ -21,4 +21,4 @@ Composition code is verbose but reviewable. Containers hide graphs and add magic
 
 ## Compatibility and revisit
 
-Does not change service ownership. Revisit only if composition complexity remains high after modular factories and generated graph validation.
+Does not change service ownership. Revisit when the validated composition graph exceeds an adopted maintainability threshold (for example repeated wiring defects across releases), startup graph construction misses its objective, or modular factories cannot represent a required approved lifecycle. The runtime owner evaluates defect and startup data; any replacement preserves explicit dependencies, one composition root, deterministic substitution, and no service locator.

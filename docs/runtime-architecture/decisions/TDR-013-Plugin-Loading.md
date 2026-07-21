@@ -21,4 +21,4 @@ Adding extensions requires deployment, which is acceptable initially. Entry-poin
 
 ## Compatibility and revisit
 
-Capability Registry resolves; Skill Runtime executes. Revisit for third-party marketplace, untrusted code, independent deployment, or stronger isolation requirements through ADR/security review.
+Capability Registry resolves; Skill Runtime executes. Revisit only when an approved third-party distribution requirement introduces code outside the trusted deployment boundary, a security assessment requires process isolation, or an extension requires independently governed deployment. Architecture and security owners evaluate the approved use case and threat model through ADR/security review; migration preserves registry resolution, runtime execution ownership, version/permission validation, and deny-by-default loading.

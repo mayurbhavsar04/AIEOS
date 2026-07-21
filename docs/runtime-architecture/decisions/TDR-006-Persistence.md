@@ -21,4 +21,4 @@ Local integration requires a database service and disciplined migrations. SQLite
 
 ## Compatibility and revisit
 
-Domain/contracts remain storage-neutral. Revisit adapters for measured workload, tenancy, availability, or regulatory needs; schema design remains a later phase.
+Domain/contracts remain storage-neutral. Revisit when measured persistence latency/throughput misses an adopted objective after query/schema tuning, tenancy or availability requirements cannot be met by the selected topology, or a documented regulatory constraint requires another storage boundary. The data/runtime owners evaluate load tests, incidents, and compliance evidence; migration preserves owned repository ports, transaction invariants, scope isolation, and immutable identities. Schema design remains a later phase.

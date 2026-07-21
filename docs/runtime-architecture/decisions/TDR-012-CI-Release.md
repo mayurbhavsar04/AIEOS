@@ -21,4 +21,4 @@ Workflow security and hosted-minute limits require monitoring. Scripts remain po
 
 ## Compatibility and revisit
 
-No runtime semantics change. Revisit for scale, compliance, data residency, cost, or GitHub availability needs.
+No runtime semantics change. Revisit when CI duration/cost misses an adopted objective for a sustained review window, compliance or data-residency requirements prohibit the runner model, or availability incidents prevent required release gates. Developer-experience and security owners evaluate run history, cost, incidents, and compliance evidence; migration preserves repository scripts, locked builds, least privilege, provenance, and protected releases.

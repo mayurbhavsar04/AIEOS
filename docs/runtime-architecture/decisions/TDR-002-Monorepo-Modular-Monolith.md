@@ -21,4 +21,4 @@ CI must avoid becoming slow and boundary tooling is mandatory. Components cannot
 
 ## Compatibility and revisit
 
-Preserves every frozen boundary. Extract only for measured scaling, failure isolation, security, deployment cadence, or organizational ownership, through an ADR.
+Preserves every frozen boundary. Revisit only when production evidence shows a sustained scaling/service-objective conflict, incident analysis requires independent failure containment, a security/compliance boundary requires process isolation, or release history shows independently owned deployment cadence. The architecture owner evaluates the evidence through an ADR; extraction preserves contracts, ownership, lineage, and retry authority.

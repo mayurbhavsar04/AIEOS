@@ -13,7 +13,7 @@ In-process adapter behind a port; embedded broker; external broker immediately; 
 
 ## Decision and rationale
 
-Use an Event Bus port with an in-process adapter. Authoritative producers record events/outbox intent with owned state where required; delivery invokes registered consumers and preserves metadata. Consumers are idempotent and no global order is promised.
+Use an Event Bus port with an in-process adapter. Authoritative producers atomically record Events/outbox intent with owned state where required. The adapter claims pending delivery at startup and during a bounded loop, preserves metadata, records per-consumer disposition, and redelivers incomplete delivery. Consumers are idempotent and no global order is promised.
 
 ## Consequences and rejected alternatives
 
@@ -21,4 +21,4 @@ The first adapter has process-level failure containment only. Broker adoption la
 
 ## Compatibility and revisit
 
-Event Bus transports Events only. Revisit for multi-process topology, durable independent delivery, throughput, or replay operations.
+Event Bus transports Events only. Revisit when an approved multi-process topology requires independent delivery, recovery tests fail the adopted delivery objective, measured delivery backlog exceeds the service objective for a sustained review window, or replay must operate independently of the host. The runtime owner reviews these signals; migration preserves Event identity, authoritative recording, consumer disposition, duplicate tolerance, and events-only transport.

@@ -21,4 +21,4 @@ Startup fails fast and every setting needs explicit schema/ownership. Raw enviro
 
 ## Compatibility and revisit
 
-Preserves least privilege and scope. Revisit source adapters for rotation, fleet-wide policy, or multi-tenant configuration at scale.
+Preserves least privilege and scope. Revisit when credential-rotation objectives cannot be met by adapter refresh, configuration rollout across deployed hosts produces an adopted consistency-objective miss, or external tenant policy requires independently governed scoped configuration. Security and runtime owners evaluate rotation drills, rollout evidence, and tenant requirements; migration preserves typed snapshots, secret references, precedence, and fail-closed policy.

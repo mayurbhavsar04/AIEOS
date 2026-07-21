@@ -21,4 +21,4 @@ Validation models must not become persistence or provider models. Pydantic is a 
 
 ## Compatibility and revisit
 
-Schema snapshots enforce frozen meaning. Revisit for multi-language consumers, performance evidence, or a formally adopted wire format.
+Schema snapshots enforce frozen meaning. Revisit when an approved non-Python consumer requires a language-neutral source model, validation profiling misses an adopted boundary-latency objective, or a formally approved wire format cannot be represented without semantic loss. Contract owners evaluate compatibility fixtures and benchmarks; migration preserves frozen identities, validation semantics, versions, and generated-schema provenance.

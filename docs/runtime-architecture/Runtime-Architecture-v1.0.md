@@ -37,11 +37,19 @@ The selected baseline is CPython 3.13, `uv` workspace management, Pydantic v2 co
 flowchart TB
     HOST["apps/api host"] --> BOOT["composition root"]
     BOOT --> MGR["Manager"]
+    BOOT --> AUTH["Authentication"]
+    BOOT --> WS["Workspace"]
     BOOT --> WE["Workflow Engine"]
+    BOOT --> SKR["Skill Registry"]
     BOOT --> SR["Skill Runtime"]
     BOOT --> AI["AI Gateway"]
     BOOT --> MEM["Memory Service"]
     BOOT --> CR["Capability Registry"]
+    BOOT --> SCH["Scheduler"]
+    BOOT --> AN["Analytics"]
+    BOOT --> NOTIF["Notification"]
+    BOOT --> LOG["Logging"]
+    BOOT --> CFG["Configuration"]
     BOOT --> CD["Command Dispatcher"]
     BOOT --> EB["Event Bus"]
     MGR --> CONTRACTS["contracts + domain"]
@@ -76,17 +84,25 @@ The layers are:
 | Module | Responsibility and owned state | Public boundary | Allowed dependencies | Forbidden dependencies | Initialization, tests, extension |
 | --- | --- | --- | --- | --- | --- |
 | **Manager** | Interpret requests, accept/reject them, initiate approved workflows, manage interaction. Owns Request boundary state. | Manager service port and frozen Commands/Results. | Domain, contracts, auth/context ports, Workflow command port. | Skill execution, provider SDKs, direct workflow-state writes. | Stateless service wiring; unit and ingress contract tests; policies injected as ports. |
+| **Authentication** | Establish and verify human/service identity and authentication-session boundaries. | Authentication service port and verified identity context. | Domain/contracts, credential/configuration ports, Logging. | Business authorization, workflow execution, credentials in AI context. | Startup adapter validation; identity, renewal, revocation, and credential-boundary tests. |
+| **Workspace** | Own Workspace membership, resource ownership, policy references, and authorization decisions. | Workspace service and authorization ports. | Domain/contracts, Authentication context, Configuration, Logging. | Workflow or Skill execution, provider access, implicit single-user bypass. | Loads scoped policy state; membership, ownership, and cross-scope isolation tests. |
 | **Workflow Engine** | Workflow definitions/instances, step state, retry decisions, new `ExecutionId`, pause/resume/cancel. | Workflow service and command handlers. | Domain, contracts, workflow repositories, Command Dispatcher, Event consumer port, clock/ID. | Skill implementations, provider SDKs, Event Bus command dispatch. | Recovers durable state before work; state-machine, concurrency, idempotency, replay tests. |
+| **Skill Registry** | Catalog immutable Skill versions, contracts, required capabilities/tools, ownership, and compatibility status. | Skill lookup/registration port. | Domain/contracts, Capability Registry, Configuration, Logging. | Skill execution, workflow state, task dispatch, permission expansion. | Static approved registration initially; compatibility, duplicate, and unavailable-version tests. |
 | **Skill Runtime** | Validate and run exactly one instructed execution attempt; normalize its Result/Error. | `DispatchExecutionAttempt` handler and execution port. | Domain/contracts, Skill Registry metadata port, Capability Registry, AI Gateway, Memory Service, tools, telemetry. | Retry decisions, workflow mutation, direct providers. | Registers approved local skill factories; attempt, cancellation, timeout, sandbox-boundary tests. |
 | **AI Gateway** | Provider-neutral invocation, bounded provider retry/failover allowed by policy, normalization and usage. | AI invocation service port. | Contracts, policy/config ports, provider adapter ports, telemetry. | Workflow orchestration, skill loading, provider models escaping boundary. | Validates adapters/config at startup; adapter contract and fallback tests. |
 | **Memory Service** | Scoped memory read/write/search and memory-record ownership. | Memory service port. | Domain/contracts, memory repository port, auth/scope, clock/telemetry. | Workflow state, provider-specific storage types. | Validates persistence capability; isolation, concurrency, and adapter contract tests. |
 | **Capability Registry** | Register, discover, validate, and resolve versioned capability contracts to approved implementations. | Capability lookup/registration port. | Domain/contracts, manifest/config source, telemetry. | Skill execution, retry decisions, business workflow. | Static allowlisted registration at startup; compatibility and duplicate-registration tests. |
-| **Command Dispatcher** | Validate directed routing and invoke exactly one registered handler. | `dispatch(command) -> acknowledgement/result`. | Command contracts, handler registry, auth/telemetry. | Event publication as command transport, workflow retry policy. | Fails startup on duplicate/missing targets; routing/idempotency tests. |
+| **Scheduler** | Own schedules, time-zone/misfire rules, and production of idempotent due Workflow Commands. | Schedule service and due-command port. | Domain/contracts, Workflow command port, clock, persistence, Configuration, Logging. | Skill execution, publication, duplicate work after restart, retry decisions. | Disabled unless configured; schedule, restart-deduplication, time-zone, and misfire tests. |
+| **Analytics** | Derive operational, cost, quality, and product measures with declared provenance. | Analytics ingestion/query ports. | Domain/contracts, Event consumer port, analytical persistence, Configuration. | Authoritative workflow state, retry decisions, silent success-definition changes. | Consumer registration from composition; definition, attribution, and provenance tests. |
+| **Notification** | Deliver policy-approved informational, approval, escalation, and incident messages. | Notification command handler and delivery-status contracts. | Domain/contracts, Workspace context, Configuration, Event Bus, channel adapters. | Underlying decisions, approval inference, unnecessary protected context. | Approved adapters only; policy, minimization, delivery, and escalation tests. |
+| **Logging** | Own structured diagnostic and audit-relevant record handling under ES-008. | Logging service port aligned with observability contracts. | Domain/contracts, Configuration, telemetry/audit persistence ports. | Authoritative domain state, secrets, hidden reasoning, business decisions. | Safe/no-op adapter available; identity, redaction, retention, and failure-policy tests. |
+| **Configuration** | Own versioned validated settings, policies, feature controls, provider eligibility, and non-secret values/references. | Configuration snapshot and change-validation ports. | Domain/contracts, Authentication/Workspace context, Logging, secret-reference port. | Secret values, source-code behavior, unsafe defaults, unreviewed activation. | Immutable startup snapshot; precedence, rollback, compatibility, and reload-safety tests. |
+| **Command Dispatcher** | Validate immutable envelope/routing metadata and invoke exactly one registered accountable target. | `dispatch(command) -> acknowledgement/result`. | Command contracts, handler registry, context/telemetry. | Target-owned authorization or idempotency, Event publication as command transport, workflow retry policy. | Fails startup on duplicate/missing targets; routing and metadata-propagation tests. |
 | **Event Bus abstraction** | Publish and deliver immutable Event envelopes to registered consumers. | `publish(event)` and consumer registration. | Event contracts, event record/outbox ports, telemetry. | Commands, business transitions, global-order promises. | In-process adapter initially; duplicate, ordering-boundary, replay, consumer idempotency tests. |
 | **Domain/contracts** | Canonical frozen semantics. | Versioned immutable models and pure validation. | Standard library and approved validation primitives only. | Hosts, framework, database, network, provider SDKs. | Imported everywhere inwardly; exhaustive unit/compatibility tests. |
 | **Result/Error support** | Factories and validation implementing ES-007 without redefining it. | Frozen Result/Error models and constructors. | Contracts/domain only. | Retry decisions, logging side effects. | Pure; mapping and partial-result property tests. |
 | **Observability support** | Context propagation and abstract log/trace/metric/audit/health ports. | ES-008-aligned ports and middleware contracts. | Contracts/domain. | Business-state mutation or retry authority. | No-op/test adapter always available; conformance and redaction tests. |
-| **Configuration/security** | Typed startup settings, secret references, trusted component identity, authorization context. | Read-only settings and policy ports. | Contracts/domain; host environment adapter. | Embedded secrets, domain behavior in settings. | Fail-fast validation; isolation and redaction tests. |
+| **Security support** | Carry trusted component identity, authorization context, and secret-reference access for owning components. | Security context and secret-reference support ports. | Contracts/domain; host environment adapter. | Business authorization ownership, embedded secrets, domain behavior. | Fail-fast validation; isolation and redaction tests. |
 
 ## 5. Composition and process boundaries
 
@@ -192,9 +208,9 @@ Repositories expose domain values, not rows. Migrations are ordered, reversible 
 
 ## 8. Messaging architecture
 
-The Command Dispatcher is an application port backed initially by an in-process registry keyed by canonical target and command type/version. Startup rejects duplicate handlers. Dispatch validates schema, scope, authorization, target, version, and idempotency before one handler is invoked. Acknowledgement is a distinct immutable Result.
+The Command Dispatcher is an application port backed initially by an in-process registry keyed by canonical target and command type/version. Startup rejects duplicate handlers. Dispatch validates immutable envelope integrity, target/routing metadata, supported routing version, and required context propagation before invoking one handler. The accountable target revalidates schema and semantics, authorization, invariants, scope, version support, time constraints, and its target-owned idempotency receipt before accepting execution. Acknowledgement is a distinct immutable Result.
 
-The Event Bus port publishes immutable event envelopes only. Its initial in-process adapter dispatches to registered consumers after authoritative event recording. It does not promise global ordering; ordering is scoped only where a frozen contract declares it. Consumers expect redelivery, deduplicate by `EventId` plus consumer identity, and never infer a retry decision. A future broker adapter replaces only the transport/delivery port.
+The Event Bus port publishes immutable event envelopes only. Its initial in-process adapter dispatches to registered consumers after authoritative event recording. A durable pending-delivery record is claimed at startup and during a bounded delivery loop; delivery disposition is recorded per `EventId` and consumer identity. A crash after recording but before or during delivery therefore leaves recoverable pending work. Unsuccessful delivery is redelivered under bounded infrastructure policy, while consumers remain idempotent and never infer a workflow retry decision. It does not promise global ordering; ordering is scoped only where a frozen contract declares it. A future broker adapter replaces only the transport/delivery port, not authoritative Event identity or consumer disposition semantics.
 
 ```mermaid
 flowchart LR
@@ -283,7 +299,7 @@ An extension declares identity/version, compatible contract versions, required c
 | **2 — repository/tooling bootstrap** | Runtime Architecture approved. | `pyproject.toml`, uv workspace, package skeletons, formatting/lint/type/test commands, boundary checker, minimal CI. | Clean bootstrap on supported machines; no business behavior; CI green. |
 | **3 — shared domain/contracts** | Tooling stable. | Typed IDs, immutable envelopes, Results/Errors, observability context, schemas. | Frozen contract fixtures and compatibility tests pass. |
 | **4 — command/event infrastructure** | Shared contracts stable. | In-process Command Dispatcher and Event Bus ports/adapters; idempotency test stores. | Directed commands, events-only bus, duplicate tests, no business components. |
-| **5 — component skeletons** | Messaging conformance passes. | Manager, Workflow Engine, Skill Runtime, AI Gateway, Memory Service, Capability Registry ports and minimal implementations. | Dependency rules and component contract suites pass. |
+| **5 — component skeletons** | Messaging conformance passes. | Minimal ports/implementations for all frozen components: Authentication, Workspace, Manager, Workflow Engine, Capability Registry, Skill Registry, Skill Runtime, AI Gateway, Memory Service, Event Bus, Scheduler, Analytics, Notification, Logging, and Configuration. | Every frozen owner maps to one module; dependency rules and component contract suites pass. |
 | **6 — mock adapters** | Component skeletons stable. | In-memory persistence, mock AI, memory, tools, telemetry, clock/IDs. | Deterministic failure/cancellation/timeout suites pass. |
 | **7 — Hello World workflow** | Mocks and components pass. | Request-to-Result reference workflow exercising every boundary. | E2E success, failure, retry/new `ExecutionId`, cancellation, resume, and telemetry conformance. |
 | **8 — hardening** | Reference flow passes. | Concurrency, persistence adapter, security isolation, recovery, performance baseline. | Architecture conformance review and runtime-v1 freeze candidate. |

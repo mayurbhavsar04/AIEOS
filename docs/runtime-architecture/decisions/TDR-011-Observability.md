@@ -21,4 +21,4 @@ Translation code is required but frozen semantics remain stable. Direct standard
 
 ## Compatibility and revisit
 
-Observability remains descriptive and provider-neutral. Revisit adapter choice for ecosystem, performance, or operational platform selection.
+Observability remains descriptive and provider-neutral. Revisit when the chosen adapter cannot represent an ES-008-required record, telemetry overhead misses the adopted runtime budget, or an approved operational platform requires another edge adapter. Observability and security owners evaluate conformance tests, profiling, and platform requirements; migration preserves canonical identities, classification/redaction, audit separation, and failure behavior.

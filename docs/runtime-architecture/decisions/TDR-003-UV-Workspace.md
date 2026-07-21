@@ -21,4 +21,4 @@ The team depends on a newer tool and must pin/verify it. Poetry adds project-spe
 
 ## Compatibility and revisit
 
-Build tooling only. Revisit if workspace semantics, supply-chain controls, platform support, or maintenance materially fail requirements.
+Build tooling only. Revisit when a reproducible workspace/lock defect blocks a supported platform, required supply-chain evidence cannot be produced, pinned-tool security support ends, or measured CI/bootstrap time misses the adopted build objective for a sustained review window. The developer-experience owner evaluates reproducible failures and timing data; migration preserves locked resolution, workspace boundaries, and portable package artifacts.

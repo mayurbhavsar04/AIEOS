@@ -21,4 +21,4 @@ The host adds framework dependencies but component packages remain independent. 
 
 ## Compatibility and revisit
 
-No frozen service contract becomes HTTP-specific. Revisit for external API requirements, streaming, performance, or additional host transports.
+No frozen service contract becomes HTTP-specific. Revisit when an approved external API requires semantics the host cannot represent, load tests miss an adopted ingress objective after tuning, or a confirmed consumer requires another transport such as streaming. API/runtime owners evaluate contract requirements and benchmarks; additional hosts must remain translation boundaries and preserve Manager ownership and frozen service contracts.

@@ -21,4 +21,4 @@ Property tests need seed management and shrinking literacy. unittest is viable b
 
 ## Compatibility and revisit
 
-Tests enforce frozen semantics. Revisit individual tools only for maintenance, performance, or unsupported runtime changes.
+Tests enforce frozen semantics. Revisit a tool when upstream support for the pinned runtime/security policy ends, reproducible suite performance misses the adopted CI objective for a sustained review window, or a frozen conformance case cannot be expressed or executed reliably. The test-platform owner evaluates maintenance notices, timing history, and reproducible gaps; migration preserves deterministic fixtures, property coverage, and shared adapter conformance.

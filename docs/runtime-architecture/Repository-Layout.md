@@ -39,16 +39,24 @@ AIEOS/
 │   │   ├── schemas/                 # generated, reproducible
 │   │   └── tests/
 │   ├── manager/
+│   ├── authentication/
+│   ├── workspace/
 │   ├── workflow_engine/
+│   ├── skill_registry/
 │   ├── skill_runtime/
 │   ├── ai_gateway/
 │   ├── memory_service/
 │   ├── capability_registry/
+│   ├── scheduler/
+│   ├── analytics/
+│   ├── notification/
+│   ├── logging/
+│   ├── configuration/
 │   ├── command_dispatcher/
 │   ├── event_bus/
 │   ├── result_error_support/
 │   ├── observability/
-│   ├── configuration_security/
+│   ├── security_support/
 │   └── testing/
 ├── adapters/
 │   ├── persistence_postgres/

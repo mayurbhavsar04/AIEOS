@@ -28,3 +28,7 @@ These TDRs apply the repository's ADR discipline to implementation choices witho
 | [TDR-014](TDR-014-HTTP-Host.md) | FastAPI initial HTTP host |
 
 Every record includes context, drivers, options, rationale, consequences, frozen-baseline compatibility, and revisit triggers. Changes to a frozen baseline require the higher governance path, not a TDR alone.
+
+## Revisit-gate standard
+
+Every TDR revisit clause names observable evidence that opens review, the accountable evaluator, and the boundary a migration must preserve. Evidence may be an adopted service objective missed for a sustained review window, a reproducible compatibility/security failure, an approved topology or compliance requirement, or an independently justified consumer need. Opening review does not reverse a decision automatically; the owner records measurements and a successor TDR before migration. Numeric service objectives are fixed during the implementation or operational phase that first owns the measured behavior rather than invented in this architecture draft.

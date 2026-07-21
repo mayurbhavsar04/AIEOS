@@ -21,4 +21,4 @@ CPU-heavy work may require process workers or later extraction; async discipline
 
 ## Compatibility and revisit
 
-No frozen semantics change. Revisit after measured CPU limits, library/security constraints, team capability changes, or an isolated component with independently justified runtime needs.
+No frozen semantics change. Revisit when profiling shows a sustained CPU-bound service-objective miss after documented Python optimization/process scaling, a required dependency cannot support the pinned runtime or security policy, or an approved component-extraction case demonstrates a different runtime improves measured cost/reliability. The runtime owner evaluates benchmark and incident evidence at release reviews; migration preserves frozen contracts and provider boundaries.
