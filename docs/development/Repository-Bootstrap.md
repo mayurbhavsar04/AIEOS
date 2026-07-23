@@ -39,7 +39,7 @@ place a production credential in the repository.
 | Integration tests | `make test-integration` |
 | Dependency boundaries | `make boundaries` |
 | Documentation links/Mermaid | `make docs` |
-| Start the health-only host | `make run` |
+| Start the reference host | `make run` |
 | Reset repository-owned local state | `./scripts/reset-local --confirm` |
 
 The reset command is deliberately scoped to repository-owned generated state. It does not remove the
