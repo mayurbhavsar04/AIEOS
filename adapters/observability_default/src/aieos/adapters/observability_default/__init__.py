@@ -1,3 +1,5 @@
-"""Public bootstrap surface for AIEOS observability default."""
+"""In-memory ES-008 observation adapter for local reference execution."""
 
-__all__: tuple[str, ...] = ()
+from aieos.adapters.observability_default.recorder import InMemoryObservationRecorder
+
+__all__ = ("InMemoryObservationRecorder",)

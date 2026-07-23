@@ -1,3 +1,10 @@
-"""Public bootstrap surface for AIEOS memory service."""
+"""Tenant- and Workspace-scoped Memory Service."""
 
-__all__: tuple[str, ...] = ()
+from aieos.memory_service.service import (
+    MemoryRecord,
+    MemoryRepository,
+    MemoryService,
+    MemoryWrite,
+)
+
+__all__ = ("MemoryRecord", "MemoryRepository", "MemoryService", "MemoryWrite")
