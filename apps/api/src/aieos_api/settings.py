@@ -20,3 +20,6 @@ class HostSettings(BaseSettings):
     tenant_id: str = Field(default="local-tenant", min_length=1)
     workspace_id: str = Field(default="local-workspace", min_length=1)
     secret_reference: str = Field(default="env://AIEOS_LOCAL_SECRET", pattern=r"^[a-z]+://.+")
+    mock_ai_failures_before_success: int = Field(default=0, ge=0)
+    mock_ai_delay_seconds: float = Field(default=0.0, ge=0.0)
+    reference_timeout_seconds: float = Field(default=1.0, gt=0.0)
