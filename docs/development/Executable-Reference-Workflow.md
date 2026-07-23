@@ -47,11 +47,19 @@ Commands use the directed dispatcher and never Event Bus. A producer records an 
 before publication. A reconstructed relay can resume pending delivery. Consumers treat duplicate
 delivery as expected.
 
+An Event is considered processed only after its required Workflow transition and downstream effect
+complete. If dispatch or terminal publication fails, redelivery resumes the same recorded effect;
+it does not suppress unfinished work. Target-owned idempotency receipts distinguish in-progress
+handling from completed authoritative outcomes. Redelivery therefore reuses the existing Workflow,
+execution Command, Result identities, and recorded Events instead of creating duplicate effects.
+
 ## Failure and retry
 
 The mock AI adapter can be configured to fail before succeeding. Skill Runtime normalizes that
 attempt as terminal. Workflow Engine evaluates the retry evidence and, when policy allows, creates a
 new `CommandId`, `ExecutionId`, and incremented attempt number. The prior attempt remains immutable.
+Request-dispatch and retry decisions are recorded before their `DecisionId` is used as causation;
+lineage never relies on an invented, unresolvable identifier.
 
 Timeout belongs to Skill Runtime's active attempt. A timeout emits a terminal timed-out attempt
 Event; it does not grant retry authority.
@@ -75,5 +83,6 @@ Run the canonical gate:
 ./scripts/check
 ```
 
-Focused tests cover success, retry identity, duplicate Command handling, scope isolation, outbox
-recovery, timeout normalization, observability context, and host execution.
+Focused tests cover success, retry identity, incomplete-effect recovery, duplicate Command handling,
+scope isolation, resolvable decision causation, outbox recovery, timeout normalization,
+observability context, and host execution.
