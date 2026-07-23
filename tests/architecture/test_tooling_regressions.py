@@ -38,6 +38,18 @@ def test_dependency_gate_rejects_cycles(tmp_path: Path, monkeypatch: pytest.Monk
     assert any("dependency cycle" in item for item in check_boundaries.check())
 
 
+def test_dependency_gate_allows_test_suite_to_use_test_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_example.py").write_text(
+        "from aieos.testing import DeterministicClock\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_boundaries, "ROOT", tmp_path)
+    assert check_boundaries.check() == []
+
+
 def test_docs_validation_ignores_local_dependency_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -53,11 +65,36 @@ def test_docs_validation_ignores_local_dependency_cache(
     assert validate_docs.main() == 0
 
 
-def test_frozen_envelopes_are_not_reduced_concrete_copies() -> None:
-    from aieos.contracts import commands, events
+def test_frozen_envelopes_expose_complete_canonical_identity_fields() -> None:
+    from aieos.contracts.commands import CommandEnvelope
+    from aieos.contracts.events import EventEnvelope
 
-    assert not hasattr(commands, "CommandEnvelope")
-    assert not hasattr(events, "EventEnvelope")
+    command_fields = CommandEnvelope.__dataclass_fields__
+    event_fields = EventEnvelope.__dataclass_fields__
+    assert {
+        "command_id",
+        "command_type",
+        "command_version",
+        "correlation_id",
+        "causation_id",
+        "target_component",
+        "tenant_id",
+        "workspace_id",
+        "payload",
+        "metadata",
+    } <= command_fields.keys()
+    assert {
+        "event_id",
+        "event_type",
+        "event_version",
+        "occurred_at",
+        "recorded_at",
+        "producer",
+        "correlation_id",
+        "subject",
+        "payload",
+        "metadata",
+    } <= event_fields.keys()
 
 
 def test_dotenv_is_local_source_and_environment_wins(
