@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+
+export UV_CACHE_DIR="${UV_CACHE_DIR:-.local/uv-cache}"
+
+required_uv="0.8.14"
+actual_uv="$(uv --version | awk '{print $2}')"
+if [ "$actual_uv" != "$required_uv" ]; then
+  echo "uv $required_uv is required; found $actual_uv" >&2
+  exit 1
+fi
+
+uv sync --all-packages --all-groups --locked
+uv run python tooling/doctor.py

@@ -1,0 +1,16 @@
+[project]
+name = "aieos-adapter-persistence-postgres"
+version = "0.0.0"
+description = "AIEOS persistence postgres bootstrap package."
+requires-python = "==3.13.*"
+dependencies = []
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aieos/adapters/persistence_postgres"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""

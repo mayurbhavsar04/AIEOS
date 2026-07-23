@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "${1:-}" != "--confirm" ]; then
+  echo "Refusing reset. Re-run with --confirm to remove repository-owned local state." >&2
+  exit 2
+fi
+
+for path in .local htmlcov coverage.xml .coverage; do
+  if [ -e "$path" ]; then
+    rm -r "$path"
+  fi
+done
+echo "repository-owned local state reset"

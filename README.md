@@ -1,8 +1,16 @@
 # AIEOS
 
+## Runtime development
+
+The executable repository foundation is documented in
+[Repository and Tooling Bootstrap](docs/development/Repository-Bootstrap.md). Runtime code follows
+the frozen [Runtime Architecture v1.0](docs/runtime-architecture/Runtime-Architecture-v1.0.md).
+
 AIEOS (AI Employee Operating System) is a platform for building reliable autonomous AI Employees. It is intended to support specialized employees across business functions such as content operations, marketing, sales, restaurant operations, and customer support.
 
-> **Project status:** Pre-execution / Sprint 0. The repository currently defines the company and product foundations; implementation has not started.
+> **Project status:** Milestone 5 Phase 2. The frozen architecture, domain, contracts, and runtime
+> blueprint now have an executable repository and tooling foundation; business workflows have not
+> started.
 
 ## The problem
 
