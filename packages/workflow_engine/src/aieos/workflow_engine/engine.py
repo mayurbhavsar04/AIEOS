@@ -21,7 +21,12 @@ from aieos.contracts import (
 )
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.contracts.events import EventEnvelope, EventMetadata
-from aieos.domain import Clock, IdentifierFactory
+from aieos.domain import (
+    Clock,
+    DecisionEvidence,
+    IdentifierFactory,
+    InMemoryDecisionEvidenceRepository,
+)
 from aieos.event_bus import EventOutbox
 from aieos.observability import ObservationRecorder
 from aieos.result_error_support import OutcomeFactory
@@ -34,6 +39,11 @@ class WorkflowState(StrEnum):
     COMPLETED = "Completed"
     FAILED = "Failed"
     CANCELLED = "Cancelled"
+
+
+class CommandProcessingState(StrEnum):
+    IN_PROGRESS = "InProgress"
+    COMPLETED = "Completed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +74,24 @@ class WorkflowInstance:
     attempt_number: int = 0
     execution_ids: tuple[str, ...] = ()
     processed_event_ids: frozenset[str] = frozenset()
+    workflow_events: dict[str, EventEnvelope] | None = None
+    initial_attempt_command: CommandEnvelope | None = None
+    retry_commands: dict[str, CommandEnvelope] | None = None
     outcome: ResultEnvelope | None = None
+
+    def __post_init__(self) -> None:
+        if self.workflow_events is None:
+            self.workflow_events = {}
+        if self.retry_commands is None:
+            self.retry_commands = {}
+
+
+@dataclass(slots=True)
+class WorkflowCommandReceipt:
+    command: CommandEnvelope
+    result: ResultEnvelope
+    workflow_id: str
+    state: CommandProcessingState = CommandProcessingState.IN_PROGRESS
 
 
 class InMemoryWorkflowRepository:
@@ -72,20 +99,33 @@ class InMemoryWorkflowRepository:
 
     def __init__(self) -> None:
         self.instances: dict[str, WorkflowInstance] = {}
-        self.command_results: dict[str, ResultEnvelope] = {}
-        self.commands: dict[str, CommandEnvelope] = {}
+        self.command_receipts: dict[str, WorkflowCommandReceipt] = {}
 
     def add(self, instance: WorkflowInstance) -> None:
         if instance.workflow_id in self.instances:
             raise ValueError("WorkflowId already exists")
         self.instances[instance.workflow_id] = instance
 
-    def result_for_command(self, command_id: str) -> ResultEnvelope | None:
-        return self.command_results.get(command_id)
+    def receipt_for_command(self, command_id: str) -> WorkflowCommandReceipt | None:
+        return self.command_receipts.get(command_id)
 
-    def remember_command(self, command: CommandEnvelope, result: ResultEnvelope) -> None:
-        self.commands[command.command_id] = command
-        self.command_results[command.command_id] = result
+    def begin_command(
+        self, command: CommandEnvelope, result: ResultEnvelope, workflow_id: str
+    ) -> WorkflowCommandReceipt:
+        receipt = WorkflowCommandReceipt(command, result, workflow_id)
+        self.command_receipts[command.command_id] = receipt
+        return receipt
+
+    def complete_command(self, command_id: str) -> ResultEnvelope:
+        receipt = self.command_receipts[command_id]
+        receipt.state = CommandProcessingState.COMPLETED
+        return receipt.result
+
+    def remember_completed_command(
+        self, command: CommandEnvelope, result: ResultEnvelope, workflow_id: str
+    ) -> None:
+        receipt = self.begin_command(command, result, workflow_id)
+        receipt.state = CommandProcessingState.COMPLETED
 
 
 class WorkflowEngine:
@@ -104,6 +144,7 @@ class WorkflowEngine:
         clock: Clock,
         identifiers: IdentifierFactory,
         observations: ObservationRecorder,
+        decisions: InMemoryDecisionEvidenceRepository,
     ) -> None:
         self._repository = repository
         self._dispatcher = dispatcher
@@ -113,13 +154,17 @@ class WorkflowEngine:
         self._clock = clock
         self._identifiers = identifiers
         self._observations = observations
+        self._decisions = decisions
 
     async def handle(self, command: CommandEnvelope) -> ResultEnvelope:
-        cached = self._repository.result_for_command(command.command_id)
-        if cached is not None:
-            if self._repository.commands[command.command_id] != command:
+        receipt = self._repository.receipt_for_command(command.command_id)
+        if receipt is not None:
+            if receipt.command != command:
                 raise ValueError("CommandId cannot be reused with changed immutable content")
-            return cached
+            if receipt.state is CommandProcessingState.COMPLETED:
+                return receipt.result
+            if command.command_type == "StartWorkflow":
+                return await self._resume_start(receipt)
         if command.target_component != self.component_name:
             raise ValueError("Command target does not match Workflow Engine")
         if command.command_type == "StartWorkflow":
@@ -163,15 +208,24 @@ class WorkflowEngine:
             return
         if event.tenant_id != instance.tenant_id or event.workspace_id != instance.workspace_id:
             raise PermissionError("cross-scope Event delivery denied")
-        instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
         if event.event_type == "ExecutionAttemptSucceeded":
             await self._complete(instance, event)
+            instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
             return
         retry = str(event.payload.get("retry_classification", "NeverRetry"))
-        if self._retry_allowed(instance, retry):
-            await self._dispatch_attempt(instance, causation_id=self._identifiers.new("decision"))
+        retry_commands = instance.retry_commands
+        assert retry_commands is not None
+        retry_command = retry_commands.get(event.event_id)
+        if retry_command is not None or self._retry_allowed(instance, retry):
+            if retry_command is None:
+                decision_id = self._record_retry_decision(instance, event)
+                retry_command = self._create_attempt_command(instance, decision_id)
+                retry_commands[event.event_id] = retry_command
+            await self._dispatcher.dispatch(retry_command)
+            instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
             return
         await self._fail(instance, event)
+        instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
 
     async def _start(self, command: CommandEnvelope) -> ResultEnvelope:
         try:
@@ -216,10 +270,18 @@ class WorkflowEngine:
             command_id=command.command_id,
             value_reference=workflow_id,
         )
-        self._repository.remember_command(command, acknowledgement)
-        await self._publish_workflow_event(instance, "WorkflowStarted", command.command_id)
-        await self._dispatch_attempt(instance, causation_id=command.command_id)
-        return acknowledgement
+        receipt = self._repository.begin_command(command, acknowledgement, workflow_id)
+        return await self._resume_start(receipt)
+
+    async def _resume_start(self, receipt: WorkflowCommandReceipt) -> ResultEnvelope:
+        instance = self._repository.instances[receipt.workflow_id]
+        await self._publish_workflow_event(instance, "WorkflowStarted", receipt.command.command_id)
+        if instance.initial_attempt_command is None:
+            instance.initial_attempt_command = self._create_attempt_command(
+                instance, receipt.command.command_id
+            )
+        await self._dispatcher.dispatch(instance.initial_attempt_command)
+        return self._repository.complete_command(receipt.command.command_id)
 
     async def _cancel(self, command: CommandEnvelope) -> ResultEnvelope:
         if command.workflow_id is None:
@@ -268,14 +330,16 @@ class WorkflowEngine:
             message="Workflow cancellation became authoritative.",
         )
         instance.outcome = result
-        self._repository.remember_command(command, result)
+        self._repository.remember_completed_command(command, result, instance.workflow_id)
         return result
 
-    async def _dispatch_attempt(self, instance: WorkflowInstance, causation_id: str) -> None:
+    def _create_attempt_command(
+        self, instance: WorkflowInstance, causation_id: str
+    ) -> CommandEnvelope:
         instance.attempt_number += 1
         execution_id = self._identifiers.new("execution")
         instance.execution_ids = (*instance.execution_ids, execution_id)
-        command = CommandEnvelope(
+        return CommandEnvelope(
             command_id=self._identifiers.new("command"),
             command_type="DispatchExecutionAttempt",
             command_version="1.0",
@@ -301,7 +365,6 @@ class WorkflowEngine:
                 attempt_number=instance.attempt_number,
             ),
         )
-        await self._dispatcher.dispatch(command)
 
     async def _complete(self, instance: WorkflowInstance, event: EventEnvelope) -> None:
         instance.state = WorkflowState.COMPLETED
@@ -343,6 +406,22 @@ class WorkflowEngine:
         await self._publish_workflow_event(instance, "WorkflowFailed", event.event_id)
         self._observe(instance, instance.outcome)
 
+    def _record_retry_decision(self, instance: WorkflowInstance, event: EventEnvelope) -> str:
+        decision_id = self._identifiers.new("decision")
+        self._decisions.record(
+            DecisionEvidence(
+                decision_id=decision_id,
+                decision_type="RetryExecutionAttempt",
+                component=self.component_name,
+                tenant_id=instance.tenant_id,
+                workspace_id=instance.workspace_id,
+                correlation_id=instance.correlation_id,
+                recorded_at=self._clock.now(),
+                triggering_id=event.event_id,
+            )
+        )
+        return decision_id
+
     def _retry_allowed(self, instance: WorkflowInstance, classification: str) -> bool:
         return self.permits_new_attempt(instance.workflow_step_id) and classification in {
             RetryClassification.RETRYABLE.value,
@@ -354,27 +433,32 @@ class WorkflowEngine:
         self, instance: WorkflowInstance, event_type: str, causation_id: str
     ) -> None:
         now = self._clock.now()
-        event = EventEnvelope(
-            event_id=self._identifiers.new("event"),
-            event_type=event_type,
-            event_version="1.0",
-            occurred_at=now,
-            recorded_at=now,
-            producer=self.component_name,
-            tenant_id=instance.tenant_id,
-            workspace_id=instance.workspace_id,
-            correlation_id=instance.correlation_id,
-            causation_id=causation_id,
-            request_id=instance.request_id,
-            workflow_id=instance.workflow_id,
-            workflow_step_id=instance.workflow_step_id,
-            subject=instance.workflow_id,
-            payload={
-                "state": instance.state.value,
-                "result_id": instance.outcome.result_id if instance.outcome else None,
-            },
-            metadata=EventMetadata(),
-        )
+        events = instance.workflow_events
+        assert events is not None
+        event = events.get(event_type)
+        if event is None:
+            event = EventEnvelope(
+                event_id=self._identifiers.new("event"),
+                event_type=event_type,
+                event_version="1.0",
+                occurred_at=now,
+                recorded_at=now,
+                producer=self.component_name,
+                tenant_id=instance.tenant_id,
+                workspace_id=instance.workspace_id,
+                correlation_id=instance.correlation_id,
+                causation_id=causation_id,
+                request_id=instance.request_id,
+                workflow_id=instance.workflow_id,
+                workflow_step_id=instance.workflow_step_id,
+                subject=instance.workflow_id,
+                payload={
+                    "state": instance.state.value,
+                    "result_id": instance.outcome.result_id if instance.outcome else None,
+                },
+                metadata=EventMetadata(),
+            )
+            events[event_type] = event
         self._outbox.record(event)
         await self._outbox.drain()
 
@@ -394,7 +478,9 @@ class WorkflowEngine:
             retry=RetryClassification.NEVER_RETRY,
             message=message,
         )
-        self._repository.remember_command(command, result)
+        self._repository.remember_completed_command(
+            command, result, command.workflow_id or command.command_id
+        )
         return result
 
     def _observe(self, instance: WorkflowInstance, result: ResultEnvelope) -> None:
@@ -451,6 +537,7 @@ class WorkflowEngine:
 
 
 __all__ = (
+    "CommandProcessingState",
     "InMemoryWorkflowRepository",
     "WorkflowDefinition",
     "WorkflowEngine",
