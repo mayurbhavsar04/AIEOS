@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -eu
+
+export UV_CACHE_DIR="${UV_CACHE_DIR:-.local/uv-cache}"
+
+uv lock --check
+uv run ruff format --check .
+uv run ruff check .
+uv run pyright
+uv run python tooling/dependency_rules/check_boundaries.py
+uv run python tooling/docs_validation/validate_docs.py
+uv run bandit -q -r apps packages adapters tooling -s B101
+uv run detect-secrets-hook --baseline .secrets.baseline $(git ls-files)
+uv run pytest --cov=aieos --cov=aieos_api --cov-report=term-missing --cov-report=xml
+git diff --check

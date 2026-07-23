@@ -1,0 +1,19 @@
+[project]
+name = "aieos-event-bus"
+version = "0.0.0"
+description = "AIEOS event bus bootstrap package."
+requires-python = "==3.13.*"
+dependencies = ["aieos-contracts"]
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aieos/event_bus"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+
+[tool.uv.sources]
+aieos-contracts = { workspace = true }

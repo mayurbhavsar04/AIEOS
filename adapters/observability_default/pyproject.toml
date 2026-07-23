@@ -1,0 +1,16 @@
+[project]
+name = "aieos-adapter-observability-default"
+version = "0.0.0"
+description = "AIEOS observability default bootstrap package."
+requires-python = "==3.13.*"
+dependencies = []
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aieos/adapters/observability_default"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
