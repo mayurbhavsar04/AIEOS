@@ -3,7 +3,7 @@ name = "aieos-adapter-command-dispatch-in-process"
 version = "0.0.0"
 description = "AIEOS command dispatch in process bootstrap package."
 requires-python = "==3.13.*"
-dependencies = []
+dependencies = ["aieos-command-dispatcher", "aieos-contracts"]
 
 [build-system]
 requires = ["hatchling==1.27.0"]
@@ -14,3 +14,7 @@ packages = ["src/aieos/adapters/command_dispatch_in_process"]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
+
+[tool.uv.sources]
+aieos-command-dispatcher = { workspace = true }
+aieos-contracts = { workspace = true }

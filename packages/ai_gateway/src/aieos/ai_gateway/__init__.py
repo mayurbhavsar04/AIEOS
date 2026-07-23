@@ -1,3 +1,5 @@
-"""Public bootstrap surface for AIEOS ai gateway."""
+"""Provider-neutral AI Gateway contract."""
 
-__all__: tuple[str, ...] = ()
+from aieos.ai_gateway.gateway import AIGateway, AIInvocationRequest, AIInvocationResponse
+
+__all__ = ("AIGateway", "AIInvocationRequest", "AIInvocationResponse")

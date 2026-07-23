@@ -1,3 +1,5 @@
-"""Public bootstrap surface for AIEOS memory persistence."""
+"""In-memory persistence adapter for Memory Service reference execution."""
 
-__all__: tuple[str, ...] = ()
+from aieos.adapters.memory_persistence.repository import InMemoryMemoryRepository
+
+__all__ = ("InMemoryMemoryRepository",)

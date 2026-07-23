@@ -1,3 +1,5 @@
-"""Public bootstrap surface for AIEOS result error support."""
+"""Pure factories for immutable ES-007 Result and Error records."""
 
-__all__: tuple[str, ...] = ()
+from aieos.result_error_support.factory import OutcomeFactory
+
+__all__ = ("OutcomeFactory",)

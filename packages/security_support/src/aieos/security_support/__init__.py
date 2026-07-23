@@ -1,3 +1,5 @@
-"""Public bootstrap surface for AIEOS security support."""
+"""Target-owned authorization and scope validation support."""
 
-__all__: tuple[str, ...] = ()
+from aieos.security_support.authorization import AuthorizationFailure, ScopeAuthorizer
+
+__all__ = ("AuthorizationFailure", "ScopeAuthorizer")

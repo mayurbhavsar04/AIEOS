@@ -4,6 +4,21 @@ version = "0.0.0"
 description = "AIEOS initial HTTP host bootstrap."
 requires-python = "==3.13.*"
 dependencies = [
+  "aieos-adapter-ai-mock",
+  "aieos-adapter-command-dispatch-in-process",
+  "aieos-adapter-event-bus-in-process",
+  "aieos-adapter-memory-persistence",
+  "aieos-adapter-observability-default",
+  "aieos-capability-registry",
+  "aieos-contracts",
+  "aieos-domain",
+  "aieos-manager",
+  "aieos-memory-service",
+  "aieos-result-error-support",
+  "aieos-security-support",
+  "aieos-skill-registry",
+  "aieos-skill-runtime",
+  "aieos-workflow-engine",
   "fastapi==0.116.1",
   "pydantic-settings==2.10.1",
   "uvicorn==0.35.0",
@@ -18,3 +33,20 @@ packages = ["src/aieos_api"]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
+
+[tool.uv.sources]
+aieos-adapter-ai-mock = { workspace = true }
+aieos-adapter-command-dispatch-in-process = { workspace = true }
+aieos-adapter-event-bus-in-process = { workspace = true }
+aieos-adapter-memory-persistence = { workspace = true }
+aieos-adapter-observability-default = { workspace = true }
+aieos-capability-registry = { workspace = true }
+aieos-contracts = { workspace = true }
+aieos-domain = { workspace = true }
+aieos-manager = { workspace = true }
+aieos-memory-service = { workspace = true }
+aieos-result-error-support = { workspace = true }
+aieos-security-support = { workspace = true }
+aieos-skill-registry = { workspace = true }
+aieos-skill-runtime = { workspace = true }
+aieos-workflow-engine = { workspace = true }

@@ -1,3 +1,9 @@
-"""Public bootstrap surface for AIEOS event bus in process."""
+"""In-process Event Bus and recoverable in-memory outbox adapters."""
 
-__all__: tuple[str, ...] = ()
+from aieos.adapters.event_bus_in_process.bus import (
+    InMemoryOutboxStore,
+    InProcessEventBus,
+    OutboxRelay,
+)
+
+__all__ = ("InMemoryOutboxStore", "InProcessEventBus", "OutboxRelay")

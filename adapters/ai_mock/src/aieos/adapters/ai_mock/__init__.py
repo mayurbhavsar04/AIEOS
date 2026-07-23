@@ -1,3 +1,5 @@
-"""Public bootstrap surface for AIEOS ai mock."""
+"""Deterministic provider-neutral mock AI Gateway."""
 
-__all__: tuple[str, ...] = ()
+from aieos.adapters.ai_mock.gateway import MockAIGateway
+
+__all__ = ("MockAIGateway",)
