@@ -1,14 +1,12 @@
-"""Directed Command contract marker types."""
+"""Non-authoritative typing boundary for frozen ES-004 Commands."""
 
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True, slots=True)
-class CommandEnvelope:
-    """Bootstrap marker for a directed Command."""
-
-    command_id: str
-    target: str
+from typing import Protocol
 
 
-__all__ = ("CommandEnvelope",)
+class CommandMessage(Protocol):
+    """Opaque Command accepted by bootstrap ports; ES-004 owns its envelope."""
+
+    pass
+
+
+__all__ = ("CommandMessage",)

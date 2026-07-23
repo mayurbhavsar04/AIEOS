@@ -7,7 +7,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class HostSettings(BaseSettings):
     """Minimal validated local bootstrap settings."""
 
-    model_config = SettingsConfigDict(env_prefix="AIEOS_", frozen=True, extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="AIEOS_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        frozen=True,
+        extra="ignore",
+    )
 
     environment: str = Field(default="local", min_length=1)
     host_name: str = Field(default="aieos-local", min_length=1)

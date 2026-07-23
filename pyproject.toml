@@ -7,6 +7,8 @@ dependencies = []
 [dependency-groups]
 dev = [
   "anyio==4.10.0",
+  "bandit==1.8.6",
+  "detect-secrets==1.5.0",
   "hypothesis==6.138.15",
   "httpx==0.28.1",
   "pyright==1.1.404",
@@ -44,6 +46,7 @@ reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
+pythonpath = ["."]
 testpaths = ["packages", "apps", "adapters", "tests"]
 markers = [
   "integration: bootstrap integration checks",

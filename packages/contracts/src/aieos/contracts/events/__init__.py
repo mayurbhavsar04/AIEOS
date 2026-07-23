@@ -1,14 +1,12 @@
-"""Immutable Event contract marker types."""
+"""Non-authoritative typing boundary for frozen ES-005 Events."""
 
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True, slots=True)
-class EventEnvelope:
-    """Bootstrap marker for an immutable Event."""
-
-    event_id: str
-    event_type: str
+from typing import Protocol
 
 
-__all__ = ("EventEnvelope",)
+class EventMessage(Protocol):
+    """Opaque Event accepted by bootstrap ports; ES-005 owns its envelope."""
+
+    pass
+
+
+__all__ = ("EventMessage",)

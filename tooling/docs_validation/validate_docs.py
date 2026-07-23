@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+DOCUMENTATION_ROOTS = (ROOT / "README.md", ROOT / "docs")
 
 
 def validate_links(path: Path) -> list[str]:
@@ -47,9 +48,9 @@ def validate_mermaid(path: Path) -> list[str]:
 def main() -> int:
     """Run documentation validation."""
     errors: list[str] = []
-    for path in sorted(ROOT.rglob("*.md")):
-        if ".venv" in path.parts:
-            continue
+    paths = [DOCUMENTATION_ROOTS[0]]
+    paths.extend(sorted(DOCUMENTATION_ROOTS[1].rglob("*.md")))
+    for path in paths:
         errors.extend(validate_links(path))
         errors.extend(validate_mermaid(path))
     if errors:
