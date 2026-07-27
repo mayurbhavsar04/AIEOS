@@ -54,7 +54,8 @@ class Manager:
         if cached is not None:
             if self._repository.commands[command.command_id] != command:
                 raise ValueError("CommandId cannot be reused with changed immutable content")
-            return cached
+            if cached.completed_at is not None:
+                return cached
         existing = self._repository.commands.get(command.command_id)
         if existing is not None and existing != command:
             raise ValueError("CommandId cannot be reused with changed immutable content")

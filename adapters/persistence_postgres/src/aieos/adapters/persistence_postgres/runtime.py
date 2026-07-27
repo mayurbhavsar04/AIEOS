@@ -117,8 +117,17 @@ async def _idempotency(
         },
         where=CommandIdempotencyRow.command_hash == command_hash,
     )
-    result = await session.execute(statement)
-    if result.rowcount != 1:
+    await session.execute(statement)
+    stored = await session.get(
+        CommandIdempotencyRow,
+        (
+            command.tenant_id,
+            command.workspace_id,
+            target,
+            command.command_id,
+        ),
+    )
+    if stored is None or stored.command_hash != command_hash:
         raise ValueError("CommandId cannot be reused with changed immutable content")
 
 
@@ -355,7 +364,7 @@ class PostgresRequestRepository(_Prepared, InMemoryRequestRepository):
                 session,
                 target="Manager",
                 command=command,
-                completed=result is not None,
+                completed=result is not None and result.completed_at is not None,
                 outcome_id=result.result_id if result is not None else None,
                 payload=_MANAGER_RECEIPT.dump_json(receipt),
             )

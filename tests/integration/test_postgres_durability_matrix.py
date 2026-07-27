@@ -7,6 +7,7 @@ import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -345,3 +346,81 @@ async def test_concurrent_duplicate_submission_creates_one_workflow(
         assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
     await left.close()
     await right.close()
+
+
+async def test_retry_creates_new_execution_and_durable_decision_lineage(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+        mock_ai_failures_before_success=1,
+    )
+    root = compose(settings)
+    result = await root.reference_runtime.run("retry hello", max_attempts=2)
+    assert result.result_status is ResultStatus.SUCCEEDED
+    async with database.transaction() as session:
+        executions = tuple(
+            await session.scalars(select(ExecutionRow).order_by(ExecutionRow.attempt_number))
+        )
+        assert len(executions) == 2
+        assert executions[0].execution_id != executions[1].execution_id
+        assert executions[1].previous_execution_id == executions[0].execution_id
+        decisions = tuple(await session.scalars(select(DecisionEvidenceRow)))
+        assert any(item.decision_type == "RetryExecutionAttempt" for item in decisions)
+        terminal = tuple(
+            await session.scalars(
+                select(OutboxEventRow).where(
+                    OutboxEventRow.event_type.in_(("WorkflowCompleted", "WorkflowFailed"))
+                )
+            )
+        )
+        assert len(terminal) == 1
+    await root.close()
+
+
+async def test_incomplete_publication_and_idempotency_resume_after_restart(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+        delivery_backoff_seconds=0.01,
+    )
+    interrupted = compose(settings)
+    runtime = interrupted.reference_runtime
+    consumers = cast(
+        dict[str, list[tuple[str, Any]]],
+        vars(runtime.event_bus)["_consumers"],
+    )
+    original = consumers["ExecutionAttemptSucceeded"][0][1]
+
+    class FailOnce:
+        failed = False
+
+        async def consume(self, delivered: EventEnvelope) -> None:
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("injected process interruption")
+            await original.consume(delivered)
+
+    consumers["ExecutionAttemptSucceeded"] = [("workflow-engine", FailOnce())]
+    command_envelope = runtime.build_request_command("resume hello", command_id="command-resume")
+    acknowledgement = await runtime.run_command(command_envelope)
+    assert acknowledgement.result_status is ResultStatus.ACCEPTED
+    await interrupted.close()
+
+    await anyio.sleep(0.02)
+    recovered = compose(settings)
+    result = await recovered.reference_runtime.run_command(command_envelope)
+    assert result.result_status is ResultStatus.SUCCEEDED
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        terminal = tuple(
+            await session.scalars(
+                select(OutboxEventRow).where(OutboxEventRow.event_type == "WorkflowCompleted")
+            )
+        )
+        assert len(terminal) == 1
+    await recovered.close()
