@@ -37,7 +37,11 @@ def test_event_storage_round_trip_preserves_frozen_envelope() -> None:
 
 def test_postgres_requires_database_url() -> None:
     with pytest.raises(ValueError, match="database_url"):
-        HostSettings(runtime_adapter=RuntimeAdapter.POSTGRES)
+        HostSettings(
+            runtime_adapter=RuntimeAdapter.POSTGRES,
+            database_url=None,
+            _env_file=None,
+        )
 
 
 def test_safe_summary_never_contains_database_url() -> None:
