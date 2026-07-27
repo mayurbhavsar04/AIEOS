@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic import TypeAdapter
 from sqlalchemy import select
@@ -53,6 +53,14 @@ _WORKFLOW_RECEIPT = TypeAdapter(WorkflowCommandReceipt)
 _EXECUTION = TypeAdapter(ExecutionRecord)
 _EXECUTION_RECEIPT = TypeAdapter(ExecutionCommandReceipt)
 _DECISION = TypeAdapter(DecisionEvidence)
+
+
+def _normalize_result(result: ResultEnvelope) -> ResultEnvelope:
+    metadata = dict(result.metadata)
+    execution_ids = metadata.get("execution_ids")
+    if isinstance(execution_ids, list):
+        metadata["execution_ids"] = tuple(cast(list[str], execution_ids))
+    return replace(result, metadata=metadata)
 
 
 async def _immutable_outcome(
@@ -162,6 +170,8 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
         async with self._database.transaction() as session:
             for payload in await session.scalars(select(WorkflowRow.payload)):
                 instance = _WORKFLOW.validate_json(payload)
+                if instance.outcome is not None:
+                    instance.outcome = _normalize_result(instance.outcome)
                 self.instances.setdefault(instance.workflow_id, instance)
             receipts = await session.scalars(
                 select(CommandIdempotencyRow.payload).where(
@@ -170,6 +180,7 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
             )
             for payload in receipts:
                 receipt = _WORKFLOW_RECEIPT.validate_json(payload)
+                receipt.result = _normalize_result(receipt.result)
                 self.command_receipts.setdefault(receipt.command.command_id, receipt)
 
     async def flush_in_transaction(self, session: AsyncSession) -> None:
@@ -241,6 +252,9 @@ class PostgresExecutionRepository(_Prepared, InMemoryExecutionRepository):
         async with self._database.transaction() as session:
             for payload in await session.scalars(select(ExecutionRow.payload)):
                 record = _EXECUTION.validate_json(payload)
+                record.acknowledgement = _normalize_result(record.acknowledgement)
+                if record.result is not None:
+                    record.result = _normalize_result(record.result)
                 self.records.setdefault(record.execution_id, record)
             receipts = await session.scalars(
                 select(CommandIdempotencyRow.payload).where(
@@ -249,6 +263,7 @@ class PostgresExecutionRepository(_Prepared, InMemoryExecutionRepository):
             )
             for payload in receipts:
                 receipt = _EXECUTION_RECEIPT.validate_json(payload)
+                receipt.acknowledgement = _normalize_result(receipt.acknowledgement)
                 self.command_receipts.setdefault(receipt.command.command_id, receipt)
 
     async def flush_in_transaction(self, session: AsyncSession) -> None:
@@ -353,6 +368,8 @@ class PostgresRequestRepository(_Prepared, InMemoryRequestRepository):
             )
             for payload in rows:
                 receipt = _MANAGER_RECEIPT.validate_json(payload)
+                if receipt.result is not None:
+                    receipt = replace(receipt, result=_normalize_result(receipt.result))
                 self.commands.setdefault(receipt.command.command_id, receipt.command)
                 if receipt.workflow_command is not None:
                     self.workflow_commands.setdefault(

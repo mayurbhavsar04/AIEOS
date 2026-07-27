@@ -275,6 +275,8 @@ class WorkflowEngine:
 
     async def _resume_start(self, receipt: WorkflowCommandReceipt) -> ResultEnvelope:
         instance = self._repository.instances[receipt.workflow_id]
+        if instance.outcome is not None:
+            return self._repository.complete_command(receipt.command.command_id)
         await self._publish_workflow_event(instance, "WorkflowStarted", receipt.command.command_id)
         if instance.initial_attempt_command is None:
             instance.initial_attempt_command = self._create_attempt_command(

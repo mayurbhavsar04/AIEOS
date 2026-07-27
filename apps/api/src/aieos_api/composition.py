@@ -216,6 +216,8 @@ class ReferenceRuntime:
     async def _run_prepared(self, command: CommandEnvelope) -> ResultEnvelope:
         for participant in self.durable_participants:
             await participant.prepare()
+        if self.database is not None:
+            await self.outbox.drain()
         result = await self.dispatcher.dispatch(command)
         if self.database is not None:
             await checkpoint(self.database, self.durable_participants)
