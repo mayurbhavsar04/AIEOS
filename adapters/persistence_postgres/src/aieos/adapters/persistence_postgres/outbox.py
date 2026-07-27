@@ -53,9 +53,13 @@ class PostgresOutboxStore:
             recorded_at=event.recorded_at,
             available_at=event.recorded_at,
         )
-        statement = statement.on_conflict_do_nothing(index_elements=["event_id"])
+        statement = statement.on_conflict_do_nothing(
+            index_elements=["tenant_id", "workspace_id", "event_id"]
+        )
         await session.execute(statement)
-        stored = await session.get(OutboxEventRow, event.event_id)
+        stored = await session.get(
+            OutboxEventRow, (event.tenant_id, event.workspace_id, event.event_id)
+        )
         if stored is None or stored.payload != encoded:
             raise ValueError("EventId cannot be reused with changed content")
 
@@ -92,10 +96,20 @@ class PostgresOutboxStore:
             return tuple(decode_event(row.payload) for row in rows)
 
     async def mark_delivered(
-        self, event_id: str, *, owner: str, now: datetime | None = None
+        self,
+        event_id: str,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+        owner: str,
+        now: datetime | None = None,
     ) -> bool:
         async with self._database.transaction() as session:
-            row = await session.get(OutboxEventRow, event_id, with_for_update=True)
+            row = await session.get(
+                OutboxEventRow,
+                (tenant_id, workspace_id, event_id),
+                with_for_update=True,
+            )
             if row is None or row.lease_owner != owner or row.delivered_at is not None:
                 return False
             row.delivered_at = now or utc_now()
@@ -107,6 +121,8 @@ class PostgresOutboxStore:
         self,
         event_id: str,
         *,
+        tenant_id: str,
+        workspace_id: str,
         owner: str,
         error: str,
         backoff_seconds: float,
@@ -114,7 +130,11 @@ class PostgresOutboxStore:
     ) -> bool:
         instant = now or utc_now()
         async with self._database.transaction() as session:
-            row = await session.get(OutboxEventRow, event_id, with_for_update=True)
+            row = await session.get(
+                OutboxEventRow,
+                (tenant_id, workspace_id, event_id),
+                with_for_update=True,
+            )
             if row is None or row.lease_owner != owner or row.delivered_at is not None:
                 return False
             row.last_error = error[:2000]
@@ -170,16 +190,50 @@ class PostgresOutboxRelay:
         )
         delivered = 0
         for event in events:
+            if event.tenant_id is None or event.workspace_id is None:
+                raise ValueError("durable Event delivery requires tenant and workspace scope")
             try:
                 await self._event_bus.publish(event)
             except Exception as failure:
                 await self._store.release_failed(
                     event.event_id,
+                    tenant_id=event.tenant_id,
+                    workspace_id=event.workspace_id,
                     owner=self._owner,
                     error=type(failure).__name__,
                     backoff_seconds=self._backoff_seconds,
                 )
             else:
-                if await self._store.mark_delivered(event.event_id, owner=self._owner):
+                if await self._store.mark_delivered(
+                    event.event_id,
+                    tenant_id=event.tenant_id,
+                    workspace_id=event.workspace_id,
+                    owner=self._owner,
+                ):
                     delivered += 1
         return delivered
+
+
+class BufferedPostgresOutbox:
+    """Synchronous producer port backed by a durable store at drain time.
+
+    Runtime producers remain transport-agnostic. Each drain first records every
+    pending immutable Event in PostgreSQL and only then attempts delivery.
+    """
+
+    def __init__(self, store: PostgresOutboxStore, relay: PostgresOutboxRelay) -> None:
+        self._store = store
+        self._relay = relay
+        self._pending: dict[str, EventEnvelope] = {}
+
+    def record(self, event: EventEnvelope) -> None:
+        existing = self._pending.get(event.event_id)
+        if existing is not None and existing != event:
+            raise ValueError("EventId cannot be reused with changed content")
+        self._pending[event.event_id] = event
+
+    async def drain(self) -> int:
+        for event in tuple(self._pending.values()):
+            await self._store.record(event)
+            self._pending.pop(event.event_id, None)
+        return await self._relay.drain()

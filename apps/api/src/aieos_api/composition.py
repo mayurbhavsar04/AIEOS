@@ -11,7 +11,13 @@ from aieos.adapters.event_bus_in_process import (
 )
 from aieos.adapters.memory_persistence import InMemoryMemoryRepository
 from aieos.adapters.observability_default import InMemoryObservationRecorder
-from aieos.adapters.persistence_postgres import PostgresDatabase
+from aieos.adapters.persistence_postgres import (
+    BufferedPostgresOutbox,
+    PostgresDatabase,
+    PostgresMemoryRepository,
+    PostgresOutboxRelay,
+    PostgresOutboxStore,
+)
 from aieos.capability_registry import CapabilityImplementation, CapabilityRegistry
 from aieos.contracts import AuthorizationContext, ResultEnvelope
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
@@ -23,6 +29,7 @@ from aieos.domain import (
     SystemClock,
     UuidIdentifierFactory,
 )
+from aieos.event_bus import EventOutbox
 from aieos.manager import InMemoryRequestRepository, Manager
 from aieos.memory_service import MemoryService
 from aieos.result_error_support import OutcomeFactory
@@ -71,11 +78,16 @@ class CompositionRoot:
         return {"status": "ready", "module_count": len(self.modules)}
 
     async def readiness(self) -> dict[str, object]:
-        database_ready = self.database is None or await self.database.health()
+        migration = (
+            {"ready": True, "status": "not_configured"}
+            if self.database is None
+            else await self.database.migration_readiness()
+        )
+        database_ready = bool(migration["ready"])
         return {
             "status": "ready" if database_ready else "not_ready",
             "database": "not_configured" if self.database is None else database_ready,
-            "migration": self.settings.migration_mode.value,
+            "migration": migration,
         }
 
     async def close(self) -> None:
@@ -108,10 +120,10 @@ class ReferenceRuntime:
     workflow_engine: WorkflowEngine
     skill_runtime: SkillRuntime
     event_bus: InProcessEventBus
-    outbox_store: InMemoryOutboxStore
-    outbox: OutboxRelay
+    outbox_store: InMemoryOutboxStore | PostgresOutboxStore
+    outbox: EventOutbox
     memory_service: MemoryService
-    memory_repository: InMemoryMemoryRepository
+    memory_repository: InMemoryMemoryRepository | PostgresMemoryRepository
     ai_gateway: MockAIGateway
     observations: InMemoryObservationRecorder
     workflow_repository: InMemoryWorkflowRepository
@@ -223,9 +235,34 @@ def compose(
     observations = InMemoryObservationRecorder(resolved_identifiers)
     dispatcher = InProcessCommandDispatcher()
     event_bus = InProcessEventBus()
-    outbox_store = InMemoryOutboxStore()
-    outbox = OutboxRelay(outbox_store, event_bus)
-    memory_repository = InMemoryMemoryRepository()
+    database = None
+    if resolved.runtime_adapter is RuntimeAdapter.POSTGRES:
+        assert resolved.database_url is not None
+        database = PostgresDatabase(
+            resolved.database_url.get_secret_value(),
+            pool_size=resolved.database_pool_size,
+            pool_timeout_seconds=resolved.database_pool_timeout_seconds,
+            command_timeout_seconds=resolved.database_command_timeout_seconds,
+        )
+        postgres_outbox_store = PostgresOutboxStore(database)
+        outbox_store = postgres_outbox_store
+        outbox = BufferedPostgresOutbox(
+            postgres_outbox_store,
+            PostgresOutboxRelay(
+                postgres_outbox_store,
+                event_bus,
+                owner=resolved.host_name,
+                batch_size=resolved.outbox_batch_size,
+                lease_seconds=resolved.outbox_lease_seconds,
+                backoff_seconds=resolved.delivery_backoff_seconds,
+            ),
+        )
+        memory_repository = PostgresMemoryRepository(database)
+    else:
+        memory_outbox_store = InMemoryOutboxStore()
+        outbox_store = memory_outbox_store
+        outbox = OutboxRelay(memory_outbox_store, event_bus)
+        memory_repository = InMemoryMemoryRepository()
     memory_service = MemoryService(
         repository=memory_repository,
         authorizer=authorizer,
@@ -326,13 +363,4 @@ def compose(
         authorization=authorization,
         decisions=decisions,
     )
-    database = None
-    if resolved.runtime_adapter is RuntimeAdapter.POSTGRES:
-        assert resolved.database_url is not None
-        database = PostgresDatabase(
-            resolved.database_url.get_secret_value(),
-            pool_size=resolved.database_pool_size,
-            pool_timeout_seconds=resolved.database_pool_timeout_seconds,
-            command_timeout_seconds=resolved.database_command_timeout_seconds,
-        )
     return CompositionRoot(resolved, FROZEN_RUNTIME_MODULES, runtime, database)

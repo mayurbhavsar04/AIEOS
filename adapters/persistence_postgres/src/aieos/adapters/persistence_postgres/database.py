@@ -4,12 +4,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, ProgrammingError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+
+EXPECTED_ALEMBIC_REVISION = "20260727_0001"
 
 
 class PostgresDatabase:
@@ -44,6 +47,45 @@ class PostgresDatabase:
         except Exception:
             return False
         return True
+
+    async def migration_readiness(self) -> dict[str, str | bool]:
+        """Compare deployed schema revision with the immutable code head.
+
+        This check is deliberately read-only. Migrations remain an operator action.
+        """
+        try:
+            async with self.engine.connect() as connection:
+                revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+        except (ProgrammingError, DBAPIError):
+            return {
+                "ready": False,
+                "status": "version_table_missing",
+                "expected_revision": EXPECTED_ALEMBIC_REVISION,
+            }
+        except Exception:
+            return {
+                "ready": False,
+                "status": "database_unreachable",
+                "expected_revision": EXPECTED_ALEMBIC_REVISION,
+            }
+        if revision == EXPECTED_ALEMBIC_REVISION:
+            return {
+                "ready": True,
+                "status": "compatible",
+                "expected_revision": EXPECTED_ALEMBIC_REVISION,
+                "deployed_revision": revision,
+            }
+        status = (
+            "behind_expected_head"
+            if isinstance(revision, str) and revision < EXPECTED_ALEMBIC_REVISION
+            else "ahead_or_diverged"
+        )
+        return {
+            "ready": False,
+            "status": status,
+            "expected_revision": EXPECTED_ALEMBIC_REVISION,
+            "deployed_revision": str(revision),
+        }
 
     async def close(self) -> None:
         await self.engine.dispose()
