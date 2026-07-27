@@ -201,6 +201,7 @@ Changes to canonical domain concepts, aggregate ownership, identities, commands,
 | --- | --- | --- |
 | [ES-001](ES-001-Execution-Core.md) | Execution Core | Draft |
 | [ES-010](ES-010-Executable-Reference-Workflow.md) | Executable Reference Workflow | Implemented |
+| [ES-011](ES-011-Durable-Runtime-Infrastructure.md) | Durable Runtime Infrastructure | Implemented |
 
 ## Version History
 
