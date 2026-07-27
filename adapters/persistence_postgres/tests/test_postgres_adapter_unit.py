@@ -35,13 +35,13 @@ def test_event_storage_round_trip_preserves_frozen_envelope() -> None:
     assert decode_event(encode_event(event)) == event
 
 
-def test_postgres_requires_database_url() -> None:
+def test_postgres_requires_database_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("AIEOS_DATABASE_URL", raising=False)
+    monkeypatch.chdir(tmp_path)
     with pytest.raises(ValueError, match="database_url"):
-        HostSettings(
-            runtime_adapter=RuntimeAdapter.POSTGRES,
-            database_url=None,
-            _env_file=None,
-        )
+        HostSettings(runtime_adapter=RuntimeAdapter.POSTGRES)
 
 
 def test_safe_summary_never_contains_database_url() -> None:
