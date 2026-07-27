@@ -1,12 +1,7 @@
-"""Non-authoritative typing boundary for frozen ES-005 Events."""
+"""Canonical immutable ES-005 Event envelope."""
 
-from typing import Protocol
+from aieos.contracts.events.models import EventEnvelope, EventMetadata
 
+EventMessage = EventEnvelope
 
-class EventMessage(Protocol):
-    """Opaque Event accepted by bootstrap ports; ES-005 owns its envelope."""
-
-    pass
-
-
-__all__ = ("EventMessage",)
+__all__ = ("EventEnvelope", "EventMessage", "EventMetadata")

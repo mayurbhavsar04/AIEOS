@@ -1,3 +1,5 @@
-"""Public bootstrap surface for AIEOS skill registry."""
+"""Versioned Skill metadata registry; execution remains outside this component."""
 
-__all__: tuple[str, ...] = ()
+from aieos.skill_registry.registry import SkillDefinition, SkillRegistry
+
+__all__ = ("SkillDefinition", "SkillRegistry")

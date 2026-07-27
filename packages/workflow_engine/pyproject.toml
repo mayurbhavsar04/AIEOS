@@ -3,7 +3,15 @@ name = "aieos-workflow-engine"
 version = "0.0.0"
 description = "AIEOS workflow engine bootstrap package."
 requires-python = "==3.13.*"
-dependencies = []
+dependencies = [
+  "aieos-command-dispatcher",
+  "aieos-contracts",
+  "aieos-domain",
+  "aieos-event-bus",
+  "aieos-observability",
+  "aieos-result-error-support",
+  "aieos-security-support",
+]
 
 [build-system]
 requires = ["hatchling==1.27.0"]
@@ -14,3 +22,12 @@ packages = ["src/aieos/workflow_engine"]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
+
+[tool.uv.sources]
+aieos-command-dispatcher = { workspace = true }
+aieos-contracts = { workspace = true }
+aieos-domain = { workspace = true }
+aieos-event-bus = { workspace = true }
+aieos-observability = { workspace = true }
+aieos-result-error-support = { workspace = true }
+aieos-security-support = { workspace = true }

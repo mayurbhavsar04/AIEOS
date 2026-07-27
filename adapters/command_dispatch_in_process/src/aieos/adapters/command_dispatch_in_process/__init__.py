@@ -1,3 +1,9 @@
-"""Public bootstrap surface for AIEOS command dispatch in process."""
+"""In-process directed Command Dispatcher adapter."""
 
-__all__: tuple[str, ...] = ()
+from aieos.adapters.command_dispatch_in_process.dispatcher import (
+    DuplicateCommandTarget,
+    InProcessCommandDispatcher,
+    UnknownCommandTarget,
+)
+
+__all__ = ("DuplicateCommandTarget", "InProcessCommandDispatcher", "UnknownCommandTarget")

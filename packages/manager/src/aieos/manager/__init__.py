@@ -1,3 +1,5 @@
-"""Public bootstrap surface for AIEOS manager."""
+"""Manager request boundary for the executable reference workflow."""
 
-__all__: tuple[str, ...] = ()
+from aieos.manager.manager import InMemoryRequestRepository, Manager
+
+__all__ = ("InMemoryRequestRepository", "Manager")

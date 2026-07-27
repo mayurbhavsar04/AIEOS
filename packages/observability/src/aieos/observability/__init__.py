@@ -1,3 +1,5 @@
-"""Public bootstrap surface for AIEOS observability."""
+"""ES-008-aligned observability recording port."""
 
-__all__: tuple[str, ...] = ()
+from aieos.observability.ports import ObservationRecorder
+
+__all__ = ("ObservationRecorder",)

@@ -3,7 +3,13 @@ name = "aieos-adapter-ai-mock"
 version = "0.0.0"
 description = "AIEOS ai mock bootstrap package."
 requires-python = "==3.13.*"
-dependencies = []
+dependencies = [
+  "aieos-ai-gateway",
+  "aieos-contracts",
+  "aieos-domain",
+  "aieos-result-error-support",
+  "aieos-security-support",
+]
 
 [build-system]
 requires = ["hatchling==1.27.0"]
@@ -14,3 +20,10 @@ packages = ["src/aieos/adapters/ai_mock"]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
+
+[tool.uv.sources]
+aieos-ai-gateway = { workspace = true }
+aieos-contracts = { workspace = true }
+aieos-domain = { workspace = true }
+aieos-result-error-support = { workspace = true }
+aieos-security-support = { workspace = true }

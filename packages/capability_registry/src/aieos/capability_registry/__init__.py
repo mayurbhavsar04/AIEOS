@@ -1,3 +1,8 @@
-"""Public bootstrap surface for AIEOS capability registry."""
+"""Versioned Capability contract and implementation registry."""
 
-__all__: tuple[str, ...] = ()
+from aieos.capability_registry.registry import (
+    CapabilityImplementation,
+    CapabilityRegistry,
+)
+
+__all__ = ("CapabilityImplementation", "CapabilityRegistry")

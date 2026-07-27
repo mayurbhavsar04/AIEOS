@@ -85,8 +85,14 @@ def check() -> list[str]:
             for provider in PROVIDER_IMPORTS
         ) and not str(path).startswith(str(PROVIDER_ADAPTER_PREFIX)):
             violations.append(f"{relative}: provider SDK import outside approved provider adapter")
-        if package_name != "testing" and any(
-            module == "aieos.testing" or module.startswith("aieos.testing.") for module in imports
+        is_production_source = relative.parts[0] in {"packages", "apps", "adapters"}
+        if (
+            is_production_source
+            and package_name != "testing"
+            and any(
+                module == "aieos.testing" or module.startswith("aieos.testing.")
+                for module in imports
+            )
         ):
             violations.append(f"{relative}: production package depends on test-only support")
     violations.extend(check_declared_dependencies())

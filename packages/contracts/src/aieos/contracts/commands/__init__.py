@@ -1,12 +1,7 @@
-"""Non-authoritative typing boundary for frozen ES-004 Commands."""
+"""Canonical immutable ES-004 Command envelope."""
 
-from typing import Protocol
+from aieos.contracts.commands.models import CommandEnvelope, CommandMetadata
 
+CommandMessage = CommandEnvelope
 
-class CommandMessage(Protocol):
-    """Opaque Command accepted by bootstrap ports; ES-004 owns its envelope."""
-
-    pass
-
-
-__all__ = ("CommandMessage",)
+__all__ = ("CommandEnvelope", "CommandMessage", "CommandMetadata")

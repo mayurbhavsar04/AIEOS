@@ -1,5 +1,5 @@
-"""Public bootstrap surface for AIEOS command dispatcher."""
+"""Public directed Command-dispatch boundary."""
 
-from aieos.command_dispatcher.ports import CommandDispatcher
+from aieos.command_dispatcher.ports import CommandDispatcher, CommandHandler
 
-__all__ = ("CommandDispatcher",)
+__all__ = ("CommandDispatcher", "CommandHandler")

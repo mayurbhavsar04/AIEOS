@@ -41,26 +41,80 @@ members = [
 name = "aieos-adapter-ai-mock"
 version = "0.0.0"
 source = { editable = "adapters/ai_mock" }
+dependencies = [
+    { name = "aieos-ai-gateway" },
+    { name = "aieos-contracts" },
+    { name = "aieos-domain" },
+    { name = "aieos-result-error-support" },
+    { name = "aieos-security-support" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aieos-ai-gateway", editable = "packages/ai_gateway" },
+    { name = "aieos-contracts", editable = "packages/contracts" },
+    { name = "aieos-domain", editable = "packages/domain" },
+    { name = "aieos-result-error-support", editable = "packages/result_error_support" },
+    { name = "aieos-security-support", editable = "packages/security_support" },
+]
 
 [[package]]
 name = "aieos-adapter-command-dispatch-in-process"
 version = "0.0.0"
 source = { editable = "adapters/command_dispatch_in_process" }
+dependencies = [
+    { name = "aieos-command-dispatcher" },
+    { name = "aieos-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aieos-command-dispatcher", editable = "packages/command_dispatcher" },
+    { name = "aieos-contracts", editable = "packages/contracts" },
+]
 
 [[package]]
 name = "aieos-adapter-event-bus-in-process"
 version = "0.0.0"
 source = { editable = "adapters/event_bus_in_process" }
+dependencies = [
+    { name = "aieos-contracts" },
+    { name = "aieos-event-bus" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aieos-contracts", editable = "packages/contracts" },
+    { name = "aieos-event-bus", editable = "packages/event_bus" },
+]
 
 [[package]]
 name = "aieos-adapter-memory-persistence"
 version = "0.0.0"
 source = { editable = "adapters/memory_persistence" }
+dependencies = [
+    { name = "aieos-memory-service" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aieos-memory-service", editable = "packages/memory_service" }]
 
 [[package]]
 name = "aieos-adapter-observability-default"
 version = "0.0.0"
 source = { editable = "adapters/observability_default" }
+dependencies = [
+    { name = "aieos-contracts" },
+    { name = "aieos-domain" },
+    { name = "aieos-observability" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aieos-contracts", editable = "packages/contracts" },
+    { name = "aieos-domain", editable = "packages/domain" },
+    { name = "aieos-observability", editable = "packages/observability" },
+]
 
 [[package]]
 name = "aieos-adapter-persistence-postgres"
@@ -76,6 +130,12 @@ source = { editable = "adapters/secrets_environment" }
 name = "aieos-ai-gateway"
 version = "0.0.0"
 source = { editable = "packages/ai_gateway" }
+dependencies = [
+    { name = "aieos-contracts" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aieos-contracts", editable = "packages/contracts" }]
 
 [[package]]
 name = "aieos-analytics"
@@ -87,6 +147,21 @@ name = "aieos-api"
 version = "0.0.0"
 source = { editable = "apps/api" }
 dependencies = [
+    { name = "aieos-adapter-ai-mock" },
+    { name = "aieos-adapter-command-dispatch-in-process" },
+    { name = "aieos-adapter-event-bus-in-process" },
+    { name = "aieos-adapter-memory-persistence" },
+    { name = "aieos-adapter-observability-default" },
+    { name = "aieos-capability-registry" },
+    { name = "aieos-contracts" },
+    { name = "aieos-domain" },
+    { name = "aieos-manager" },
+    { name = "aieos-memory-service" },
+    { name = "aieos-result-error-support" },
+    { name = "aieos-security-support" },
+    { name = "aieos-skill-registry" },
+    { name = "aieos-skill-runtime" },
+    { name = "aieos-workflow-engine" },
     { name = "fastapi" },
     { name = "pydantic-settings" },
     { name = "uvicorn" },
@@ -94,6 +169,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aieos-adapter-ai-mock", editable = "adapters/ai_mock" },
+    { name = "aieos-adapter-command-dispatch-in-process", editable = "adapters/command_dispatch_in_process" },
+    { name = "aieos-adapter-event-bus-in-process", editable = "adapters/event_bus_in_process" },
+    { name = "aieos-adapter-memory-persistence", editable = "adapters/memory_persistence" },
+    { name = "aieos-adapter-observability-default", editable = "adapters/observability_default" },
+    { name = "aieos-capability-registry", editable = "packages/capability_registry" },
+    { name = "aieos-contracts", editable = "packages/contracts" },
+    { name = "aieos-domain", editable = "packages/domain" },
+    { name = "aieos-manager", editable = "packages/manager" },
+    { name = "aieos-memory-service", editable = "packages/memory_service" },
+    { name = "aieos-result-error-support", editable = "packages/result_error_support" },
+    { name = "aieos-security-support", editable = "packages/security_support" },
+    { name = "aieos-skill-registry", editable = "packages/skill_registry" },
+    { name = "aieos-skill-runtime", editable = "packages/skill_runtime" },
+    { name = "aieos-workflow-engine", editable = "packages/workflow_engine" },
     { name = "fastapi", specifier = "==0.116.1" },
     { name = "pydantic-settings", specifier = "==2.10.1" },
     { name = "uvicorn", specifier = "==0.35.0" },
@@ -129,6 +219,12 @@ source = { editable = "packages/configuration" }
 name = "aieos-contracts"
 version = "0.0.0"
 source = { editable = "packages/contracts" }
+dependencies = [
+    { name = "aieos-domain" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aieos-domain", editable = "packages/domain" }]
 
 [[package]]
 name = "aieos-domain"
@@ -155,11 +251,39 @@ source = { editable = "packages/logging" }
 name = "aieos-manager"
 version = "0.0.0"
 source = { editable = "packages/manager" }
+dependencies = [
+    { name = "aieos-contracts" },
+    { name = "aieos-domain" },
+    { name = "aieos-result-error-support" },
+    { name = "aieos-security-support" },
+    { name = "aieos-workflow-engine" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aieos-contracts", editable = "packages/contracts" },
+    { name = "aieos-domain", editable = "packages/domain" },
+    { name = "aieos-result-error-support", editable = "packages/result_error_support" },
+    { name = "aieos-security-support", editable = "packages/security_support" },
+    { name = "aieos-workflow-engine", editable = "packages/workflow_engine" },
+]
 
 [[package]]
 name = "aieos-memory-service"
 version = "0.0.0"
 source = { editable = "packages/memory_service" }
+dependencies = [
+    { name = "aieos-contracts" },
+    { name = "aieos-domain" },
+    { name = "aieos-security-support" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aieos-contracts", editable = "packages/contracts" },
+    { name = "aieos-domain", editable = "packages/domain" },
+    { name = "aieos-security-support", editable = "packages/security_support" },
+]
 
 [[package]]
 name = "aieos-notification"
@@ -170,11 +294,27 @@ source = { editable = "packages/notification" }
 name = "aieos-observability"
 version = "0.0.0"
 source = { editable = "packages/observability" }
+dependencies = [
+    { name = "aieos-contracts" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aieos-contracts", editable = "packages/contracts" }]
 
 [[package]]
 name = "aieos-result-error-support"
 version = "0.0.0"
 source = { editable = "packages/result_error_support" }
+dependencies = [
+    { name = "aieos-contracts" },
+    { name = "aieos-domain" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aieos-contracts", editable = "packages/contracts" },
+    { name = "aieos-domain", editable = "packages/domain" },
+]
 
 [[package]]
 name = "aieos-root"
@@ -218,6 +358,12 @@ source = { editable = "packages/scheduler" }
 name = "aieos-security-support"
 version = "0.0.0"
 source = { editable = "packages/security_support" }
+dependencies = [
+    { name = "aieos-contracts" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aieos-contracts", editable = "packages/contracts" }]
 
 [[package]]
 name = "aieos-skill-registry"
@@ -228,6 +374,32 @@ source = { editable = "packages/skill_registry" }
 name = "aieos-skill-runtime"
 version = "0.0.0"
 source = { editable = "packages/skill_runtime" }
+dependencies = [
+    { name = "aieos-ai-gateway" },
+    { name = "aieos-capability-registry" },
+    { name = "aieos-contracts" },
+    { name = "aieos-domain" },
+    { name = "aieos-event-bus" },
+    { name = "aieos-memory-service" },
+    { name = "aieos-observability" },
+    { name = "aieos-result-error-support" },
+    { name = "aieos-security-support" },
+    { name = "aieos-skill-registry" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aieos-ai-gateway", editable = "packages/ai_gateway" },
+    { name = "aieos-capability-registry", editable = "packages/capability_registry" },
+    { name = "aieos-contracts", editable = "packages/contracts" },
+    { name = "aieos-domain", editable = "packages/domain" },
+    { name = "aieos-event-bus", editable = "packages/event_bus" },
+    { name = "aieos-memory-service", editable = "packages/memory_service" },
+    { name = "aieos-observability", editable = "packages/observability" },
+    { name = "aieos-result-error-support", editable = "packages/result_error_support" },
+    { name = "aieos-security-support", editable = "packages/security_support" },
+    { name = "aieos-skill-registry", editable = "packages/skill_registry" },
+]
 
 [[package]]
 name = "aieos-testing"
@@ -238,6 +410,26 @@ source = { editable = "packages/testing" }
 name = "aieos-workflow-engine"
 version = "0.0.0"
 source = { editable = "packages/workflow_engine" }
+dependencies = [
+    { name = "aieos-command-dispatcher" },
+    { name = "aieos-contracts" },
+    { name = "aieos-domain" },
+    { name = "aieos-event-bus" },
+    { name = "aieos-observability" },
+    { name = "aieos-result-error-support" },
+    { name = "aieos-security-support" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aieos-command-dispatcher", editable = "packages/command_dispatcher" },
+    { name = "aieos-contracts", editable = "packages/contracts" },
+    { name = "aieos-domain", editable = "packages/domain" },
+    { name = "aieos-event-bus", editable = "packages/event_bus" },
+    { name = "aieos-observability", editable = "packages/observability" },
+    { name = "aieos-result-error-support", editable = "packages/result_error_support" },
+    { name = "aieos-security-support", editable = "packages/security_support" },
+]
 
 [[package]]
 name = "aieos-workspace"

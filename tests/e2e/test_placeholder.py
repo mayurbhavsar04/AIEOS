@@ -1,7 +1,14 @@
-import pytest
+from fastapi.testclient import TestClient
+
+from aieos_api.main import app
 
 
-@pytest.mark.e2e
-def test_e2e_location_is_ready() -> None:
-    """Reserve the E2E tier without inventing a workflow."""
-    assert True
+def test_reference_host_executes_hello_aieos_workflow() -> None:
+    with TestClient(app) as client:
+        response = client.post("/reference/hello", json={"message": "host smoke"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "Succeeded"
+    assert body["outcome"] == "Success"
+    assert body["value"] == "Hello from AIEOS: host smoke"

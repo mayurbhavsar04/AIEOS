@@ -10,8 +10,9 @@ class DeterministicIdentifiers:
     prefix: str = "test"
     next_value: int = 1
 
-    def new(self) -> str:
+    def new(self, prefix: str | None = None) -> str:
         """Return the next stable identifier."""
-        value = f"{self.prefix}-{self.next_value:04d}"
+        namespace = self.prefix if prefix is None else f"{self.prefix}-{prefix}"
+        value = f"{namespace}-{self.next_value:04d}"
         self.next_value += 1
         return value

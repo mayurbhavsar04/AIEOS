@@ -3,7 +3,7 @@ name = "aieos-adapter-event-bus-in-process"
 version = "0.0.0"
 description = "AIEOS event bus in process bootstrap package."
 requires-python = "==3.13.*"
-dependencies = []
+dependencies = ["aieos-contracts", "aieos-event-bus"]
 
 [build-system]
 requires = ["hatchling==1.27.0"]
@@ -14,3 +14,7 @@ packages = ["src/aieos/adapters/event_bus_in_process"]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
+
+[tool.uv.sources]
+aieos-contracts = { workspace = true }
+aieos-event-bus = { workspace = true }
