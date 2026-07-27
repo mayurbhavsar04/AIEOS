@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import anyio
 import pytest
+from sqlalchemy import text
 
 from aieos.adapters.persistence_postgres import PostgresDatabase, PostgresOutboxStore
 from aieos.contracts.events import EventEnvelope, EventMetadata
@@ -40,6 +41,8 @@ async def test_concurrent_claims_do_not_overlap_and_stale_lease_is_reclaimed() -
     database = PostgresDatabase(url)
     store = PostgresOutboxStore(database)
     try:
+        async with database.transaction() as session:
+            await session.execute(text("TRUNCATE delivery_receipts, outbox_events CASCADE"))
         for index in range(4):
             await store.record(event(f"event-{index}"))
         claimed: list[set[str]] = []
