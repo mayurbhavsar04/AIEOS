@@ -88,9 +88,15 @@ lineage queryable and prevent duplicate advancement.
 
 ## Health and limitations
 
-Database health is a non-mutating `SELECT 1`. Migration readiness compares the deployed Alembic
-revision to the code head. Relay health reports only counts for pending work and stale leases.
-Health is descriptive and cannot change authoritative state.
+Readiness is a non-mutating comparison of the deployed `alembic_version` value with the immutable
+code head. It reports database-unreachable, missing-version-table, behind-head,
+ahead-or-diverged, or compatible states without running migrations or exposing connection
+credentials. Relay health reports only counts for pending work and stale leases. Health is
+descriptive and cannot change authoritative state.
+
+CI provisions PostgreSQL, upgrades it to Alembic head, and runs the live durability suite as a
+mandatory release gate. Local runs without `AIEOS_TEST_DATABASE_URL` report an explicit skip; CI
+fails when the URL or service is unavailable.
 
 This phase does not provide an external broker, vectors, multi-region operation, production
 deployment, production authentication, or arbitrary runtime SQL. Operators should use separate

@@ -9,7 +9,7 @@ import pytest
 from aieos.adapters.persistence_postgres import PostgresDatabase, PostgresOutboxStore
 from aieos.contracts.events import EventEnvelope, EventMetadata
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.postgres_required]
 
 
 def event(event_id: str) -> EventEnvelope:
@@ -34,7 +34,9 @@ def event(event_id: str) -> EventEnvelope:
 async def test_concurrent_claims_do_not_overlap_and_stale_lease_is_reclaimed() -> None:
     url = os.environ.get("AIEOS_TEST_DATABASE_URL")
     if url is None:
-        pytest.skip("AIEOS_TEST_DATABASE_URL is not configured")
+        if os.environ.get("CI"):
+            pytest.fail("mandatory AIEOS_TEST_DATABASE_URL is not configured in CI")
+        pytest.skip("live PostgreSQL suite not executed: set AIEOS_TEST_DATABASE_URL")
     database = PostgresDatabase(url)
     store = PostgresOutboxStore(database)
     try:
