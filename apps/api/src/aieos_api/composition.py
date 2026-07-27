@@ -11,6 +11,7 @@ from aieos.adapters.event_bus_in_process import (
 )
 from aieos.adapters.memory_persistence import InMemoryMemoryRepository
 from aieos.adapters.observability_default import InMemoryObservationRecorder
+from aieos.adapters.persistence_postgres import PostgresDatabase
 from aieos.capability_registry import CapabilityImplementation, CapabilityRegistry
 from aieos.contracts import AuthorizationContext, ResultEnvelope
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
@@ -34,7 +35,7 @@ from aieos.workflow_engine import (
     WorkflowEngine,
 )
 from aieos_api.reference_skill import HelloAIEOSSkill
-from aieos_api.settings import HostSettings
+from aieos_api.settings import HostSettings, RuntimeAdapter
 
 FROZEN_RUNTIME_MODULES = (
     "Authentication",
@@ -63,10 +64,23 @@ class CompositionRoot:
     settings: HostSettings
     modules: tuple[str, ...]
     reference_runtime: "ReferenceRuntime"
+    database: PostgresDatabase | None = None
 
     def health(self) -> dict[str, object]:
         """Return startup readiness without disclosing configuration values."""
         return {"status": "ready", "module_count": len(self.modules)}
+
+    async def readiness(self) -> dict[str, object]:
+        database_ready = self.database is None or await self.database.health()
+        return {
+            "status": "ready" if database_ready else "not_ready",
+            "database": "not_configured" if self.database is None else database_ready,
+            "migration": self.settings.migration_mode.value,
+        }
+
+    async def close(self) -> None:
+        if self.database is not None:
+            await self.database.close()
 
 
 class DispatchingWorkflowClient(WorkflowClient):
@@ -312,4 +326,13 @@ def compose(
         authorization=authorization,
         decisions=decisions,
     )
-    return CompositionRoot(resolved, FROZEN_RUNTIME_MODULES, runtime)
+    database = None
+    if resolved.runtime_adapter is RuntimeAdapter.POSTGRES:
+        assert resolved.database_url is not None
+        database = PostgresDatabase(
+            resolved.database_url.get_secret_value(),
+            pool_size=resolved.database_pool_size,
+            pool_timeout_seconds=resolved.database_pool_timeout_seconds,
+            command_timeout_seconds=resolved.database_command_timeout_seconds,
+        )
+    return CompositionRoot(resolved, FROZEN_RUNTIME_MODULES, runtime, database)

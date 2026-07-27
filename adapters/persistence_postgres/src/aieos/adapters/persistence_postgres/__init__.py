@@ -1,3 +1,12 @@
-"""Public bootstrap surface for AIEOS persistence postgres."""
+"""Durable PostgreSQL runtime infrastructure adapters."""
 
-__all__: tuple[str, ...] = ()
+from .database import PostgresDatabase
+from .memory import PostgresMemoryRepository
+from .outbox import PostgresOutboxRelay, PostgresOutboxStore
+
+__all__ = (
+    "PostgresDatabase",
+    "PostgresMemoryRepository",
+    "PostgresOutboxRelay",
+    "PostgresOutboxStore",
+)

@@ -4,6 +4,7 @@ version = "0.0.0"
 description = "AIEOS initial HTTP host bootstrap."
 requires-python = "==3.13.*"
 dependencies = [
+  "aieos-adapter-persistence-postgres",
   "aieos-adapter-ai-mock",
   "aieos-adapter-command-dispatch-in-process",
   "aieos-adapter-event-bus-in-process",
@@ -35,6 +36,7 @@ packages = ["src/aieos_api"]
 "src" = ""
 
 [tool.uv.sources]
+aieos-adapter-persistence-postgres = { workspace = true }
 aieos-adapter-ai-mock = { workspace = true }
 aieos-adapter-command-dispatch-in-process = { workspace = true }
 aieos-adapter-event-bus-in-process = { workspace = true }

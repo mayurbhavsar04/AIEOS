@@ -26,6 +26,13 @@ async def health(request: Request) -> dict[str, object]:
     return composition.health()
 
 
+@app.get("/ready")
+async def readiness(request: Request) -> dict[str, object]:
+    """Check dependencies without mutating runtime state."""
+    composition = cast(CompositionRoot, request.app.state.composition)
+    return await composition.readiness()
+
+
 @app.post("/reference/hello")
 async def reference_hello(body: HelloRequest, request: Request) -> dict[str, object]:
     """Run HelloAIEOSWorkflow through all frozen component boundaries."""
