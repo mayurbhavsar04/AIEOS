@@ -28,6 +28,7 @@ jobs:
           --health-retries 30
     env:
       AIEOS_TEST_DATABASE_URL: postgresql+asyncpg://aieos:aieos_ci@localhost:5432/aieos_test
+      AIEOS_DATABASE_URL: postgresql+asyncpg://aieos:aieos_ci@localhost:5432/aieos_test
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
