@@ -51,8 +51,18 @@ class ExecutionRecord:
     tenant_id: str
     workspace_id: str
     state: ExecutionState
+    acknowledgement: ResultEnvelope
+    start_event: EventEnvelope | None = None
+    terminal_event: EventEnvelope | None = None
     result: ResultEnvelope | None = None
     error: ErrorEnvelope | None = None
+
+
+@dataclass(slots=True)
+class ExecutionCommandReceipt:
+    command: CommandEnvelope
+    acknowledgement: ResultEnvelope
+    completed: bool = False
 
 
 class InMemoryExecutionRepository:
@@ -60,20 +70,31 @@ class InMemoryExecutionRepository:
 
     def __init__(self) -> None:
         self.records: dict[str, ExecutionRecord] = {}
-        self.command_results: dict[str, ResultEnvelope] = {}
-        self.commands: dict[str, CommandEnvelope] = {}
+        self.command_receipts: dict[str, ExecutionCommandReceipt] = {}
 
     def add(self, record: ExecutionRecord) -> None:
         if record.execution_id in self.records:
             raise ValueError("ExecutionId already exists")
         self.records[record.execution_id] = record
 
-    def result_for_command(self, command_id: str) -> ResultEnvelope | None:
-        return self.command_results.get(command_id)
+    def receipt_for_command(self, command_id: str) -> ExecutionCommandReceipt | None:
+        return self.command_receipts.get(command_id)
 
-    def remember_command(self, command: CommandEnvelope, result: ResultEnvelope) -> None:
-        self.commands[command.command_id] = command
-        self.command_results[command.command_id] = result
+    def begin_command(
+        self, command: CommandEnvelope, acknowledgement: ResultEnvelope
+    ) -> ExecutionCommandReceipt:
+        receipt = ExecutionCommandReceipt(command, acknowledgement)
+        self.command_receipts[command.command_id] = receipt
+        return receipt
+
+    def complete_command(self, command_id: str) -> ResultEnvelope:
+        receipt = self.command_receipts[command_id]
+        receipt.completed = True
+        return receipt.acknowledgement
+
+    def remember_completed_command(self, command: CommandEnvelope, result: ResultEnvelope) -> None:
+        receipt = self.begin_command(command, result)
+        receipt.completed = True
 
 
 class SkillDependencyFailure(RuntimeError):
@@ -127,11 +148,12 @@ class SkillRuntime:
         self._default_timeout_seconds = default_timeout_seconds
 
     async def handle(self, command: CommandEnvelope) -> ResultEnvelope:
-        cached = self._repository.result_for_command(command.command_id)
-        if cached is not None:
-            if self._repository.commands[command.command_id] != command:
+        receipt = self._repository.receipt_for_command(command.command_id)
+        if receipt is not None:
+            if receipt.command != command:
                 raise ValueError("CommandId cannot be reused with changed immutable content")
-            return cached
+            if receipt.completed:
+                return receipt.acknowledgement
         if command.target_component != self.component_name:
             raise ValueError("Command target does not match Skill Runtime")
         if command.command_type != "DispatchExecutionAttempt" or command.execution_id is None:
@@ -174,28 +196,43 @@ class SkillRuntime:
                 command, "SKILL_IMPLEMENTATION_MISSING", "approved Skill implementation unavailable"
             )
 
-        record = ExecutionRecord(
-            execution_id=command.execution_id,
-            workflow_id=command.workflow_id,
-            workflow_step_id=command.workflow_step_id,
-            attempt_number=command.metadata.attempt_number,
-            tenant_id=command.tenant_id,
-            workspace_id=command.workspace_id,
-            state=ExecutionState.EXECUTING,
-        )
-        self._repository.add(record)
-        acknowledgement = self._outcomes.accepted(
-            subject=command.execution_id,
-            producer=self.component_name,
-            tenant_id=command.tenant_id,
-            workspace_id=command.workspace_id,
-            correlation_id=command.correlation_id,
-            causation_id=command.command_id,
-            command_id=command.command_id,
-            value_reference=command.execution_id,
-        )
-        self._repository.remember_command(command, acknowledgement)
-        await self._publish(command, "ExecutionAttemptStarted", acknowledgement)
+        if receipt is None:
+            acknowledgement = self._outcomes.accepted(
+                subject=command.execution_id,
+                producer=self.component_name,
+                tenant_id=command.tenant_id,
+                workspace_id=command.workspace_id,
+                correlation_id=command.correlation_id,
+                causation_id=command.command_id,
+                command_id=command.command_id,
+                value_reference=command.execution_id,
+            )
+            receipt = self._repository.begin_command(command, acknowledgement)
+            record = ExecutionRecord(
+                execution_id=command.execution_id,
+                workflow_id=command.workflow_id,
+                workflow_step_id=command.workflow_step_id,
+                attempt_number=command.metadata.attempt_number,
+                tenant_id=command.tenant_id,
+                workspace_id=command.workspace_id,
+                state=ExecutionState.EXECUTING,
+                acknowledgement=acknowledgement,
+            )
+            record.start_event = self._event_envelope(
+                command, "ExecutionAttemptStarted", acknowledgement
+            )
+            self._repository.add(record)
+        else:
+            record = self._repository.records[command.execution_id]
+            acknowledgement = receipt.acknowledgement
+
+        assert record.start_event is not None
+        await self._publish(record.start_event)
+        if record.result is not None:
+            assert record.terminal_event is not None
+            await self._publish(record.terminal_event)
+            return self._repository.complete_command(command.command_id)
+
         timeout = self._payload_float(
             command.payload, "timeout_seconds", self._default_timeout_seconds
         )
@@ -290,9 +327,10 @@ class SkillRuntime:
             event_type = "ExecutionAttemptSucceeded"
         record.result = terminal
         record.error = error
-        await self._publish(command, event_type, terminal, error)
+        record.terminal_event = self._event_envelope(command, event_type, terminal, error)
+        await self._publish(record.terminal_event)
         self._observe(command, terminal)
-        return acknowledgement
+        return self._repository.complete_command(command.command_id)
 
     def _reject(self, command: CommandEnvelope, code: str, message: str) -> ResultEnvelope:
         result, _ = self._outcomes.unsuccessful(
@@ -310,18 +348,18 @@ class SkillRuntime:
             retry=RetryClassification.NEVER_RETRY,
             message=message,
         )
-        self._repository.remember_command(command, result)
+        self._repository.remember_completed_command(command, result)
         return result
 
-    async def _publish(
+    def _event_envelope(
         self,
         command: CommandEnvelope,
         event_type: str,
         result: ResultEnvelope,
         error: ErrorEnvelope | None = None,
-    ) -> None:
+    ) -> EventEnvelope:
         now = self._clock.now()
-        event = EventEnvelope(
+        return EventEnvelope(
             event_id=self._identifiers.new("event"),
             event_type=event_type,
             event_version="1.0",
@@ -353,6 +391,8 @@ class SkillRuntime:
                 trace_id=command.metadata.trace_id, span_id=command.metadata.span_id
             ),
         )
+
+    async def _publish(self, event: EventEnvelope) -> None:
         self._outbox.record(event)
         await self._outbox.drain()
 
@@ -404,6 +444,7 @@ class SkillRuntime:
 
 
 __all__ = (
+    "ExecutionCommandReceipt",
     "ExecutionRecord",
     "InMemoryExecutionRepository",
     "SkillDependencyFailure",

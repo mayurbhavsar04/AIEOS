@@ -24,6 +24,7 @@ class InMemoryRequestRepository:
     def __init__(self) -> None:
         self.command_results: dict[str, ResultEnvelope] = {}
         self.commands: dict[str, CommandEnvelope] = {}
+        self.workflow_commands: dict[str, CommandEnvelope] = {}
 
 
 class Manager:
@@ -54,6 +55,9 @@ class Manager:
             if self._repository.commands[command.command_id] != command:
                 raise ValueError("CommandId cannot be reused with changed immutable content")
             return cached
+        existing = self._repository.commands.get(command.command_id)
+        if existing is not None and existing != command:
+            raise ValueError("CommandId cannot be reused with changed immutable content")
         if (
             command.target_component != self.component_name
             or command.command_type != "AcceptRequest"
@@ -76,31 +80,35 @@ class Manager:
                 "REQUEST_PAYLOAD_INVALID",
                 "Request message must be a non-empty string",
             )
-        start = CommandEnvelope(
-            command_id=self._identifiers.new("command"),
-            command_type="StartWorkflow",
-            command_version="1.0",
-            correlation_id=command.correlation_id,
-            causation_id=command.command_id,
-            target_component="Workflow Engine",
-            initiator=self.component_name,
-            timestamp=self._clock.now(),
-            tenant_id=command.tenant_id,
-            workspace_id=command.workspace_id,
-            payload={
-                "message": message,
-                "workflow_definition_id": "hello-aieos",
-                "workflow_definition_version_id": "hello-aieos-v1",
-                "skill_version_id": "hello-aieos-skill-v1",
-                "max_attempts": command.payload.get("max_attempts", 2),
-                "timeout_seconds": command.payload.get("timeout_seconds", 1.0),
-            },
-            metadata=CommandMetadata(
-                request_id=command.metadata.request_id,
-                idempotency_key=f"{command.metadata.idempotency_key}:workflow",
-                authorization=command.metadata.authorization,
-            ),
-        )
+        start = self._repository.workflow_commands.get(command.command_id)
+        if start is None:
+            start = CommandEnvelope(
+                command_id=self._identifiers.new("command"),
+                command_type="StartWorkflow",
+                command_version="1.0",
+                correlation_id=command.correlation_id,
+                causation_id=command.command_id,
+                target_component="Workflow Engine",
+                initiator=self.component_name,
+                timestamp=self._clock.now(),
+                tenant_id=command.tenant_id,
+                workspace_id=command.workspace_id,
+                payload={
+                    "message": message,
+                    "workflow_definition_id": "hello-aieos",
+                    "workflow_definition_version_id": "hello-aieos-v1",
+                    "skill_version_id": "hello-aieos-skill-v1",
+                    "max_attempts": command.payload.get("max_attempts", 2),
+                    "timeout_seconds": command.payload.get("timeout_seconds", 1.0),
+                },
+                metadata=CommandMetadata(
+                    request_id=command.metadata.request_id,
+                    idempotency_key=f"{command.metadata.idempotency_key}:workflow",
+                    authorization=command.metadata.authorization,
+                ),
+            )
+            self._repository.commands[command.command_id] = command
+            self._repository.workflow_commands[command.command_id] = start
         acknowledgement = await self._workflow_client.submit(start)
         self._repository.commands[command.command_id] = command
         self._repository.command_results[command.command_id] = acknowledgement

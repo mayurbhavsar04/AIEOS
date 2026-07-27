@@ -14,7 +14,14 @@ from aieos.adapters.observability_default import InMemoryObservationRecorder
 from aieos.capability_registry import CapabilityImplementation, CapabilityRegistry
 from aieos.contracts import AuthorizationContext, ResultEnvelope
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
-from aieos.domain import Clock, IdentifierFactory, SystemClock, UuidIdentifierFactory
+from aieos.domain import (
+    Clock,
+    DecisionEvidence,
+    IdentifierFactory,
+    InMemoryDecisionEvidenceRepository,
+    SystemClock,
+    UuidIdentifierFactory,
+)
 from aieos.manager import InMemoryRequestRepository, Manager
 from aieos.memory_service import MemoryService
 from aieos.result_error_support import OutcomeFactory
@@ -98,6 +105,7 @@ class ReferenceRuntime:
     clock: Clock
     identifiers: IdentifierFactory
     authorization: AuthorizationContext
+    decisions: InMemoryDecisionEvidenceRepository
 
     async def run(
         self,
@@ -127,12 +135,26 @@ class ReferenceRuntime:
         timeout_seconds: float | None = None,
     ) -> CommandEnvelope:
         request_id = self.identifiers.new("request")
+        decision_id = self.identifiers.new("decision")
+        self.decisions.record(
+            DecisionEvidence(
+                decision_id=decision_id,
+                decision_type="DispatchRequest",
+                component="Reference Host",
+                tenant_id=self.settings.tenant_id,
+                workspace_id=self.settings.workspace_id,
+                correlation_id=self.identifiers.new("correlation"),
+                recorded_at=self.clock.now(),
+                triggering_id=None,
+            )
+        )
+        decision = self.decisions.decisions[decision_id]
         return CommandEnvelope(
             command_id=command_id or self.identifiers.new("command"),
             command_type="AcceptRequest",
             command_version="1.0",
-            correlation_id=self.identifiers.new("correlation"),
-            causation_id=self.identifiers.new("decision"),
+            correlation_id=decision.correlation_id,
+            causation_id=decision.decision_id,
             target_component="Manager",
             initiator="Reference Host",
             timestamp=self.clock.now(),
@@ -241,6 +263,7 @@ def compose(
         default_timeout_seconds=resolved.reference_timeout_seconds,
     )
     workflow_repository = InMemoryWorkflowRepository()
+    decisions = InMemoryDecisionEvidenceRepository()
     workflow_engine = WorkflowEngine(
         repository=workflow_repository,
         dispatcher=dispatcher,
@@ -250,6 +273,7 @@ def compose(
         clock=resolved_clock,
         identifiers=resolved_identifiers,
         observations=observations,
+        decisions=decisions,
     )
     workflow_client = DispatchingWorkflowClient(dispatcher, workflow_engine)
     manager = Manager(
@@ -286,5 +310,6 @@ def compose(
         clock=resolved_clock,
         identifiers=resolved_identifiers,
         authorization=authorization,
+        decisions=decisions,
     )
     return CompositionRoot(resolved, FROZEN_RUNTIME_MODULES, runtime)

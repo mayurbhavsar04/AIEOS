@@ -74,6 +74,9 @@ automation, dynamic untrusted extensions, the AI YouTube Employee, or other busi
 - A successful Request reaches a terminal Workflow Result through every required runtime boundary.
 - A retryable failed attempt remains terminal and Workflow Engine creates a distinct next attempt.
 - Duplicate Command delivery is safe and does not duplicate Workflow effects.
+- In-progress idempotent work resumes its missing effect; only completed handling is deduplicated.
+- Event processing is recorded as complete only after its transition and downstream effect succeed.
+- Every decision-based `CausationId` resolves to immutable recorded decision evidence.
 - Cross-Workspace Memory access is rejected.
 - Recorded but undelivered Events remain discoverable to a reconstructed outbox relay.
 - Timeout produces a terminal attempt outcome and cannot be overwritten by late completion.
