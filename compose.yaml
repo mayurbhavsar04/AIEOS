@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17.5-alpine
+    environment:
+      POSTGRES_DB: aieos
+      POSTGRES_USER: aieos
+      POSTGRES_PASSWORD: aieos_local # pragma: allowlist secret
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aieos -d aieos"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - aieos-postgres:/var/lib/postgresql/data
+
+volumes:
+  aieos-postgres:
