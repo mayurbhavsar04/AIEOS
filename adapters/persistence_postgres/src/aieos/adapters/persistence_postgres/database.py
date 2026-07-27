@@ -40,6 +40,16 @@ class PostgresDatabase:
         async with self.sessions.begin() as session:
             yield session
 
+    @asynccontextmanager
+    async def command_lock(self, command_id: str) -> AsyncIterator[None]:
+        """Serialize target processing for one stable CommandId across workers."""
+        async with self.sessions.begin() as session:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:command_id, 0))"),
+                {"command_id": command_id},
+            )
+            yield
+
     async def health(self) -> bool:
         try:
             async with self.engine.connect() as connection:

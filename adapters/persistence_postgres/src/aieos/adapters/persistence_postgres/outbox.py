@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 from pydantic import TypeAdapter
 from sqlalchemy import and_, func, or_, select
@@ -14,6 +15,10 @@ from aieos.event_bus import EventBus
 
 from .database import PostgresDatabase
 from .models import OutboxEventRow
+
+
+class _Participant(Protocol):
+    async def flush_in_transaction(self, session: AsyncSession) -> None: ...
 
 
 def utc_now() -> datetime:
@@ -34,6 +39,10 @@ def decode_event(payload: bytes) -> EventEnvelope:
 class PostgresOutboxStore:
     def __init__(self, database: PostgresDatabase) -> None:
         self._database = database
+
+    @property
+    def database(self) -> PostgresDatabase:
+        return self._database
 
     async def record(self, event: EventEnvelope) -> None:
         """Idempotently record immutable event content in its own transaction."""
@@ -221,10 +230,17 @@ class BufferedPostgresOutbox:
     pending immutable Event in PostgreSQL and only then attempts delivery.
     """
 
-    def __init__(self, store: PostgresOutboxStore, relay: PostgresOutboxRelay) -> None:
+    def __init__(
+        self,
+        store: PostgresOutboxStore,
+        relay: PostgresOutboxRelay,
+        *,
+        participants: tuple[_Participant, ...] = (),
+    ) -> None:
         self._store = store
         self._relay = relay
         self._pending: dict[str, EventEnvelope] = {}
+        self._participants = participants
 
     def record(self, event: EventEnvelope) -> None:
         existing = self._pending.get(event.event_id)
@@ -233,7 +249,12 @@ class BufferedPostgresOutbox:
         self._pending[event.event_id] = event
 
     async def drain(self) -> int:
-        for event in tuple(self._pending.values()):
-            await self._store.record(event)
+        pending = tuple(self._pending.values())
+        async with self._store.database.transaction() as session:
+            for participant in self._participants:
+                await participant.flush_in_transaction(session)
+            for event in pending:
+                await self._store.record_in_transaction(session, event)
+        for event in pending:
             self._pending.pop(event.event_id, None)
         return await self._relay.drain()

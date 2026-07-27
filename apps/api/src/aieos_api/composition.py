@@ -14,9 +14,15 @@ from aieos.adapters.observability_default import InMemoryObservationRecorder
 from aieos.adapters.persistence_postgres import (
     BufferedPostgresOutbox,
     PostgresDatabase,
+    PostgresDecisionEvidenceRepository,
+    PostgresExecutionRepository,
     PostgresMemoryRepository,
     PostgresOutboxRelay,
     PostgresOutboxStore,
+    PostgresRequestRepository,
+    PostgresWorkflowRepository,
+    TransactionParticipant,
+    checkpoint,
 )
 from aieos.capability_registry import CapabilityImplementation, CapabilityRegistry
 from aieos.contracts import AuthorizationContext, ResultEnvelope
@@ -128,10 +134,13 @@ class ReferenceRuntime:
     observations: InMemoryObservationRecorder
     workflow_repository: InMemoryWorkflowRepository
     execution_repository: InMemoryExecutionRepository
+    request_repository: InMemoryRequestRepository
     clock: Clock
     identifiers: IdentifierFactory
     authorization: AuthorizationContext
     decisions: InMemoryDecisionEvidenceRepository
+    durable_participants: tuple[TransactionParticipant, ...] = ()
+    database: PostgresDatabase | None = None
 
     async def run(
         self,
@@ -199,7 +208,18 @@ class ReferenceRuntime:
         )
 
     async def run_command(self, command: CommandEnvelope) -> ResultEnvelope:
-        return await self.dispatcher.dispatch(command)
+        if self.database is not None:
+            async with self.database.command_lock(command.command_id):
+                return await self._run_prepared(command)
+        return await self._run_prepared(command)
+
+    async def _run_prepared(self, command: CommandEnvelope) -> ResultEnvelope:
+        for participant in self.durable_participants:
+            await participant.prepare()
+        result = await self.dispatcher.dispatch(command)
+        if self.database is not None:
+            await checkpoint(self.database, self.durable_participants)
+        return result
 
 
 def compose(
@@ -245,6 +265,16 @@ def compose(
             command_timeout_seconds=resolved.database_command_timeout_seconds,
         )
         postgres_outbox_store = PostgresOutboxStore(database)
+        workflow_repository = PostgresWorkflowRepository(database)
+        execution_repository = PostgresExecutionRepository(database)
+        request_repository = PostgresRequestRepository(database)
+        decisions = PostgresDecisionEvidenceRepository(database)
+        durable_participants = (
+            workflow_repository,
+            execution_repository,
+            request_repository,
+            decisions,
+        )
         outbox_store = postgres_outbox_store
         outbox = BufferedPostgresOutbox(
             postgres_outbox_store,
@@ -256,6 +286,7 @@ def compose(
                 lease_seconds=resolved.outbox_lease_seconds,
                 backoff_seconds=resolved.delivery_backoff_seconds,
             ),
+            participants=durable_participants,
         )
         memory_repository = PostgresMemoryRepository(database)
     else:
@@ -263,6 +294,11 @@ def compose(
         outbox_store = memory_outbox_store
         outbox = OutboxRelay(memory_outbox_store, event_bus)
         memory_repository = InMemoryMemoryRepository()
+        workflow_repository = InMemoryWorkflowRepository()
+        execution_repository = InMemoryExecutionRepository()
+        request_repository = InMemoryRequestRepository()
+        decisions = InMemoryDecisionEvidenceRepository()
+        durable_participants = ()
     memory_service = MemoryService(
         repository=memory_repository,
         authorizer=authorizer,
@@ -297,7 +333,6 @@ def compose(
             ),
         )
     )
-    execution_repository = InMemoryExecutionRepository()
     skill_runtime = SkillRuntime(
         repository=execution_repository,
         skills=skills,
@@ -313,8 +348,6 @@ def compose(
         observations=observations,
         default_timeout_seconds=resolved.reference_timeout_seconds,
     )
-    workflow_repository = InMemoryWorkflowRepository()
-    decisions = InMemoryDecisionEvidenceRepository()
     workflow_engine = WorkflowEngine(
         repository=workflow_repository,
         dispatcher=dispatcher,
@@ -328,7 +361,7 @@ def compose(
     )
     workflow_client = DispatchingWorkflowClient(dispatcher, workflow_engine)
     manager = Manager(
-        repository=InMemoryRequestRepository(),
+        repository=request_repository,
         workflow_client=workflow_client,
         authorizer=authorizer,
         outcomes=outcomes,
@@ -358,9 +391,12 @@ def compose(
         observations=observations,
         workflow_repository=workflow_repository,
         execution_repository=execution_repository,
+        request_repository=request_repository,
         clock=resolved_clock,
         identifiers=resolved_identifiers,
         authorization=authorization,
         decisions=decisions,
+        durable_participants=durable_participants,
+        database=database,
     )
     return CompositionRoot(resolved, FROZEN_RUNTIME_MODULES, runtime, database)
