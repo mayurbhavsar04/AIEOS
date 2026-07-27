@@ -93,11 +93,10 @@ async def _idempotency(
     outcome_id: str | None,
     payload: bytes,
 ) -> None:
-    canonical = json.dumps(
-        json.loads(_COMMAND.dump_json(command)),
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
+    document = json.loads(_COMMAND.dump_json(command))
+    permissions = document["metadata"]["authorization"]["permissions"]
+    document["metadata"]["authorization"]["permissions"] = sorted(permissions)
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     command_hash = sha256(canonical).hexdigest()
     statement = insert(CommandIdempotencyRow).values(
         tenant_id=command.tenant_id,
