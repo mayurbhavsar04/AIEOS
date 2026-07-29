@@ -211,6 +211,8 @@ class ReferenceRuntime:
     async def run_command(self, command: CommandEnvelope) -> ResultEnvelope:
         if self.database is not None:
             async with self.database.command_lock(scoped_idempotency_lock_key(command)):
+                for participant in self.durable_participants:
+                    await participant.prepare()
                 repository = self.request_repository
                 assert isinstance(repository, PostgresRequestRepository)
                 replay = await repository.replay_command(command)
