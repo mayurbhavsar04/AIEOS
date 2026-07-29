@@ -851,6 +851,84 @@ async def test_receipt_contention_failure_poison_and_scope_safety_matrix(
             )
 
 
+async def test_partial_acknowledgement_and_poison_retry_preserve_healthy_effect(
+    database: PostgresDatabase,
+) -> None:
+    stored_event = event("event-partial-poison")
+    store = PostgresOutboxStore(
+        database,
+        required_consumers={"ExecutionAttemptSucceeded": ("healthy", "poison")},
+    )
+    await store.record(stored_event)
+
+    class Healthy:
+        calls = 0
+
+        async def consume(self, event: EventEnvelope) -> None:
+            assert event.event_id == stored_event.event_id
+            self.calls += 1
+
+    class PoisonOnce:
+        calls = 0
+        effects = 0
+
+        async def consume(self, event: EventEnvelope) -> None:
+            assert event.event_id == stored_event.event_id
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("poison")
+            self.effects += 1
+
+    healthy = Healthy()
+    poison = PoisonOnce()
+    bus = InProcessEventBus()
+    bus.subscribe(stored_event.event_type, "healthy", healthy)
+    bus.subscribe(stored_event.event_type, "poison", poison)
+    relay = PostgresOutboxRelay(
+        store,
+        bus,
+        owner="poison-worker",
+        batch_size=10,
+        lease_seconds=30,
+        backoff_seconds=0,
+    )
+    assert await relay.drain() == 0
+    async with database.transaction() as session:
+        receipts = {
+            receipt.consumer_name: receipt
+            for receipt in await session.scalars(select(DeliveryReceiptRow))
+        }
+        outbox = await session.get(
+            OutboxEventRow, ("tenant-1", "workspace-1", stored_event.event_id)
+        )
+        assert receipts["healthy"].status == "Delivered"
+        assert receipts["healthy"].delivery_attempts == 1
+        assert receipts["poison"].status == "Failed"
+        assert receipts["poison"].last_error == "RuntimeError"
+        assert outbox is not None and outbox.delivered_at is None
+    assert healthy.calls == 1
+    assert poison.calls == 1
+    assert poison.effects == 0
+
+    assert await relay.drain() == 1
+    async with database.transaction() as session:
+        receipts = {
+            receipt.consumer_name: receipt
+            for receipt in await session.scalars(select(DeliveryReceiptRow))
+        }
+        outbox = await session.get(
+            OutboxEventRow, ("tenant-1", "workspace-1", stored_event.event_id)
+        )
+        assert receipts["healthy"].status == "Delivered"
+        assert receipts["healthy"].delivery_attempts == 1
+        assert receipts["poison"].status == "Delivered"
+        assert receipts["poison"].delivery_attempts == 2
+        assert outbox is not None and outbox.delivered_at is not None
+    assert healthy.calls == 1
+    assert poison.calls == 2
+    assert poison.effects == 1
+
+
 async def test_crash_after_consumer_effect_has_one_durable_authoritative_effect(
     database: PostgresDatabase,
 ) -> None:
