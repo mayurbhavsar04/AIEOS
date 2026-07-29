@@ -27,6 +27,13 @@ new TDR is required.
 - Ordered migrations create scoped workflow, step, execution, idempotency, outcome, outbox,
   delivery, decision-evidence, and memory storage.
 - State and producer-owned outbox intent can share one transaction.
+- Target-owned idempotency SHALL use `(TenantId, WorkspaceId, TargetComponent, IdempotencyKey)`;
+  `CommandId` remains immutable delivery identity and MUST NOT be the sole deduplication key.
+- Reuse of a scoped IdempotencyKey with changed immutable intent SHALL fail without creating a
+  second Workflow or authoritative outcome.
+- Durable Event delivery SHALL record independent required-consumer receipts. Global outbox
+  completion SHALL require every required receipt to be delivered; receipt evidence remains
+  non-authoritative relative to the business Result.
 - Concurrent relays use safe PostgreSQL claiming, stale leases are reclaimable, poison deliveries
   are visible/retryable, and delivery is explicitly at least once.
 - Duplicate Commands distinguish incomplete work from authoritative completion.

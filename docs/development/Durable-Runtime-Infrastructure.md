@@ -32,10 +32,10 @@ in-process events-only transport remain non-authoritative process-local componen
 | --- | --- | --- |
 | `workflows`, `workflow_steps` | Workflow Engine | current orchestration state |
 | `executions` | Skill Runtime | one instructed attempt and retry lineage |
-| `command_idempotency` | accountable Command target | in-progress/completed deduplication |
+| `command_idempotency` | accountable Command target | scoped canonical-key claim, intent conflict detection, in-progress recovery, and completed outcome replay |
 | `outcomes` | producing owner | immutable Result/Error payloads |
 | `outbox_events` | authoritative Event producer | immutable Event plus publish intent |
-| `delivery_receipts` | infrastructure | non-authoritative consumer delivery evidence |
+| `delivery_receipts` | infrastructure | non-authoritative, per-consumer claim/attempt/acknowledgement evidence |
 | `decision_evidence` | deciding component | immutable causation evidence |
 | `memory_records` | Memory Service | scoped, append-safe versions |
 
@@ -74,6 +74,34 @@ Claims use short transactions and PostgreSQL row locks with `SKIP LOCKED`, so co
 cannot claim the same row. A lease is non-authoritative and may expire after a crash. Publication is
 therefore explicitly at least once. Consumers retain idempotency responsibility. Failure type and
 attempt count remain queryable; errors are bounded and never contain payloads or credentials.
+
+## Command identity and idempotency
+
+`CommandId` identifies one immutable Command delivery. It does not define the logical
+idempotency boundary. The accountable target deduplicates by the composite scope
+`(TenantId, WorkspaceId, TargetComponent, IdempotencyKey)`. PostgreSQL advisory locking uses the
+same scope, and the durable claim is committed atomically with Workflow creation. A redelivery with
+a different `CommandId` resumes the stored unfinished Command or replays its authoritative terminal
+Result. Reuse of the same scoped key with materially different immutable intent fails
+deterministically and never creates another Workflow.
+
+The same key is independent in another tenant, workspace, or target namespace. Workflow retries
+remain separate execution attempts with new `ExecutionId` values; they do not create another
+logical request.
+
+## Per-consumer delivery evidence
+
+The producer outbox remains authoritative only for Event publication intent. For each registered
+required consumer, the relay creates a durable receipt with an independent status, lease, attempt
+count, timestamps, and redacted last-error category. Workers claim receipts using row locking;
+expired claims are reclaimable. One consumer acknowledgement never acknowledges another consumer.
+The outbox Event becomes globally delivered only after every required consumer receipt is
+`Delivered`.
+
+Consumer failures remain independently retryable and observable, while unrelated consumers may
+progress. A crash after a consumer side effect but before receipt acknowledgement causes
+at-least-once redelivery; the consumer's existing idempotency boundary prevents a second
+authoritative effect. Commands never enter this path.
 
 ## Crash recovery and retries
 

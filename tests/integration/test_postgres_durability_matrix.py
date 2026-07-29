@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -17,8 +18,10 @@ from pydantic import SecretStr
 from sqlalchemy import func, insert, select, text
 from sqlalchemy.exc import IntegrityError
 
+from aieos.adapters.event_bus_in_process import InProcessEventBus
 from aieos.adapters.persistence_postgres import (
     PostgresDatabase,
+    PostgresOutboxRelay,
     PostgresOutboxStore,
     PostgresWorkflowRepository,
 )
@@ -26,6 +29,7 @@ from aieos.adapters.persistence_postgres.models import (
     Base,
     CommandIdempotencyRow,
     DecisionEvidenceRow,
+    DeliveryReceiptRow,
     ExecutionRow,
     MemoryRecordRow,
     OutboxEventRow,
@@ -390,6 +394,126 @@ async def test_concurrent_duplicate_submission_creates_one_workflow(
         assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
     await left.close()
     await right.close()
+
+
+async def test_scoped_idempotency_key_deduplicates_distinct_command_ids(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    left = compose(settings)
+    right = compose(settings)
+    first = left.reference_runtime.build_request_command(
+        "same logical request",
+        command_id="command-idempotency-left",
+        idempotency_key="logical-request",
+    )
+    second = replace(
+        first,
+        command_id="command-idempotency-right",
+        timestamp=first.timestamp + timedelta(microseconds=1),
+    )
+    results: list[ResultEnvelope] = []
+
+    async def run(root: CompositionRoot, command_envelope: Any) -> None:
+        results.append(await root.reference_runtime.run_command(command_envelope))
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(run, left, first)
+        group.start_soon(run, right, second)
+
+    assert results[0] == results[1]
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        manager_receipts = tuple(
+            await session.scalars(
+                select(CommandIdempotencyRow).where(
+                    CommandIdempotencyRow.target_component == "Manager"
+                )
+            )
+        )
+        assert len(manager_receipts) == 1
+        assert manager_receipts[0].idempotency_key == "logical-request"
+        assert manager_receipts[0].completed
+
+    conflicting = replace(second, command_id="command-conflict", payload={"message": "changed"})
+    with pytest.raises(ValueError, match="IdempotencyKey"):
+        await right.reference_runtime.run_command(conflicting)
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+    await left.close()
+    await right.close()
+
+
+async def test_per_consumer_receipts_are_independent_and_recover_stale_claims(
+    database: PostgresDatabase,
+) -> None:
+    store = PostgresOutboxStore(database)
+    bus = InProcessEventBus()
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        async def consume(self, event: EventEnvelope) -> None:
+            self.events.append(event.event_id)
+
+    first = Recorder()
+    second = Recorder()
+    bus.subscribe("ExecutionAttemptSucceeded", "first", first)
+    bus.subscribe("ExecutionAttemptSucceeded", "second", second)
+    relay = PostgresOutboxRelay(
+        store,
+        bus,
+        owner="relay-a",
+        batch_size=10,
+        lease_seconds=30,
+        backoff_seconds=0,
+    )
+    delivered_event = event("event-receipts")
+    await store.record(delivered_event)
+    assert await relay.drain() == 1
+    assert first.events == ["event-receipts"]
+    assert second.events == ["event-receipts"]
+    async with database.transaction() as session:
+        receipts = tuple(
+            await session.scalars(
+                select(DeliveryReceiptRow).order_by(DeliveryReceiptRow.consumer_name)
+            )
+        )
+        assert [(item.consumer_name, item.status) for item in receipts] == [
+            ("first", "Delivered"),
+            ("second", "Delivered"),
+        ]
+
+    stale_event = event("event-stale-receipt")
+    await store.record(stale_event)
+    await store.ensure_receipts(stale_event, ("first", "second"))
+    instant = datetime.now(UTC)
+    assert await store.claim_receipt(
+        stale_event,
+        "first",
+        owner="dead-worker",
+        lease_seconds=1,
+        now=instant,
+    )
+    assert not await store.claim_receipt(
+        stale_event,
+        "first",
+        owner="competing-worker",
+        lease_seconds=1,
+        now=instant,
+    )
+    assert await store.claim_receipt(
+        stale_event,
+        "first",
+        owner="recovery-worker",
+        lease_seconds=30,
+        now=instant + timedelta(seconds=2),
+    )
 
 
 async def test_retry_creates_new_execution_and_durable_decision_lineage(
