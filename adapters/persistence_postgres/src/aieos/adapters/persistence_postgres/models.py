@@ -96,11 +96,28 @@ class CommandIdempotencyRow(Scoped, Base):
     tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     workspace_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     target_component: Mapped[str] = mapped_column(String(128), primary_key=True)
-    command_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), primary_key=True)
+    command_id: Mapped[str] = mapped_column(String(128), nullable=False)
     command_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     outcome_id: Mapped[str | None] = mapped_column(String(128))
     payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "target_component",
+            "command_id",
+            name="uq_command_identity_per_target",
+        ),
+        Index(
+            "ix_command_idempotency_lookup",
+            "tenant_id",
+            "workspace_id",
+            "target_component",
+            "idempotency_key",
+        ),
+    )
 
 
 class OutcomeRow(Scoped, Base):
@@ -151,7 +168,14 @@ class DeliveryReceiptRow(Base):
     workspace_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     consumer_name: Mapped[str] = mapped_column(String(128), primary_key=True)
-    delivered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="Pending")
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         ForeignKeyConstraint(
             ("tenant_id", "workspace_id", "event_id"),
@@ -160,6 +184,13 @@ class DeliveryReceiptRow(Base):
                 "outbox_events.workspace_id",
                 "outbox_events.event_id",
             ),
+        ),
+        Index(
+            "ix_delivery_receipt_claim",
+            "status",
+            "lease_expires_at",
+            "tenant_id",
+            "workspace_id",
         ),
     )
 

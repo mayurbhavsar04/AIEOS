@@ -89,12 +89,25 @@ def upgrade() -> None:
         "command_idempotency",
         *_scope(),
         sa.Column("target_component", sa.String(128), nullable=False),
+        sa.Column("idempotency_key", sa.String(256), nullable=False),
         sa.Column("command_id", sa.String(128), nullable=False),
         sa.Column("command_hash", sa.String(64), nullable=False),
         sa.Column("completed", sa.Boolean(), nullable=False),
         sa.Column("outcome_id", sa.String(128)),
         sa.Column("payload", sa.LargeBinary(), nullable=False),
-        sa.PrimaryKeyConstraint("tenant_id", "workspace_id", "target_component", "command_id"),
+        sa.PrimaryKeyConstraint("tenant_id", "workspace_id", "target_component", "idempotency_key"),
+        sa.UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "target_component",
+            "command_id",
+            name="uq_command_identity_per_target",
+        ),
+    )
+    op.create_index(
+        "ix_command_idempotency_lookup",
+        "command_idempotency",
+        ("tenant_id", "workspace_id", "target_component", "idempotency_key"),
     )
     op.create_table(
         "outcomes",
@@ -141,7 +154,14 @@ def upgrade() -> None:
         *_scope(),
         sa.Column("event_id", sa.String(128), nullable=False),
         sa.Column("consumer_name", sa.String(128), nullable=False),
-        sa.Column("delivered_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("status", sa.String(32), nullable=False),
+        sa.Column("required", sa.Boolean(), nullable=False),
+        sa.Column("lease_owner", sa.String(128)),
+        sa.Column("lease_expires_at", sa.DateTime(timezone=True)),
+        sa.Column("delivery_attempts", sa.Integer(), nullable=False),
+        sa.Column("last_error", sa.Text()),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("delivered_at", sa.DateTime(timezone=True)),
         sa.ForeignKeyConstraint(
             ("tenant_id", "workspace_id", "event_id"),
             (
@@ -151,6 +171,11 @@ def upgrade() -> None:
             ),
         ),
         sa.PrimaryKeyConstraint("tenant_id", "workspace_id", "event_id", "consumer_name"),
+    )
+    op.create_index(
+        "ix_delivery_receipt_claim",
+        "delivery_receipts",
+        ("status", "lease_expires_at", "tenant_id", "workspace_id"),
     )
     op.create_table(
         "decision_evidence",
@@ -181,11 +206,13 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("memory_records")
     op.drop_table("decision_evidence")
+    op.drop_index("ix_delivery_receipt_claim", table_name="delivery_receipts")
     op.drop_table("delivery_receipts")
     op.drop_index("ix_outbox_claim", table_name="outbox_events")
     op.drop_table("outbox_events")
     op.drop_index("uq_authoritative_terminal_outcome", table_name="outcomes")
     op.drop_table("outcomes")
+    op.drop_index("ix_command_idempotency_lookup", table_name="command_idempotency")
     op.drop_table("command_idempotency")
     op.drop_table("executions")
     op.drop_table("workflow_steps")
