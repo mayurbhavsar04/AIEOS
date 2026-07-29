@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 from aieos.contracts import (
     ErrorCategory,
+    ErrorEnvelope,
     ErrorSeverity,
     ResultEnvelope,
     ResultStatus,
@@ -23,6 +24,7 @@ class InMemoryRequestRepository:
 
     def __init__(self) -> None:
         self.command_results: dict[str, ResultEnvelope] = {}
+        self.command_errors: dict[str, ErrorEnvelope] = {}
         self.commands: dict[str, CommandEnvelope] = {}
         self.workflow_commands: dict[str, CommandEnvelope] = {}
 
@@ -121,7 +123,7 @@ class Manager:
         return result
 
     def _reject(self, command: CommandEnvelope, code: str, message: str) -> ResultEnvelope:
-        result, _ = self._outcomes.unsuccessful(
+        result, error = self._outcomes.unsuccessful(
             status=ResultStatus.REJECTED,
             subject=command.metadata.request_id,
             producer=self.component_name,
@@ -138,6 +140,7 @@ class Manager:
         )
         self._repository.commands[command.command_id] = command
         self._repository.command_results[command.command_id] = result
+        self._repository.command_errors[command.command_id] = error
         return result
 
     @staticmethod

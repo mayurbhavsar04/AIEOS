@@ -92,6 +92,35 @@ async def _immutable_outcome(
         raise ValueError("ResultId cannot be reused with changed immutable content")
 
 
+async def _immutable_error(
+    session: AsyncSession,
+    error: ErrorEnvelope,
+    *,
+    owner: str,
+) -> None:
+    encoded = _ERROR.dump_json(error)
+    statement = insert(OutcomeRow).values(
+        tenant_id=error.tenant_id,
+        workspace_id=error.workspace_id,
+        outcome_id=error.error_id,
+        owner_component=owner,
+        subject_id=error.affected_subject,
+        kind="Error",
+        terminal=False,
+        payload=encoded,
+        recorded_at=error.occurred_at,
+    )
+    await session.execute(
+        statement.on_conflict_do_nothing(index_elements=["tenant_id", "workspace_id", "outcome_id"])
+    )
+    stored = await session.get(
+        OutcomeRow,
+        (error.tenant_id, error.workspace_id, error.error_id),
+    )
+    if stored is None or stored.payload != encoded:
+        raise ValueError("ErrorId cannot be reused with changed immutable content")
+
+
 async def _idempotency(
     session: AsyncSession,
     *,
@@ -252,6 +281,8 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
             )
             if instance.outcome is not None:
                 await _immutable_outcome(session, instance.outcome, owner="Workflow Engine")
+            if instance.error is not None:
+                await _immutable_error(session, instance.error, owner="Workflow Engine")
         for receipt in self.command_receipts.values():
             await _idempotency(
                 session,
@@ -262,6 +293,8 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
                 payload=_WORKFLOW_RECEIPT.dump_json(receipt),
             )
             await _immutable_outcome(session, receipt.result, owner="Workflow Engine")
+            if receipt.error is not None:
+                await _immutable_error(session, receipt.error, owner="Workflow Engine")
 
     def interrupted(self) -> tuple[WorkflowInstance, ...]:
         return tuple(item for item in self.instances.values() if item.outcome is None)
@@ -347,33 +380,7 @@ class PostgresExecutionRepository(_Prepared, InMemoryExecutionRepository):
             if record.result is not None:
                 await _immutable_outcome(session, record.result, owner="Skill Runtime")
             if record.error is not None:
-                encoded = _ERROR.dump_json(record.error)
-                statement = insert(OutcomeRow).values(
-                    tenant_id=record.error.tenant_id,
-                    workspace_id=record.error.workspace_id,
-                    outcome_id=record.error.error_id,
-                    owner_component="Skill Runtime",
-                    subject_id=record.error.affected_subject,
-                    kind="Error",
-                    terminal=False,
-                    payload=encoded,
-                    recorded_at=record.error.occurred_at,
-                )
-                await session.execute(
-                    statement.on_conflict_do_nothing(
-                        index_elements=["tenant_id", "workspace_id", "outcome_id"]
-                    )
-                )
-                stored = await session.get(
-                    OutcomeRow,
-                    (
-                        record.error.tenant_id,
-                        record.error.workspace_id,
-                        record.error.error_id,
-                    ),
-                )
-                if stored is None or stored.payload != encoded:
-                    raise ValueError("ErrorId cannot be reused with changed immutable content")
+                await _immutable_error(session, record.error, owner="Skill Runtime")
         for receipt in self.command_receipts.values():
             await _idempotency(
                 session,
@@ -384,6 +391,8 @@ class PostgresExecutionRepository(_Prepared, InMemoryExecutionRepository):
                 payload=_EXECUTION_RECEIPT.dump_json(receipt),
             )
             await _immutable_outcome(session, receipt.acknowledgement, owner="Skill Runtime")
+            if receipt.error is not None:
+                await _immutable_error(session, receipt.error, owner="Skill Runtime")
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +400,7 @@ class _ManagerReceipt:
     command: CommandEnvelope
     workflow_command: CommandEnvelope | None
     result: ResultEnvelope | None
+    error: ErrorEnvelope | None = None
 
 
 _MANAGER_RECEIPT = TypeAdapter(_ManagerReceipt)
@@ -434,11 +444,19 @@ class PostgresRequestRepository(_Prepared, InMemoryRequestRepository):
                     )
                 if receipt.result is not None:
                     self.command_results.setdefault(receipt.command.command_id, receipt.result)
+                if receipt.error is not None:
+                    self.command_errors.setdefault(receipt.command.command_id, receipt.error)
 
     async def flush_in_transaction(self, session: AsyncSession) -> None:
         for command_id, command in self.commands.items():
             result = self.command_results.get(command_id)
-            receipt = _ManagerReceipt(command, self.workflow_commands.get(command_id), result)
+            error = self.command_errors.get(command_id)
+            receipt = _ManagerReceipt(
+                command,
+                self.workflow_commands.get(command_id),
+                result,
+                error,
+            )
             await _idempotency(
                 session,
                 target="Manager",
@@ -449,6 +467,8 @@ class PostgresRequestRepository(_Prepared, InMemoryRequestRepository):
             )
             if result is not None:
                 await _immutable_outcome(session, result, owner="Manager")
+            if error is not None:
+                await _immutable_error(session, error, owner="Manager")
 
 
 class PostgresDecisionEvidenceRepository(_Prepared, InMemoryDecisionEvidenceRepository):
