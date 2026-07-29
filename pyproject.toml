@@ -51,6 +51,7 @@ pythonpath = ["."]
 testpaths = ["packages", "apps", "adapters", "tests"]
 markers = [
   "integration: bootstrap integration checks",
+  "postgres_required: mandatory live PostgreSQL durability checks",
   "e2e: end-to-end placeholders",
 ]
 

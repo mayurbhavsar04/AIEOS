@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from aieos.adapters.memory_persistence import InMemoryMemoryRepository
 from aieos.contracts import AuthorizationContext, ResultStatus
 from aieos.memory_service import MemoryWrite
 from aieos.skill_runtime import ExecutionState
@@ -40,6 +41,7 @@ async def test_reference_workflow_succeeds_end_to_end() -> None:
     instance = next(iter(root.reference_runtime.workflow_repository.instances.values()))
     assert instance.state is WorkflowState.COMPLETED
     assert instance.attempt_number == 1
+    assert isinstance(root.reference_runtime.memory_repository, InMemoryMemoryRepository)
     assert len(root.reference_runtime.memory_repository.records) == 1
     assert {
         "WorkflowStarted",
@@ -110,9 +112,10 @@ async def test_manager_normalizes_invalid_request_payload() -> None:
     assert not root.reference_runtime.workflow_repository.instances
 
 
-def test_memory_service_denies_cross_workspace_access() -> None:
+@pytest.mark.anyio
+async def test_memory_service_denies_cross_workspace_access() -> None:
     root = runtime()
-    memory = root.reference_runtime.memory_service.store(
+    memory = await root.reference_runtime.memory_service.store(
         MemoryWrite(
             content="scoped",
             tenant_id=root.settings.tenant_id,
@@ -131,8 +134,8 @@ def test_memory_service_denies_cross_workspace_access() -> None:
         policy_version_id="policy-v1",
     )
 
-    with pytest.raises(PermissionError):
-        root.reference_runtime.memory_service.fetch(
+    with pytest.raises(LookupError):
+        await root.reference_runtime.memory_service.fetch(
             memory.memory_id,
             tenant_id=root.settings.tenant_id,
             workspace_id="other-workspace",

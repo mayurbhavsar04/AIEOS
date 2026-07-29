@@ -36,7 +36,13 @@ new TDR is required.
 - Typed configuration preserves `.env` precedence, redacts the database URL, and fails closed in
   production.
 - Host composition can select local in-memory or PostgreSQL infrastructure without ORM/API leakage.
-- Real-PostgreSQL tests cover migration, claiming, stale leases, dedupe, scope, and resumability.
+- PostgreSQL composition selects durable Manager idempotency, Workflow/Step, Execution/lineage,
+  Result/Error, decision-evidence, Memory, and outbox adapters for the complete executable path;
+  in-memory composition contains no durable adapter.
+- Historical Alembic revisions use explicit immutable operations rather than mutable ORM metadata.
+- Readiness compares the deployed revision to code head without mutating the database.
+- Mandatory CI PostgreSQL tests cover migration, claiming, stale leases, dedupe, scope, and
+  resumability and cannot silently skip.
 - Frozen baseline files are byte-for-byte unchanged.
 
 ## Transactions, reversibility, and non-goals

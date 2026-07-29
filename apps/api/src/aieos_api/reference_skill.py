@@ -43,7 +43,7 @@ class HelloAIEOSSkill:
                     else RetryClassification.REQUIRES_POLICY_EVALUATION
                 ),
             )
-        memory = services.memory_service.store(
+        memory = await services.memory_service.store(
             MemoryWrite(
                 content=ai_response.content,
                 tenant_id=skill_input.tenant_id,

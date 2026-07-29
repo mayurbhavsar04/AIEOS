@@ -62,6 +62,7 @@ class ExecutionRecord:
 class ExecutionCommandReceipt:
     command: CommandEnvelope
     acknowledgement: ResultEnvelope
+    error: ErrorEnvelope | None = None
     completed: bool = False
 
 
@@ -81,9 +82,12 @@ class InMemoryExecutionRepository:
         return self.command_receipts.get(command_id)
 
     def begin_command(
-        self, command: CommandEnvelope, acknowledgement: ResultEnvelope
+        self,
+        command: CommandEnvelope,
+        acknowledgement: ResultEnvelope,
+        error: ErrorEnvelope | None = None,
     ) -> ExecutionCommandReceipt:
-        receipt = ExecutionCommandReceipt(command, acknowledgement)
+        receipt = ExecutionCommandReceipt(command, acknowledgement, error)
         self.command_receipts[command.command_id] = receipt
         return receipt
 
@@ -92,8 +96,13 @@ class InMemoryExecutionRepository:
         receipt.completed = True
         return receipt.acknowledgement
 
-    def remember_completed_command(self, command: CommandEnvelope, result: ResultEnvelope) -> None:
-        receipt = self.begin_command(command, result)
+    def remember_completed_command(
+        self,
+        command: CommandEnvelope,
+        result: ResultEnvelope,
+        error: ErrorEnvelope | None = None,
+    ) -> None:
+        receipt = self.begin_command(command, result, error)
         receipt.completed = True
 
 
@@ -333,7 +342,7 @@ class SkillRuntime:
         return self._repository.complete_command(command.command_id)
 
     def _reject(self, command: CommandEnvelope, code: str, message: str) -> ResultEnvelope:
-        result, _ = self._outcomes.unsuccessful(
+        result, error = self._outcomes.unsuccessful(
             status=ResultStatus.REJECTED,
             subject=command.execution_id or command.command_id,
             producer=self.component_name,
@@ -348,7 +357,7 @@ class SkillRuntime:
             retry=RetryClassification.NEVER_RETRY,
             message=message,
         )
-        self._repository.remember_completed_command(command, result)
+        self._repository.remember_completed_command(command, result, error)
         return result
 
     def _event_envelope(

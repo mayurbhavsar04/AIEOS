@@ -20,6 +20,12 @@ Set `AIEOS_RUNTIME_ADAPTER=postgres` to select durable infrastructure. Productio
 unless PostgreSQL is explicitly configured. The URL is a secret setting and is omitted from safe
 configuration summaries. The deterministic credentials above are local only.
 
+The adapter selection is all-or-nothing for the Phase 4 persistence surface. PostgreSQL mode uses
+durable Manager receipts, Workflow/Step state, Execution attempts and lineage, Result/Error
+outcomes, decision evidence, Memory, and outbox records. In-memory mode uses the corresponding
+in-memory implementations only. Observations, local command routing, the mock AI adapter, and the
+in-process events-only transport remain non-authoritative process-local components by design.
+
 ## Ownership and schema
 
 | Table | Logical owner | Authority |
@@ -84,13 +90,22 @@ flowchart LR
 
 Recovery resumes unfinished effects and never invents a Workflow retry. Only Workflow Engine can
 record a retry decision and create the next Execution identity. Unique step/attempt constraints make
-lineage queryable and prevent duplicate advancement.
+lineage queryable and prevent duplicate advancement. A transaction-scoped advisory lock serializes
+the same stable `CommandId` across workers. A completed receipt returns its prior immutable outcome;
+an accepted but incomplete receipt reloads its stable Workflow and Execution identities and resumes
+publication or dispatch.
 
 ## Health and limitations
 
-Database health is a non-mutating `SELECT 1`. Migration readiness compares the deployed Alembic
-revision to the code head. Relay health reports only counts for pending work and stale leases.
-Health is descriptive and cannot change authoritative state.
+Readiness is a non-mutating comparison of the deployed `alembic_version` value with the immutable
+code head. It reports database-unreachable, missing-version-table, behind-head,
+ahead-or-diverged, or compatible states without running migrations or exposing connection
+credentials. Relay health reports only counts for pending work and stale leases. Health is
+descriptive and cannot change authoritative state.
+
+CI provisions PostgreSQL, upgrades it to Alembic head, and runs the live durability suite as a
+mandatory release gate. Local runs without `AIEOS_TEST_DATABASE_URL` report an explicit skip; CI
+fails when the URL or service is unavailable and terminates if any `postgres_required` test skips.
 
 This phase does not provide an external broker, vectors, multi-region operation, production
 deployment, production authentication, or arbitrary runtime SQL. Operators should use separate
