@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from aieos.adapters.persistence_postgres import (
     PostgresDatabase,
     PostgresOutboxStore,
+    PostgresWorkflowRepository,
 )
 from aieos.adapters.persistence_postgres.models import (
     Base,
@@ -111,12 +112,8 @@ async def test_migration_revision_readiness_and_schema_parity(
         "deployed_revision": "20260727_0001",
     }
     async with database.engine.connect() as connection:
-        tables = set(
-            await connection.run_sync(
-                lambda sync: set(Base.metadata.tables) | set(sync.dialect.get_table_names(sync))
-            )
-        )
-    assert tables >= EXPECTED_TABLES
+        tables = await connection.run_sync(lambda sync: set(sync.dialect.get_table_names(sync)))
+    assert tables == EXPECTED_TABLES
     assert set(Base.metadata.tables) == EXPECTED_TABLES - {"alembic_version"}
 
 
@@ -278,6 +275,52 @@ async def test_cross_scope_constraints_and_repository_isolation(
     assert len(rows) == 1 and rows[0].correlation_id == "correlation-a"
 
 
+async def test_composed_repositories_load_only_the_configured_scope(
+    database: PostgresDatabase,
+) -> None:
+    shared_command_id = "command-shared-across-scopes"
+    first_settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+    )
+    second_settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+        tenant_id="tenant-b",
+        workspace_id="workspace-b",
+    )
+    first = compose(first_settings)
+    second = compose(second_settings)
+    first_result = await first.reference_runtime.run(
+        "scope a",
+        command_id=shared_command_id,
+    )
+    second_result = await second.reference_runtime.run(
+        "scope b",
+        command_id=shared_command_id,
+    )
+    await first.close()
+    await second.close()
+
+    first_restarted = compose(first_settings)
+    second_restarted = compose(second_settings)
+    first_repository = first_restarted.reference_runtime.workflow_repository
+    second_repository = second_restarted.reference_runtime.workflow_repository
+    assert isinstance(first_repository, PostgresWorkflowRepository)
+    assert isinstance(second_repository, PostgresWorkflowRepository)
+    await first_repository.prepare()
+    await second_repository.prepare()
+    assert set(first_repository.instances) == {first_result.subject_reference}
+    assert set(second_repository.instances) == {second_result.subject_reference}
+    assert first_result.subject_reference != second_result.subject_reference
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 2
+    await first_restarted.close()
+    await second_restarted.close()
+
+
 async def test_postgres_composed_runtime_restart_idempotency_lineage_and_evidence(
     database: PostgresDatabase,
 ) -> None:
@@ -377,6 +420,50 @@ async def test_retry_creates_new_execution_and_durable_decision_lineage(
         )
         assert len(terminal) == 1
     await root.close()
+
+
+async def test_failed_execution_persists_error_and_terminal_result(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+        mock_ai_failures_before_success=2,
+    )
+    root = compose(settings)
+    result = await root.reference_runtime.run("fail durably", max_attempts=1)
+    assert result.result_status is ResultStatus.FAILED
+    assert result.error_id is not None
+    async with database.transaction() as session:
+        error = await session.get(
+            OutcomeRow,
+            (settings.tenant_id, settings.workspace_id, result.error_id),
+        )
+        terminal = await session.get(
+            OutcomeRow,
+            (settings.tenant_id, settings.workspace_id, result.result_id),
+        )
+        assert error is not None and error.kind == "Error"
+        assert terminal is not None and terminal.kind == "Result" and terminal.terminal
+    await root.close()
+
+
+async def test_readiness_reports_unreachable_database_without_leaking_credentials() -> None:
+    database = PostgresDatabase(
+        "postgresql+asyncpg://user:secret@127.0.0.1:1/unreachable",  # pragma: allowlist secret
+        pool_timeout_seconds=0.1,
+        command_timeout_seconds=0.1,
+    )
+    try:
+        status = await database.migration_readiness()
+        assert status == {
+            "ready": False,
+            "status": "database_unreachable",
+            "expected_revision": "20260727_0001",
+        }
+        assert "secret" not in repr(status)
+    finally:
+        await database.close()
 
 
 async def test_incomplete_publication_and_idempotency_resume_after_restart(

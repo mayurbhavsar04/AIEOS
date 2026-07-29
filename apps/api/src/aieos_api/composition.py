@@ -267,10 +267,14 @@ def compose(
             command_timeout_seconds=resolved.database_command_timeout_seconds,
         )
         postgres_outbox_store = PostgresOutboxStore(database)
-        workflow_repository = PostgresWorkflowRepository(database)
-        execution_repository = PostgresExecutionRepository(database)
-        request_repository = PostgresRequestRepository(database)
-        decisions = PostgresDecisionEvidenceRepository(database)
+        durable_scope = {
+            "tenant_id": resolved.tenant_id,
+            "workspace_id": resolved.workspace_id,
+        }
+        workflow_repository = PostgresWorkflowRepository(database, **durable_scope)
+        execution_repository = PostgresExecutionRepository(database, **durable_scope)
+        request_repository = PostgresRequestRepository(database, **durable_scope)
+        decisions = PostgresDecisionEvidenceRepository(database, **durable_scope)
         durable_participants = (
             workflow_repository,
             execution_repository,

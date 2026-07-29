@@ -145,8 +145,16 @@ async def _idempotency(
 
 
 class _Prepared:
-    def __init__(self, database: PostgresDatabase) -> None:
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+    ) -> None:
         self._database = database
+        self._tenant_id = tenant_id
+        self._workspace_id = workspace_id
         self._prepared = False
 
     async def prepare(self) -> None:
@@ -162,20 +170,38 @@ class _Prepared:
 class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
     """Durable workflow, step, lineage, outcome, and Workflow Engine receipts."""
 
-    def __init__(self, database: PostgresDatabase) -> None:
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+    ) -> None:
         InMemoryWorkflowRepository.__init__(self)
-        _Prepared.__init__(self, database)
+        _Prepared.__init__(
+            self,
+            database,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
 
     async def _load(self) -> None:
         async with self._database.transaction() as session:
-            for payload in await session.scalars(select(WorkflowRow.payload)):
+            for payload in await session.scalars(
+                select(WorkflowRow.payload).where(
+                    WorkflowRow.tenant_id == self._tenant_id,
+                    WorkflowRow.workspace_id == self._workspace_id,
+                )
+            ):
                 instance = _WORKFLOW.validate_json(payload)
                 if instance.outcome is not None:
                     instance.outcome = _normalize_result(instance.outcome)
                 self.instances.setdefault(instance.workflow_id, instance)
             receipts = await session.scalars(
                 select(CommandIdempotencyRow.payload).where(
-                    CommandIdempotencyRow.target_component == "Workflow Engine"
+                    CommandIdempotencyRow.tenant_id == self._tenant_id,
+                    CommandIdempotencyRow.workspace_id == self._workspace_id,
+                    CommandIdempotencyRow.target_component == "Workflow Engine",
                 )
             )
             for payload in receipts:
@@ -244,13 +270,29 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
 class PostgresExecutionRepository(_Prepared, InMemoryExecutionRepository):
     """Durable execution attempts, lineage, immutable outcomes, and receipts."""
 
-    def __init__(self, database: PostgresDatabase) -> None:
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+    ) -> None:
         InMemoryExecutionRepository.__init__(self)
-        _Prepared.__init__(self, database)
+        _Prepared.__init__(
+            self,
+            database,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
 
     async def _load(self) -> None:
         async with self._database.transaction() as session:
-            for payload in await session.scalars(select(ExecutionRow.payload)):
+            for payload in await session.scalars(
+                select(ExecutionRow.payload).where(
+                    ExecutionRow.tenant_id == self._tenant_id,
+                    ExecutionRow.workspace_id == self._workspace_id,
+                )
+            ):
                 record = _EXECUTION.validate_json(payload)
                 record.acknowledgement = _normalize_result(record.acknowledgement)
                 if record.result is not None:
@@ -258,7 +300,9 @@ class PostgresExecutionRepository(_Prepared, InMemoryExecutionRepository):
                 self.records.setdefault(record.execution_id, record)
             receipts = await session.scalars(
                 select(CommandIdempotencyRow.payload).where(
-                    CommandIdempotencyRow.target_component == "Skill Runtime"
+                    CommandIdempotencyRow.tenant_id == self._tenant_id,
+                    CommandIdempotencyRow.workspace_id == self._workspace_id,
+                    CommandIdempotencyRow.target_component == "Skill Runtime",
                 )
             )
             for payload in receipts:
@@ -355,15 +399,28 @@ _MANAGER_RECEIPT = TypeAdapter(_ManagerReceipt)
 class PostgresRequestRepository(_Prepared, InMemoryRequestRepository):
     """Durable Manager target-owned command idempotency."""
 
-    def __init__(self, database: PostgresDatabase) -> None:
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+    ) -> None:
         InMemoryRequestRepository.__init__(self)
-        _Prepared.__init__(self, database)
+        _Prepared.__init__(
+            self,
+            database,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
 
     async def _load(self) -> None:
         async with self._database.transaction() as session:
             rows = await session.scalars(
                 select(CommandIdempotencyRow.payload).where(
-                    CommandIdempotencyRow.target_component == "Manager"
+                    CommandIdempotencyRow.tenant_id == self._tenant_id,
+                    CommandIdempotencyRow.workspace_id == self._workspace_id,
+                    CommandIdempotencyRow.target_component == "Manager",
                 )
             )
             for payload in rows:
@@ -397,14 +454,30 @@ class PostgresRequestRepository(_Prepared, InMemoryRequestRepository):
 class PostgresDecisionEvidenceRepository(_Prepared, InMemoryDecisionEvidenceRepository):
     """Durable immutable decision evidence with restart-safe lookup."""
 
-    def __init__(self, database: PostgresDatabase) -> None:
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+    ) -> None:
         InMemoryDecisionEvidenceRepository.__init__(self)
-        _Prepared.__init__(self, database)
+        _Prepared.__init__(
+            self,
+            database,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
 
     async def _load(self) -> None:
         pending = dict(self.decisions)
         async with self._database.transaction() as session:
-            for payload in await session.scalars(select(DecisionEvidenceRow.payload)):
+            for payload in await session.scalars(
+                select(DecisionEvidenceRow.payload).where(
+                    DecisionEvidenceRow.tenant_id == self._tenant_id,
+                    DecisionEvidenceRow.workspace_id == self._workspace_id,
+                )
+            ):
                 evidence = _DECISION.validate_json(payload)
                 self.decisions.setdefault(evidence.decision_id, evidence)
         for decision_id, evidence in pending.items():
