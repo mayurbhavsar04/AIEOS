@@ -157,9 +157,16 @@ class OutboxEventRow(Scoped, Base):
     lease_owner: Mapped[str | None] = mapped_column(String(128))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivery_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    required_consumer_count: Mapped[int] = mapped_column(Integer, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    __table_args__ = (Index("ix_outbox_claim", "available_at", "lease_expires_at"),)
+    __table_args__ = (
+        CheckConstraint(
+            "required_consumer_count >= 0",
+            name="ck_outbox_required_consumer_count",
+        ),
+        Index("ix_outbox_claim", "available_at", "lease_expires_at"),
+    )
 
 
 class DeliveryReceiptRow(Base):
@@ -177,6 +184,14 @@ class DeliveryReceiptRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('Pending', 'Claimed', 'Failed', 'Delivered')",
+            name="ck_delivery_receipt_status",
+        ),
+        CheckConstraint(
+            "delivery_attempts >= 0",
+            name="ck_delivery_receipt_attempts",
+        ),
         ForeignKeyConstraint(
             ("tenant_id", "workspace_id", "event_id"),
             (

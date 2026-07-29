@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 
@@ -43,8 +44,17 @@ def decode_event(payload: bytes) -> EventEnvelope:
 
 
 class PostgresOutboxStore:
-    def __init__(self, database: PostgresDatabase) -> None:
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        *,
+        required_consumers: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> None:
         self._database = database
+        self._required_consumers = {
+            event_type: tuple(sorted(set(consumers)))
+            for event_type, consumers in (required_consumers or {}).items()
+        }
 
     @property
     def database(self) -> PostgresDatabase:
@@ -58,6 +68,7 @@ class PostgresOutboxStore:
     async def record_in_transaction(self, session: AsyncSession, event: EventEnvelope) -> None:
         """Record beside producer-owned state in the caller's transaction."""
         encoded = encode_event(event)
+        required_consumers = self._required_consumers.get(event.event_type, ())
         statement = insert(OutboxEventRow).values(
             event_id=event.event_id,
             producer=event.producer,
@@ -67,6 +78,7 @@ class PostgresOutboxStore:
             payload=encoded,
             recorded_at=event.recorded_at,
             available_at=event.recorded_at,
+            required_consumer_count=len(required_consumers),
         )
         statement = statement.on_conflict_do_nothing(
             index_elements=["tenant_id", "workspace_id", "event_id"]
@@ -77,6 +89,30 @@ class PostgresOutboxStore:
         )
         if stored is None or stored.payload != encoded:
             raise ValueError("EventId cannot be reused with changed content")
+        if stored.required_consumer_count != len(required_consumers):
+            raise ValueError("EventId cannot be reused with changed consumer obligations")
+        for consumer_name in required_consumers:
+            await session.execute(
+                insert(DeliveryReceiptRow)
+                .values(
+                    tenant_id=event.tenant_id,
+                    workspace_id=event.workspace_id,
+                    event_id=event.event_id,
+                    consumer_name=consumer_name,
+                    status="Pending",
+                    required=True,
+                    delivery_attempts=0,
+                    created_at=event.recorded_at,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        "tenant_id",
+                        "workspace_id",
+                        "event_id",
+                        "consumer_name",
+                    ]
+                )
+            )
 
     async def claim(
         self,
@@ -132,37 +168,20 @@ class PostgresOutboxStore:
             row.lease_expires_at = None
             return True
 
-    async def ensure_receipts(
-        self,
-        event: EventEnvelope,
-        consumers: tuple[str, ...],
-        *,
-        now: datetime | None = None,
-    ) -> None:
-        instant = now or utc_now()
+    async def required_receipts(self, event: EventEnvelope) -> tuple[str, ...]:
         async with self._database.transaction() as session:
-            for consumer_name in consumers:
-                await session.execute(
-                    insert(DeliveryReceiptRow)
-                    .values(
-                        tenant_id=event.tenant_id,
-                        workspace_id=event.workspace_id,
-                        event_id=event.event_id,
-                        consumer_name=consumer_name,
-                        status="Pending",
-                        required=True,
-                        delivery_attempts=0,
-                        created_at=instant,
+            return tuple(
+                await session.scalars(
+                    select(DeliveryReceiptRow.consumer_name)
+                    .where(
+                        DeliveryReceiptRow.tenant_id == event.tenant_id,
+                        DeliveryReceiptRow.workspace_id == event.workspace_id,
+                        DeliveryReceiptRow.event_id == event.event_id,
+                        DeliveryReceiptRow.required.is_(True),
                     )
-                    .on_conflict_do_nothing(
-                        index_elements=[
-                            "tenant_id",
-                            "workspace_id",
-                            "event_id",
-                            "consumer_name",
-                        ]
-                    )
+                    .order_by(DeliveryReceiptRow.consumer_name)
                 )
+            )
 
     async def claim_receipt(
         self,
@@ -252,6 +271,22 @@ class PostgresOutboxStore:
 
     async def all_required_receipts_delivered(self, event: EventEnvelope) -> bool:
         async with self._database.transaction() as session:
+            outbox = await session.get(
+                OutboxEventRow,
+                (event.tenant_id, event.workspace_id, event.event_id),
+            )
+            if outbox is None:
+                return False
+            required = await session.scalar(
+                select(func.count())
+                .select_from(DeliveryReceiptRow)
+                .where(
+                    DeliveryReceiptRow.tenant_id == event.tenant_id,
+                    DeliveryReceiptRow.workspace_id == event.workspace_id,
+                    DeliveryReceiptRow.event_id == event.event_id,
+                    DeliveryReceiptRow.required.is_(True),
+                )
+            )
             incomplete = await session.scalar(
                 select(func.count())
                 .select_from(DeliveryReceiptRow)
@@ -263,7 +298,7 @@ class PostgresOutboxStore:
                     DeliveryReceiptRow.status != "Delivered",
                 )
             )
-        return int(incomplete or 0) == 0
+        return int(required or 0) == outbox.required_consumer_count and int(incomplete or 0) == 0
 
     async def release_failed(
         self,
@@ -343,8 +378,7 @@ class PostgresOutboxRelay:
             if event.tenant_id is None or event.workspace_id is None:
                 raise ValueError("durable Event delivery requires tenant and workspace scope")
             bus = cast(_ConsumerAwareEventBus, self._event_bus)
-            consumers = bus.consumer_names(event.event_type)
-            await self._store.ensure_receipts(event, consumers)
+            consumers = await self._store.required_receipts(event)
             failures = 0
             for consumer_name in consumers:
                 claimed = await self._store.claim_receipt(

@@ -140,8 +140,13 @@ def upgrade() -> None:
         sa.Column("lease_owner", sa.String(128)),
         sa.Column("lease_expires_at", sa.DateTime(timezone=True)),
         sa.Column("delivery_attempts", sa.Integer(), nullable=False),
+        sa.Column("required_consumer_count", sa.Integer(), nullable=False),
         sa.Column("last_error", sa.Text()),
         sa.Column("delivered_at", sa.DateTime(timezone=True)),
+        sa.CheckConstraint(
+            "required_consumer_count >= 0",
+            name="ck_outbox_required_consumer_count",
+        ),
         sa.PrimaryKeyConstraint("tenant_id", "workspace_id", "event_id"),
     )
     op.create_index(
@@ -162,6 +167,14 @@ def upgrade() -> None:
         sa.Column("last_error", sa.Text()),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("delivered_at", sa.DateTime(timezone=True)),
+        sa.CheckConstraint(
+            "status IN ('Pending', 'Claimed', 'Failed', 'Delivered')",
+            name="ck_delivery_receipt_status",
+        ),
+        sa.CheckConstraint(
+            "delivery_attempts >= 0",
+            name="ck_delivery_receipt_attempts",
+        ),
         sa.ForeignKeyConstraint(
             ("tenant_id", "workspace_id", "event_id"),
             (

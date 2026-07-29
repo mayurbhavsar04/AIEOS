@@ -34,6 +34,9 @@ new TDR is required.
 - Durable Event delivery SHALL record independent required-consumer receipts. Global outbox
   completion SHALL require every required receipt to be delivered; receipt evidence remains
   non-authoritative relative to the business Result.
+- Required-consumer membership SHALL be snapshotted with Event publication and its receipts created
+  in the same transaction. Relay-time handler discovery MUST NOT create, remove, or satisfy durable
+  obligations; missing required handlers leave publication incomplete across restarts.
 - Concurrent relays use safe PostgreSQL claiming, stale leases are reclaimable, poison deliveries
   are visible/retryable, and delivery is explicitly at least once.
 - Duplicate Commands distinguish incomplete work from authoritative completion.

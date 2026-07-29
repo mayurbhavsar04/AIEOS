@@ -277,7 +277,14 @@ def compose(
             pool_timeout_seconds=resolved.database_pool_timeout_seconds,
             command_timeout_seconds=resolved.database_command_timeout_seconds,
         )
-        postgres_outbox_store = PostgresOutboxStore(database)
+        postgres_outbox_store = PostgresOutboxStore(
+            database,
+            required_consumers={
+                "ExecutionAttemptSucceeded": ("workflow-engine",),
+                "ExecutionAttemptFailed": ("workflow-engine",),
+                "ExecutionAttemptTimedOut": ("workflow-engine",),
+            },
+        )
         durable_scope = {
             "tenant_id": resolved.tenant_id,
             "workspace_id": resolved.workspace_id,

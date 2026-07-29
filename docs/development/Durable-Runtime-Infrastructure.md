@@ -91,12 +91,22 @@ logical request.
 
 ## Per-consumer delivery evidence
 
-The producer outbox remains authoritative only for Event publication intent. For each registered
-required consumer, the relay creates a durable receipt with an independent status, lease, attempt
-count, timestamps, and redacted last-error category. Workers claim receipts using row locking;
-expired claims are reclaimable. One consumer acknowledgement never acknowledges another consumer.
-The outbox Event becomes globally delivered only after every required consumer receipt is
-`Delivered`.
+The producer outbox remains authoritative only for Event publication intent. At publication, the
+outbox store snapshots the configured required-consumer names and creates their durable receipts in
+the same transaction as the immutable Event publication intent. Each receipt has an independent
+status, lease, attempt count, timestamps, and redacted last-error category. The relay reads this
+persisted snapshot; it never discovers or rewrites obligations from the handlers registered when a
+worker happens to drain. Missing or incomplete runtime registration therefore leaves the affected
+receipt failed and the Event globally incomplete. Restart or later registration changes preserve
+the original membership. Workers claim receipts using row locking; expired claims are reclaimable.
+One consumer acknowledgement never acknowledges another consumer. The outbox Event becomes
+globally delivered only when the stored receipt count matches the publication snapshot and every
+required receipt is `Delivered`.
+
+Registrations absent from the publication snapshot are optional for that historical Event and are
+not invoked by the durable relay. Adding an optional handler after publication cannot add a
+completion obligation, and removing a required handler cannot erase one. The composition root owns
+the static required-subscription policy for this runtime; Event Bus remains transport-only.
 
 Consumer failures remain independently retryable and observable, while unrelated consumers may
 progress. A crash after a consumer side effect but before receipt acknowledgement causes
