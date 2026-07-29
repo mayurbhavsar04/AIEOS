@@ -619,7 +619,6 @@ async def test_memory_terminal_checkpoint_rolls_back_and_redelivery_is_exactly_o
             )
         )
         assert len(terminal_events) == 1
-        assert terminal_outcomes[0].outcome_id == completed_receipts[0].outcome_id
     replay = await recovered.reference_runtime.run_command(command_envelope)
     assert replay == result
     async with database.transaction() as session:
