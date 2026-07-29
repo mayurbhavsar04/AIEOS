@@ -275,7 +275,9 @@ def compose(
         execution_repository = PostgresExecutionRepository(database, **durable_scope)
         request_repository = PostgresRequestRepository(database, **durable_scope)
         decisions = PostgresDecisionEvidenceRepository(database, **durable_scope)
+        memory_repository = PostgresMemoryRepository(database)
         durable_participants = (
+            memory_repository,
             workflow_repository,
             execution_repository,
             request_repository,
@@ -294,7 +296,6 @@ def compose(
             ),
             participants=durable_participants,
         )
-        memory_repository = PostgresMemoryRepository(database)
     else:
         memory_outbox_store = InMemoryOutboxStore()
         outbox_store = memory_outbox_store

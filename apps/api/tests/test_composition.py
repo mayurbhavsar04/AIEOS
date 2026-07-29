@@ -58,7 +58,10 @@ def test_postgres_mode_selects_only_durable_phase_four_adapters() -> None:
     assert isinstance(root.reference_runtime.execution_repository, PostgresExecutionRepository)
     assert isinstance(root.reference_runtime.request_repository, PostgresRequestRepository)
     assert isinstance(root.reference_runtime.decisions, PostgresDecisionEvidenceRepository)
-    assert len(root.reference_runtime.durable_participants) == 4
+    assert len(root.reference_runtime.durable_participants) == 5
+    assert (
+        root.reference_runtime.durable_participants[0] is root.reference_runtime.memory_repository
+    )
 
 
 def test_memory_mode_selects_only_in_memory_phase_four_adapters() -> None:

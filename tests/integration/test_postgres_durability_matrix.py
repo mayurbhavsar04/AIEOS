@@ -27,6 +27,7 @@ from aieos.adapters.persistence_postgres.models import (
     CommandIdempotencyRow,
     DecisionEvidenceRow,
     ExecutionRow,
+    MemoryRecordRow,
     OutboxEventRow,
     OutcomeRow,
     WorkflowRow,
@@ -510,4 +511,136 @@ async def test_incomplete_publication_and_idempotency_resume_after_restart(
             )
         )
         assert len(terminal) == 1
+    await recovered.close()
+
+
+async def test_memory_terminal_checkpoint_rolls_back_and_redelivery_is_exactly_once(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    interrupted = compose(settings)
+    runtime = interrupted.reference_runtime
+    execution_repository = cast(Any, runtime.execution_repository)
+    memory_repository = cast(Any, runtime.memory_repository)
+    original_flush = execution_repository.flush_in_transaction
+    injected = False
+
+    async def fail_after_staged_memory(session: Any) -> None:
+        nonlocal injected
+        if not injected and memory_repository._pending:
+            injected = True
+            raise RuntimeError("injected failure after Memory staging")
+        await original_flush(session)
+
+    execution_repository.flush_in_transaction = fail_after_staged_memory
+    command_envelope = runtime.build_request_command(
+        "atomic memory hello",
+        command_id="command-memory-atomicity",
+    )
+
+    with pytest.raises(RuntimeError, match="after Memory staging"):
+        await runtime.run_command(command_envelope)
+    assert injected
+
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(MemoryRecordRow)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Skill Runtime",
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 0
+        )
+        execution = await session.scalar(select(ExecutionRow))
+        assert execution is not None and execution.state == "Executing"
+        skill_receipt = await session.scalar(
+            select(CommandIdempotencyRow).where(
+                CommandIdempotencyRow.target_component == "Skill Runtime"
+            )
+        )
+        assert skill_receipt is not None and not skill_receipt.completed
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutboxEventRow)
+                .where(
+                    OutboxEventRow.event_type.in_(
+                        (
+                            "ExecutionAttemptSucceeded",
+                            "ExecutionAttemptFailed",
+                            "ExecutionAttemptTimedOut",
+                        )
+                    )
+                )
+            )
+            == 0
+        )
+    await interrupted.close()
+
+    recovered = compose(settings)
+    result = await recovered.reference_runtime.run_command(command_envelope)
+    assert result.result_status is ResultStatus.SUCCEEDED
+    async with database.transaction() as session:
+        memories = tuple(await session.scalars(select(MemoryRecordRow)))
+        assert len(memories) == 1
+        execution = await session.scalar(select(ExecutionRow))
+        assert execution is not None and execution.state == "Succeeded"
+        terminal_outcomes = tuple(
+            await session.scalars(
+                select(OutcomeRow).where(
+                    OutcomeRow.owner_component == "Skill Runtime",
+                    OutcomeRow.subject_id == execution.execution_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+        )
+        assert len(terminal_outcomes) == 1
+        completed_receipts = tuple(
+            await session.scalars(
+                select(CommandIdempotencyRow).where(
+                    CommandIdempotencyRow.target_component == "Skill Runtime",
+                    CommandIdempotencyRow.completed.is_(True),
+                )
+            )
+        )
+        assert len(completed_receipts) == 1
+        terminal_events = tuple(
+            await session.scalars(
+                select(OutboxEventRow).where(
+                    OutboxEventRow.event_type == "ExecutionAttemptSucceeded"
+                )
+            )
+        )
+        assert len(terminal_events) == 1
+        assert terminal_outcomes[0].outcome_id == completed_receipts[0].outcome_id
+    replay = await recovered.reference_runtime.run_command(command_envelope)
+    assert replay == result
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(MemoryRecordRow)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Skill Runtime",
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutboxEventRow)
+                .where(OutboxEventRow.event_type == "ExecutionAttemptSucceeded")
+            )
+            == 1
+        )
     await recovered.close()
