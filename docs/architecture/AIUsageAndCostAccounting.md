@@ -22,7 +22,7 @@ An immutable usage record contains:
 - pricing version/effective reference and currency/reference unit;
 - measured or estimated input, output, cached, and reasoning tokens with availability/confidence;
 - estimated pre-invocation cost and actual normalized post-invocation cost;
-- the existing scoped Command/idempotency context for reservation replay, reconciliation status, and variance reason; no canonical reservation identity is introduced;
+- `AIInvocationId` as the authoritative subject for durable reservation replay, recovery, streaming or partial usage updates, reconciliation status, release or expiry, overrun handling, and variance reason; the upstream `CommandId` and scoped `IdempotencyKey` remain admission lineage only, and no canonical reservation identity is introduced;
 - cache disposition/savings and context-compression token/cost savings;
 - route/budget policy version and decision reason; and
 - timestamps, data classification, redaction status, and lineage.
@@ -34,7 +34,7 @@ Provider names may be retained as controlled catalog references but not leaked a
 ```mermaid
 flowchart LR
     ACCEPT["Accepted AIInvocationId"] --> EST["Context-dependent token and cost estimate"]
-    EST --> RES["Scoped durable reservation"]
+    EST --> RES["Durable reservation keyed by AIInvocationId"]
     RES --> INV["Provider invocation or accepted cache outcome"]
     INV --> USAGE["Measured/estimated usage"]
     USAGE --> REC["Reconcile reservation"]
@@ -46,7 +46,9 @@ flowchart LR
 
 An avoided-invocation record is created by the accountable Manager/Workflow/Skill/capability owner when deterministic resolution or approved business reuse prevents dispatch to Gateway. It records task class, policy, estimate baseline, reason, and estimated savings as recorded decision evidence without fabricating token usage or an `AIInvocationId`. Gateway exact-cache hits are accepted invocations and therefore do have a new `AIInvocationId` and new Result lineage, while recording zero provider usage.
 
-Before acceptance, the existing scoped Command/idempotency context supports replay lookup and only coarse budget-feasibility admission; it creates no durable reservation. After acceptance, reservation under `AIInvocationId` is atomic across invocation, step, workflow, capability/AI Employee, and Tenant/Workspace scopes. Concurrent attempts cannot overspend, and abandoned reservations expire or release. Actual cost reconciliation is idempotent and monotonic for streams; delayed/missing provider usage retains a conservative estimated charge until evidence arrives. Recovery never double-reserves or double-charges, and a post-acceptance budget failure is represented by an ES-007 terminal Result referencing its Error without provider preparation or Gateway workflow-retry authority.
+Before acceptance, `CommandId` and the scoped `IdempotencyKey` support admission checks and replay lookup only: they determine whether the request is new, in progress, completed, or conflicting, and permit only coarse budget-feasibility evaluation without creating a durable reservation. Acceptance atomically creates the Gateway-owned `AIInvocationId`. From that point onward, `AIInvocationId` is the authoritative subject and idempotency key for durable hierarchical reservation, recovery, streaming or partial usage accumulation, actual-cost reconciliation, release or expiry, overrun handling, audit, and observability. `CommandId` and the scoped `IdempotencyKey` are retained solely as upstream request and admission lineage.
+
+A pre-acceptance replay resolves through the scoped `IdempotencyKey`. A post-acceptance recovery resolves the existing `AIInvocationId` and resumes its reservation and reconciliation state. A different `CommandId` replaying the same accepted logical request therefore resolves to the same accepted `AIInvocationId`; it MUST NOT create a second reservation or charge. Reservation under that `AIInvocationId` is atomic across invocation, step, workflow, capability/AI Employee, and Tenant/Workspace scopes. Concurrent attempts cannot overspend, and abandoned reservations expire or release. Actual cost reconciliation is idempotent and monotonic for streams; delayed or missing provider usage retains a conservative estimated charge until evidence arrives. Recovery never double-reserves or double-charges, and a post-acceptance budget failure is represented by an ES-007 terminal Result referencing its Error without provider preparation or Gateway workflow-retry authority.
 
 Compression savings compare approved before/after estimates and include compression cost. Cache savings use the pricing/catalog snapshot that would have routed the request, marked as estimate rather than realized provider billing.
 
