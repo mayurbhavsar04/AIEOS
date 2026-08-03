@@ -72,7 +72,7 @@ flowchart LR
 | Capability / AI Employee | Approved policy allocates and attributes usage. |
 | Tenant/Workspace daily/monthly | Concurrency-safe ledger enforces organizational ceilings. |
 
-Hard limits prevent reservation/invocation. Soft limits create a governed warning and allow continuation only when policy says so. The pre-acceptance estimate is reserved atomically across every applicable scope in the same acceptance boundary that creates `AIInvocationId`. Existing scoped `CommandId` and target-owned `IdempotencyKey` provide durable replay identity; no canonical reservation ID is introduced.
+Hard limits prevent provider invocation. Soft limits create a governed warning and allow continuation only when accepted-lifecycle policy says so. Before acceptance, Gateway may calculate only coarse budget feasibility for admission; that estimate is not a durable hold or reservation. After acceptance and context-dependent estimation, Gateway durably reserves atomically across every applicable scope under the Gateway-created `AIInvocationId`. Existing scoped `CommandId` and target-owned `IdempotencyKey` govern pre-acceptance request replay; `AIInvocationId` governs idempotent post-acceptance reservation and recovery. No canonical reservation ID is introduced.
 
 ## Reservation and reconciliation
 
@@ -81,16 +81,21 @@ sequenceDiagram
     participant G as AI Gateway
     participant L as Budget Ledger
     participant A as Provider Adapter
-    G->>L: Idempotently reserve estimated maximum under all scopes
-    L-->>G: Reservation or hard-limit rejection
     G->>G: Accept and create AIInvocationId atomically
+    G->>G: Validate policy, assemble context, select provider
+    G->>L: Reserve estimated maximum under AIInvocationId
+    L-->>G: Durable reservation or hard-limit failure
+    alt reservation accepted
     G->>A: Invoke within reservation
     A-->>G: Usage report / availability markers
     G->>L: Reconcile actual normalized cost
     L-->>G: Reconciliation record
+    else reservation failed
+    G->>G: Record Failed and immutable Result / ErrorId
+    end
 ```
 
-Concurrent reservations MUST not overspend a hard scope. Reservation transitions are `pending`, `committed`, `released`, or `expired` implementation-local states. Cancellation and abandonment release unused amounts; crash recovery resumes by the same scoped command/idempotency identity. Streaming usage accumulates monotonically. Missing/delayed provider usage uses conservative calculation with explicit confidence and idempotent later reconciliation. Replays never double-charge. Pricing changes never rewrite historical cost: records retain the pricing snapshot reference used.
+Concurrent reservations MUST not overspend a hard scope. Reservation transitions are `pending`, `committed`, `released`, or `expired` implementation-local states. Creation and every transition are atomic and uniquely idempotent under the accepted `AIInvocationId`. Cancellation and abandonment release unused amounts; crash recovery and reconciliation resume from durable invocation evidence. Streaming usage accumulates monotonically. Missing/delayed provider usage uses conservative calculation with explicit confidence and idempotent later reconciliation. Replays never double-reserve or double-charge. A post-acceptance reservation failure prevents provider preparation/invocation and produces the immutable ES-007 failed Result referencing its Error; Gateway does not retry the workflow. Pricing changes never rewrite historical cost: records retain the pricing snapshot reference used.
 
 ## Progressive escalation
 

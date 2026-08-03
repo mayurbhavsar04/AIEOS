@@ -44,15 +44,20 @@ sequenceDiagram
     participant A as Provider Adapter
     participant V as Validator
     S->>G: InvokeAI / CommandId + IdempotencyKey
-    G->>G: Validate scope, policy, authorization
-    G->>P: Build minimum sufficient context
-    P-->>G: Versioned assembly and token estimate
-    G->>R: Resolve eligible candidates
-    R-->>G: Capability/pricing snapshots
-    G->>B: Atomically reserve all hard scopes
-    B-->>G: Reservation accepted
+    G->>G: Preflight envelope/schema, scope, admission eligibility
+    G->>G: Replay lookup, coarse budget feasibility, admission control
     G->>G: Accept and create AIInvocationId
     G-->>S: Immutable Accepted Result / AIInvocationId
+    G->>G: Requested to PolicyValidated
+    G->>P: Resolve cache; build minimum sufficient context
+    P-->>G: Versioned assembly and context-dependent estimate
+    G->>R: Select final eligible model/provider
+    R-->>G: Capability/pricing snapshots
+    G->>G: PolicyValidated to ProviderSelected
+    G->>B: Durably reserve all hard scopes under AIInvocationId
+    B-->>G: Reservation accepted
+    G->>A: Prepare provider-neutral invocation
+    G->>G: ProviderSelected to Prepared
     G->>A: Provider-neutral invocation mapping
     A-->>G: Normalized response and measured usage
     G->>V: Validate schema and safety outcome
@@ -79,7 +84,9 @@ Adapters own credential use, logical-to-provider model translation, protocol map
 
 ## Canonical lifecycle
 
-AI Invocation states remain `Requested`, `PolicyValidated`, `ProviderSelected`, `Prepared`, `Invoked`, `Retrying`, `Succeeded`, `Failed`, `TimedOut`, and `Cancelled`. `Requested` begins only after Gateway atomically accepts the request, reserves budget, and creates `AIInvocationId`. Provider attempts are implementation-local operational records with optional opaque references; their retry/fallback creates no canonical child identity and no new `AIInvocationId` or `ExecutionId`.
+AI Invocation states remain `Requested`, `PolicyValidated`, `ProviderSelected`, `Prepared`, `Invoked`, `Retrying`, `Succeeded`, `Failed`, `TimedOut`, and `Cancelled`. `Requested` begins when Gateway atomically accepts the request and creates `AIInvocationId`. Pre-acceptance preflight is limited to envelope/schema validation, Tenant/Workspace scope validation, admission eligibility, idempotency/replay lookup, coarse budget feasibility, and minimal admission control required by frozen contracts. It does not assemble context or prompts, make a final model/provider selection, reserve durable budget, prepare or create a provider attempt, perform context-dependent full token estimation, or evaluate accepted-lifecycle policy. Provider attempts are implementation-local operational records with optional opaque references; their retry/fallback creates no canonical child identity and no new `AIInvocationId` or `ExecutionId`.
+
+After acceptance, Gateway follows the lifecycle exactly once: it validates accepted-lifecycle policy, resolves content caches and assembles/budgets context, selects the final model/provider, durably reserves hierarchical budget under `AIInvocationId`, prepares the provider request, and invokes. A post-acceptance reservation failure transitions the invocation to `Failed` and produces the immutable ES-007 terminal `Result` referencing its `ErrorId`; it grants no workflow-retry authority to Gateway.
 
 ```mermaid
 stateDiagram-v2
@@ -159,7 +166,7 @@ Fallback is disabled unless allowed by immutable policy. It has a maximum attemp
 - Retrieved/user content is untrusted and cannot change instruction hierarchy or authority.
 - Raw prompts/responses and credentials are not logged by default.
 - Provider or telemetry failure is normalized without inventing success.
-- Accounting reconciliation failure preserves the authoritative provider outcome but creates governed operational evidence; a hard reservation failure prevents invocation.
+- Accounting reconciliation failure preserves the authoritative provider outcome but creates governed operational evidence; a post-acceptance hard reservation failure prevents provider invocation and terminates the accepted invocation through ES-007 Result/Error semantics.
 - Gateway cancellation does not imply provider cancellation until confirmed; terminal semantics follow ES-007.
 
 ## Extension and governance

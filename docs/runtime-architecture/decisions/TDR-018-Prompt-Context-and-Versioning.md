@@ -9,7 +9,7 @@ Options were ad-hoc prompt strings/full history, provider-managed prompts, or im
 
 ## Decision
 
-Use stable prompt identities with immutable versions, typed inputs, output schema, evaluation evidence, and rollback. Assemble context progressively from current input to focused excerpts and expand only on explicit signals. Memory remains an external untrusted evidence source.
+After Gateway acceptance creates `AIInvocationId`, use implementation-local stable prompt references with immutable versions, typed inputs, output schema, evaluation evidence, and rollback. Assemble and budget context progressively from current input to focused excerpts and expand only on explicit signals. No full prompt/context assembly or context-dependent token estimation occurs during pre-acceptance admission. Memory remains an external untrusted evidence source.
 
 ## Consequences
 
@@ -18,4 +18,3 @@ Template/catalog management and evaluation become release concerns. Full history
 ## Revisit evidence
 
 Prompt owners review when protected evaluations show staged context misses required evidence, context compression causes a confirmed factuality regression, or prompt release rollback exceeds the adopted recovery objective. Migration preserves version traceability, instruction hierarchy, Memory ownership, and least-data rules.
-

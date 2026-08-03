@@ -10,7 +10,7 @@ last_updated: 2026-08-03
 
 ## Purpose
 
-The pipeline produces the smallest sufficient, versioned, injection-resistant prompt assembly for [AI Gateway v1](AIGatewayArchitecture.md). It does not own Memory, authorization, Skill execution, provider routing, or product truth.
+After Gateway acceptance creates `AIInvocationId`, the pipeline produces the smallest sufficient, versioned, injection-resistant prompt assembly for [AI Gateway v1](AIGatewayArchitecture.md). It does not run during pre-acceptance admission and does not own Memory, authorization, Skill execution, provider routing, or product truth.
 
 ## Instruction and data hierarchy
 
@@ -27,7 +27,7 @@ Lower levels cannot override higher levels. Retrieved context never grants tools
 
 ```mermaid
 flowchart TD
-    IN["Approved AI invocation"] --> S1["Stage 1: instruction + current input + schema"]
+    IN["Accepted AI invocation / AIInvocationId"] --> S1["Stage 1: instruction + current input + schema"]
     S1 --> E1{"Sufficient?"}
     E1 -->|"Yes"| BUILD["Assemble"]
     E1 -->|"No"| S2["Stage 2: focused ranked excerpts"]
@@ -74,7 +74,7 @@ Prefer excerpt selection, field projection, normalization, and deterministic sum
 
 ### Token estimation
 
-Estimation is adapter-aware but provider-neutral at the contract boundary. It reserves output tokens before context allocation, applies a safety margin, and records estimated versus actual usage. Estimator error outside the adopted tolerance opens review of the estimator/catalog; it does not silently truncate mandatory context.
+Post-acceptance estimation is adapter-aware but provider-neutral at the contract boundary. It reserves output tokens within context budgeting before context allocation, applies a safety margin, and records estimated versus actual usage. Only coarse budget feasibility may occur before acceptance; it is not full context-dependent estimation or a durable reservation. Estimator error outside the adopted tolerance opens review of the estimator/catalog; it does not silently truncate mandatory context.
 
 ## Prompt template governance
 

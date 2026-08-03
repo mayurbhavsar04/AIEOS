@@ -9,7 +9,7 @@ Options were no cache, broad semantic cache, or correctness-sensitive exact/appr
 
 ## Decision
 
-Permit exact request-content, deterministic structured-output content, template, and adapter prefix caches under tenant-scoped versioned keys. Gateway acceptance and a new `AIInvocationId` precede a cache hit; every operation creates a new immutable `ResultId`. Cache entries retain content/artifact provenance but never reuse canonical outcome, invocation, command, event, correlation, causation, or Error identities. Product/business approved-result reuse belongs to the accountable pre-invocation Manager/Workflow/Skill/capability owner. Semantic caching requires a later purpose-specific review. Negative caching is bounded to deterministic non-sensitive failure content and never reuses an Error identity.
+Permit exact request-content, deterministic structured-output content, template, and adapter prefix caches under tenant-scoped versioned keys. Pre-acceptance `CommandId`/`IdempotencyKey` lookup only recognizes request replay and is not content caching. Gateway acceptance and a new `AIInvocationId` precede every content-cache decision; every operation creates a new immutable `ResultId`. Cache entries retain content/artifact provenance but never reuse canonical outcome, invocation, command, event, correlation, causation, or Error identities. Product/business approved-result reuse belongs to the accountable pre-invocation Manager/Workflow/Skill/capability owner. Semantic caching requires a later purpose-specific review. Negative caching is bounded to deterministic non-sensitive failure content and never reuses an Error identity.
 
 ## Consequences
 

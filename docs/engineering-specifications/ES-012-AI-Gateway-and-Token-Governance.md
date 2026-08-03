@@ -94,7 +94,7 @@ An AI request is immutable after acceptance. Before acceptance, the directed `Co
 | `CachePolicyRef`, `BudgetPolicyRef` | Required | Immutable policy versions. |
 | `Metadata` | Optional and minimized | Bounded allowlisted keys only; no raw transcript, secrets, or duplicated payload. |
 
-The request MUST fail closed when dispatch identity, scope, policy version, authorization, budget, schema, deadline, or capability requirements are missing or incompatible. AI Gateway creates one immutable `AIInvocationId` atomically with acceptance and its durable budget reservation; replay of the same accepted command returns an acknowledgement referencing that same invocation. Full conversation/history and full Memory records MUST NOT be included by default.
+Pre-acceptance preflight MUST fail closed and is limited to envelope/schema validation, Tenant/Workspace scope validation, eligibility required for admission, idempotency/replay lookup, coarse budget feasibility, and minimal admission control required by frozen contracts. It MUST NOT perform full context/prompt assembly, final model/provider selection, durable budget reservation, provider preparation or attempt creation, context-dependent full token estimation, or accepted-lifecycle policy evaluation. AI Gateway creates one immutable `AIInvocationId` atomically with acceptance; replay of the same accepted command returns an acknowledgement referencing that same invocation and creates no new canonical identity. Full conversation/history and full Memory records MUST NOT be included by default.
 
 ## Canonical response contract
 
@@ -118,7 +118,7 @@ Provider SDK objects MUST NOT cross the adapter boundary. An asynchronous accept
 
 ## Token-budget decision order
 
-The accountable Manager, Workflow, Skill, or capability owner performs pre-invocation avoidance and records its decision evidence before `InvokeAI`. AI Gateway receives an already-approved invocation; it MUST NOT execute product/business deterministic logic. Within the accepted AI request, Gateway applies cache, route, context, output, and escalation policy in this order:
+The accountable Manager, Workflow, Skill, or capability owner performs pre-invocation avoidance and records its decision evidence before `InvokeAI`. AI Gateway receives an already-approved invocation; it MUST NOT execute product/business deterministic logic. Gateway's pre-acceptance replay admission uses `CommandId`/`IdempotencyKey` and is distinct from post-acceptance content caching. After acceptance creates `AIInvocationId` in `Requested`, Gateway applies the canonical lifecycle exactly once: accepted-lifecycle policy validation produces `PolicyValidated`; content-cache resolution, context assembly/budgeting, and final model/provider selection produce `ProviderSelected`; durable hierarchical reservation and provider preparation produce `Prepared`; invocation then follows the frozen `Invoked`/`Retrying` and terminal states. Within that post-acceptance lifecycle, Gateway applies:
 
 1. reuse only valid Gateway-owned exact cached content/artifacts under approved policy;
 2. select the least expensive model satisfying all hard capability, quality, security, residency, latency, and availability requirements;
@@ -142,11 +142,11 @@ Escalation signals are schema failure, missing mandatory evidence, low measured 
 
 ## Budget hierarchy
 
-Budgets apply at invocation, workflow-step, workflow, capability/AI Employee, and Tenant/Workspace daily/monthly scopes. Before acceptance, Gateway estimates the maximum charge. Acceptance atomically and durably reserves that estimate across every applicable scope and creates `AIInvocationId`; the existing scoped `CommandId`/`IdempotencyKey` makes reservation replay safe without a new canonical reservation identity. Concurrent reservations serialize or use equivalent atomic conditional enforcement so no hard scope overspends.
+Budgets apply at invocation, workflow-step, workflow, capability/AI Employee, and Tenant/Workspace daily/monthly scopes. Before acceptance, Gateway may estimate only coarse budget feasibility for admission; this creates no durable reservation. Acceptance atomically creates `AIInvocationId`. After acceptance, context-dependent estimation determines the maximum charge and Gateway atomically and durably reserves it across every applicable scope under `AIInvocationId`. The existing scoped `CommandId`/`IdempotencyKey` makes pre-acceptance request replay safe, while `AIInvocationId` makes reservation creation/transitions idempotent, recoverable, and reconcilable without a new canonical reservation identity. Concurrent reservations serialize or use equivalent atomic conditional enforcement so no hard scope overspends.
 
-Reservations have implementation-local states `pending`, `committed`, `released`, and `expired`. Cancellation, rejection, deadline expiry, or abandoned pre-provider work releases unused reservation. Partial/streaming usage is accumulated monotonically; terminal completion reconciles measured actual cost, cached/reasoning tokens, and unused reservation atomically. Missing or delayed provider usage retains a conservative estimated charge with explicit confidence until later idempotent reconciliation. Overrun is recorded and escalated but never rewrites an authoritative successful Result. Recovery replays the same reservation transition, never double-charges, and repairs expired/orphaned reservations from durable invocation evidence.
+Reservations have implementation-local states `pending`, `committed`, `released`, and `expired`. Cancellation, deadline expiry, or abandoned pre-provider work releases unused reservation. Partial/streaming usage is accumulated monotonically; terminal completion reconciles measured actual cost, cached/reasoning tokens, and unused reservation atomically. Missing or delayed provider usage retains a conservative estimated charge with explicit confidence until later idempotent reconciliation. Overrun is recorded and escalated but never rewrites an authoritative successful Result. Recovery replays the same `AIInvocationId`-scoped reservation transition, never double-reserves or double-charges, and repairs expired/orphaned reservations from durable invocation evidence.
 
-Budget failure yields an immutable ES-007 terminal Result referencing its Error and MUST NOT cause AI Gateway to retry a workflow. A provider fallback cannot exceed the remaining invocation reservation.
+Post-acceptance budget reservation failure transitions the accepted invocation to `Failed`, yields an immutable ES-007 terminal Result referencing its Error, prevents provider preparation/attempt creation, and MUST NOT cause AI Gateway to retry a workflow. A provider fallback cannot exceed the remaining invocation reservation.
 
 ## Caching and reuse
 
@@ -224,6 +224,8 @@ Each task class defines quality metrics, protected safety/factuality cases, and 
 
 - [ ] Pre-invocation deterministic/business reuse has an accountable non-Gateway owner; accepted requests follow cache/route/context/constrain/escalate policy.
 - [ ] Caller supplies no `AIInvocationId`; Gateway creates it atomically on acceptance and returns it in a distinct acknowledgement Result.
+- [ ] Pre-acceptance performs only bounded preflight admission; context, accepted-lifecycle policy, final routing, durable reservation, and provider preparation occur after acceptance.
+- [ ] Accepted invocations follow `Requested` → `PolicyValidated` → `ProviderSelected` → `Prepared` exactly once before invocation, with no duplicated lifecycle step.
 - [ ] Every terminal outcome has a new immutable `ResultId`; unsuccessful outcomes reference `ErrorId` exactly as ES-007 requires.
 - [ ] Cheapest-capable means all hard capability, quality, security, residency, deadline, and budget constraints pass.
 - [ ] Full history and full Memory are never default context; every context item has a necessity reason.
@@ -231,6 +233,7 @@ Each task class defines quality metrics, protected safety/factuality cases, and 
 - [ ] Cache keys are tenant-scoped and contain all correctness-sensitive versions.
 - [ ] Cache hits reuse content/artifacts only and create new invocation and Result lineage without reusing canonical identities.
 - [ ] Hierarchical reservation is atomic, idempotent, concurrency-safe, recoverable, expirable, and reconciled without double charge.
+- [ ] Post-acceptance reservation failure returns the canonical failed Result/Error outcome and grants no Gateway workflow-retry authority.
 - [ ] The model routing catalog is internal to AI Gateway and does not alter the frozen Capability Registry.
 - [ ] Estimated and actual usage/cost, savings, and avoided invocations are recorded.
 - [ ] Provider-specific types and credentials remain isolated.
