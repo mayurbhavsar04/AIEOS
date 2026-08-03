@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -15,10 +16,13 @@ from alembic import command
 from alembic.config import Config
 from pydantic import SecretStr
 from sqlalchemy import func, insert, select, text
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.exc import IntegrityError
 
+from aieos.adapters.event_bus_in_process import InProcessEventBus
 from aieos.adapters.persistence_postgres import (
     PostgresDatabase,
+    PostgresOutboxRelay,
     PostgresOutboxStore,
     PostgresWorkflowRepository,
 )
@@ -26,6 +30,7 @@ from aieos.adapters.persistence_postgres.models import (
     Base,
     CommandIdempotencyRow,
     DecisionEvidenceRow,
+    DeliveryReceiptRow,
     ExecutionRow,
     MemoryRecordRow,
     OutboxEventRow,
@@ -392,6 +397,618 @@ async def test_concurrent_duplicate_submission_creates_one_workflow(
     await right.close()
 
 
+async def test_scoped_idempotency_key_deduplicates_distinct_command_ids(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    left = compose(settings)
+    right = compose(settings)
+    first = left.reference_runtime.build_request_command(
+        "same logical request",
+        command_id="command-idempotency-left",
+        idempotency_key="logical-request",
+    )
+    second = replace(
+        first,
+        command_id="command-idempotency-right",
+        timestamp=first.timestamp + timedelta(microseconds=1),
+    )
+    results: list[ResultEnvelope] = []
+
+    async def run(root: CompositionRoot, command_envelope: Any) -> None:
+        results.append(await root.reference_runtime.run_command(command_envelope))
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(run, left, first)
+        group.start_soon(run, right, second)
+
+    assert results[0] == results[1]
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        manager_receipts = tuple(
+            await session.scalars(
+                select(CommandIdempotencyRow).where(
+                    CommandIdempotencyRow.target_component == "Manager"
+                )
+            )
+        )
+        assert len(manager_receipts) == 1
+        assert manager_receipts[0].idempotency_key == "logical-request"
+        assert manager_receipts[0].completed
+
+    conflicting = replace(second, command_id="command-conflict", payload={"message": "changed"})
+    with pytest.raises(ValueError, match="IdempotencyKey"):
+        await right.reference_runtime.run_command(conflicting)
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+    await left.close()
+    await right.close()
+
+
+async def test_idempotency_scope_replay_rollback_and_retry_lineage_matrix(
+    database: PostgresDatabase,
+) -> None:
+    shared_key = "matrix-logical-request"
+    first_settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        mock_ai_failures_before_success=1,
+    )
+    other_scope_settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+        tenant_id="tenant-b",
+        workspace_id="workspace-b",
+    )
+    first = compose(first_settings)
+    original = first.reference_runtime.build_request_command(
+        "retry lineage",
+        command_id="matrix-command-a",
+        idempotency_key=shared_key,
+        max_attempts=2,
+    )
+    result = await first.reference_runtime.run_command(original)
+    assert result.result_status is ResultStatus.SUCCEEDED
+    replay_command = replace(
+        original,
+        command_id="matrix-command-b",
+        timestamp=original.timestamp + timedelta(seconds=1),
+    )
+    replay = await first.reference_runtime.run_command(replay_command)
+    assert replay == result
+
+    other = compose(other_scope_settings)
+    independent = other.reference_runtime.build_request_command(
+        "independent scope",
+        command_id="matrix-command-c",
+        idempotency_key=shared_key,
+    )
+    other_result = await other.reference_runtime.run_command(independent)
+    assert other_result.subject_reference != result.subject_reference
+
+    async with database.transaction() as session:
+        workflows = tuple(
+            await session.scalars(select(WorkflowRow).order_by(WorkflowRow.tenant_id))
+        )
+        assert len(workflows) == 2
+        first_executions = tuple(
+            await session.scalars(
+                select(ExecutionRow)
+                .where(
+                    ExecutionRow.tenant_id == "tenant-a",
+                    ExecutionRow.workspace_id == "workspace-a",
+                )
+                .order_by(ExecutionRow.attempt_number)
+            )
+        )
+        assert len(first_executions) == 2
+        assert first_executions[0].execution_id != first_executions[1].execution_id
+        assert first_executions[1].previous_execution_id == first_executions[0].execution_id
+        manager_claims = tuple(
+            await session.scalars(
+                select(CommandIdempotencyRow).where(
+                    CommandIdempotencyRow.target_component == "Manager",
+                    CommandIdempotencyRow.idempotency_key == shared_key,
+                )
+            )
+        )
+        assert len(manager_claims) == 2
+        assert {row.tenant_id for row in manager_claims} == {"tenant-a", "tenant-b"}
+        before = {
+            "workflows": len(workflows),
+            "executions": await session.scalar(select(func.count()).select_from(ExecutionRow)),
+            "outcomes": await session.scalar(select(func.count()).select_from(OutcomeRow)),
+            "events": await session.scalar(select(func.count()).select_from(OutboxEventRow)),
+            "claims": await session.scalar(select(func.count()).select_from(CommandIdempotencyRow)),
+        }
+    assert await first.reference_runtime.run_command(replay_command) == result
+    async with database.transaction() as session:
+        after = {
+            "workflows": await session.scalar(select(func.count()).select_from(WorkflowRow)),
+            "executions": await session.scalar(select(func.count()).select_from(ExecutionRow)),
+            "outcomes": await session.scalar(select(func.count()).select_from(OutcomeRow)),
+            "events": await session.scalar(select(func.count()).select_from(OutboxEventRow)),
+            "claims": await session.scalar(select(func.count()).select_from(CommandIdempotencyRow)),
+        }
+    assert after == before
+    await first.close()
+    await other.close()
+
+
+async def test_idempotency_claim_and_workflow_staging_roll_back_atomically(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    interrupted = compose(settings)
+    runtime = interrupted.reference_runtime
+    participant = runtime.durable_participants[-1]
+    original_flush = participant.flush_in_transaction
+    injected = False
+
+    async def fail_before_commit(session: Any) -> None:
+        nonlocal injected
+        await original_flush(session)
+        if not injected:
+            injected = True
+            raise RuntimeError("injected failure before checkpoint commit")
+
+    participant.flush_in_transaction = fail_before_commit  # type: ignore[method-assign]
+    original = runtime.build_request_command(
+        "rollback logical request",
+        command_id="rollback-command-a",
+        idempotency_key="rollback-key",
+    )
+    with pytest.raises(RuntimeError, match="checkpoint commit"):
+        await runtime.run_command(original)
+    assert injected
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(OutcomeRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(OutboxEventRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(CommandIdempotencyRow)) == 0
+    await interrupted.close()
+
+    recovered = compose(settings)
+    retry = replace(
+        original,
+        command_id="rollback-command-b",
+        timestamp=original.timestamp + timedelta(seconds=1),
+    )
+    result = await recovered.reference_runtime.run_command(retry)
+    assert result.result_status is ResultStatus.SUCCEEDED
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(CommandIdempotencyRow)
+                .where(
+                    CommandIdempotencyRow.target_component == "Manager",
+                    CommandIdempotencyRow.completed.is_(True),
+                )
+            )
+            == 1
+        )
+    await recovered.close()
+
+
+async def test_idempotency_scope_columns_and_locks_are_independent(
+    database: PostgresDatabase,
+) -> None:
+    scope_rows = (
+        ("tenant-a", "workspace-a", "Manager"),
+        ("tenant-b", "workspace-a", "Manager"),
+        ("tenant-a", "workspace-b", "Manager"),
+        ("tenant-a", "workspace-a", "Workflow Engine"),
+    )
+    async with database.transaction() as session:
+        for tenant_id, workspace_id, target in scope_rows:
+            await session.execute(
+                insert(CommandIdempotencyRow).values(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    target_component=target,
+                    idempotency_key="same-key",
+                    command_id="same-command-id",
+                    command_hash="a" * 64,
+                    completed=False,
+                    payload=b"scope-proof",
+                )
+            )
+    async with database.transaction() as session:
+        rows = tuple(
+            await session.scalars(
+                select(CommandIdempotencyRow).where(
+                    CommandIdempotencyRow.idempotency_key == "same-key"
+                )
+            )
+        )
+        assert {(row.tenant_id, row.workspace_id, row.target_component) for row in rows} == set(
+            scope_rows
+        )
+
+    entered: set[str] = set()
+    both_entered = anyio.Event()
+    release = anyio.Event()
+
+    async def hold(name: str, scope: str) -> None:
+        async with database.command_lock(scope):
+            entered.add(name)
+            if len(entered) == 2:
+                both_entered.set()
+            await release.wait()
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(hold, "tenant", "tenant-a\x1fworkspace-a\x1fManager\x1fsame-key")
+        group.start_soon(hold, "workspace", "tenant-a\x1fworkspace-b\x1fManager\x1fsame-key")
+        with anyio.fail_after(2):
+            await both_entered.wait()
+        release.set()
+
+
+async def test_per_consumer_receipts_are_independent_and_recover_stale_claims(
+    database: PostgresDatabase,
+) -> None:
+    store = PostgresOutboxStore(
+        database,
+        required_consumers={"ExecutionAttemptSucceeded": ("first", "second")},
+    )
+    bus = InProcessEventBus()
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        async def consume(self, event: EventEnvelope) -> None:
+            self.events.append(event.event_id)
+
+    first = Recorder()
+    second = Recorder()
+    bus.subscribe("ExecutionAttemptSucceeded", "first", first)
+    bus.subscribe("ExecutionAttemptSucceeded", "second", second)
+    relay = PostgresOutboxRelay(
+        store,
+        bus,
+        owner="relay-a",
+        batch_size=10,
+        lease_seconds=30,
+        backoff_seconds=0,
+    )
+    delivered_event = event("event-receipts")
+    await store.record(delivered_event)
+    assert await relay.drain() == 1
+    assert first.events == ["event-receipts"]
+    assert second.events == ["event-receipts"]
+    async with database.transaction() as session:
+        receipts = tuple(
+            await session.scalars(
+                select(DeliveryReceiptRow).order_by(DeliveryReceiptRow.consumer_name)
+            )
+        )
+        assert [(item.consumer_name, item.status) for item in receipts] == [
+            ("first", "Delivered"),
+            ("second", "Delivered"),
+        ]
+
+    stale_event = event("event-stale-receipt")
+    await store.record(stale_event)
+    instant = datetime.now(UTC)
+    assert await store.claim_receipt(
+        stale_event,
+        "first",
+        owner="dead-worker",
+        lease_seconds=1,
+        now=instant,
+    )
+    assert not await store.claim_receipt(
+        stale_event,
+        "first",
+        owner="competing-worker",
+        lease_seconds=1,
+        now=instant,
+    )
+    assert await store.claim_receipt(
+        stale_event,
+        "first",
+        owner="recovery-worker",
+        lease_seconds=30,
+        now=instant + timedelta(seconds=2),
+    )
+
+
+async def test_required_consumer_snapshot_survives_missing_and_changed_registration(
+    database: PostgresDatabase,
+) -> None:
+    stored_event = event("event-membership-snapshot")
+    store = PostgresOutboxStore(
+        database,
+        required_consumers={"ExecutionAttemptSucceeded": ("first", "second")},
+    )
+    await store.record(stored_event)
+    empty_bus = InProcessEventBus()
+    empty_relay = PostgresOutboxRelay(
+        store,
+        empty_bus,
+        owner="empty-runtime",
+        batch_size=10,
+        lease_seconds=30,
+        backoff_seconds=0,
+    )
+    assert await empty_relay.drain() == 0
+    async with database.transaction() as session:
+        outbox = await session.get(
+            OutboxEventRow, ("tenant-1", "workspace-1", stored_event.event_id)
+        )
+        assert outbox is not None
+        assert outbox.required_consumer_count == 2
+        assert outbox.delivered_at is None
+        receipts = tuple(await session.scalars(select(DeliveryReceiptRow)))
+        assert {receipt.consumer_name for receipt in receipts} == {"first", "second"}
+        assert all(receipt.status == "Failed" for receipt in receipts)
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        async def consume(self, event: EventEnvelope) -> None:
+            self.events.append(event.event_id)
+
+    restarted_bus = InProcessEventBus()
+    first = Recorder()
+    second = Recorder()
+    optional = Recorder()
+    restarted_bus.subscribe(stored_event.event_type, "first", first)
+    restarted_bus.subscribe(stored_event.event_type, "second", second)
+    restarted_bus.subscribe(stored_event.event_type, "later-optional", optional)
+    restarted_store = PostgresOutboxStore(database, required_consumers={})
+    restarted_relay = PostgresOutboxRelay(
+        restarted_store,
+        restarted_bus,
+        owner="complete-runtime",
+        batch_size=10,
+        lease_seconds=30,
+        backoff_seconds=0,
+    )
+    assert await restarted_relay.drain() == 1
+    assert first.events == [stored_event.event_id]
+    assert second.events == [stored_event.event_id]
+    assert optional.events == []
+
+
+async def test_receipt_contention_failure_poison_and_scope_safety_matrix(
+    database: PostgresDatabase,
+) -> None:
+    store = PostgresOutboxStore(
+        database,
+        required_consumers={"ExecutionAttemptSucceeded": ("healthy", "poison")},
+    )
+    stored_event = event("event-receipt-matrix")
+    await store.record(stored_event)
+    instant = datetime.now(UTC)
+    claims: list[bool] = []
+
+    async def contend(owner: str) -> None:
+        claims.append(
+            await store.claim_receipt(
+                stored_event,
+                "healthy",
+                owner=owner,
+                lease_seconds=30,
+                now=instant,
+            )
+        )
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(contend, "worker-a")
+        group.start_soon(contend, "worker-b")
+    assert sorted(claims) == [False, True]
+    assert await store.claim_receipt(
+        stored_event,
+        "poison",
+        owner="worker-independent",
+        lease_seconds=30,
+        now=instant,
+    )
+    assert await store.fail_receipt(
+        stored_event,
+        "poison",
+        owner="worker-independent",
+        error="safe-poison-category",
+    )
+    async with database.transaction() as session:
+        poison = await session.get(
+            DeliveryReceiptRow,
+            ("tenant-1", "workspace-1", stored_event.event_id, "poison"),
+        )
+        assert poison is not None
+        assert poison.status == "Failed"
+        assert poison.delivery_attempts == 1
+        assert poison.last_error == "safe-poison-category"
+    with pytest.raises(IntegrityError):
+        async with database.transaction() as session:
+            await session.execute(
+                insert(DeliveryReceiptRow).values(
+                    tenant_id="other-tenant",
+                    workspace_id="workspace-1",
+                    event_id=stored_event.event_id,
+                    consumer_name="cross-scope",
+                    status="Pending",
+                    required=True,
+                    delivery_attempts=0,
+                    created_at=instant,
+                )
+            )
+
+
+async def test_partial_acknowledgement_and_poison_retry_preserve_healthy_effect(
+    database: PostgresDatabase,
+) -> None:
+    stored_event = event("event-partial-poison")
+    store = PostgresOutboxStore(
+        database,
+        required_consumers={"ExecutionAttemptSucceeded": ("healthy", "poison")},
+    )
+    await store.record(stored_event)
+
+    class Healthy:
+        calls = 0
+
+        async def consume(self, event: EventEnvelope) -> None:
+            assert event.event_id == stored_event.event_id
+            self.calls += 1
+
+    class PoisonOnce:
+        calls = 0
+        effects = 0
+
+        async def consume(self, event: EventEnvelope) -> None:
+            assert event.event_id == stored_event.event_id
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("poison")
+            self.effects += 1
+
+    healthy = Healthy()
+    poison = PoisonOnce()
+    bus = InProcessEventBus()
+    bus.subscribe(stored_event.event_type, "healthy", healthy)
+    bus.subscribe(stored_event.event_type, "poison", poison)
+    relay = PostgresOutboxRelay(
+        store,
+        bus,
+        owner="poison-worker",
+        batch_size=10,
+        lease_seconds=30,
+        backoff_seconds=0,
+    )
+    assert await relay.drain() == 0
+    async with database.transaction() as session:
+        receipts = {
+            receipt.consumer_name: receipt
+            for receipt in await session.scalars(select(DeliveryReceiptRow))
+        }
+        outbox = await session.get(
+            OutboxEventRow, ("tenant-1", "workspace-1", stored_event.event_id)
+        )
+        assert receipts["healthy"].status == "Delivered"
+        assert receipts["healthy"].delivery_attempts == 1
+        assert receipts["poison"].status == "Failed"
+        assert receipts["poison"].last_error == "RuntimeError"
+        assert outbox is not None and outbox.delivered_at is None
+    assert healthy.calls == 1
+    assert poison.calls == 1
+    assert poison.effects == 0
+
+    assert await relay.drain() == 1
+    async with database.transaction() as session:
+        receipts = {
+            receipt.consumer_name: receipt
+            for receipt in await session.scalars(select(DeliveryReceiptRow))
+        }
+        outbox = await session.get(
+            OutboxEventRow, ("tenant-1", "workspace-1", stored_event.event_id)
+        )
+        assert receipts["healthy"].status == "Delivered"
+        assert receipts["healthy"].delivery_attempts == 1
+        assert receipts["poison"].status == "Delivered"
+        assert receipts["poison"].delivery_attempts == 2
+        assert outbox is not None and outbox.delivered_at is not None
+    assert healthy.calls == 1
+    assert poison.calls == 2
+    assert poison.effects == 1
+
+
+async def test_crash_after_consumer_effect_has_one_durable_authoritative_effect(
+    database: PostgresDatabase,
+) -> None:
+    stored_event = event("event-crash-after-effect")
+    store = PostgresOutboxStore(
+        database,
+        required_consumers={"ExecutionAttemptSucceeded": ("durable-consumer",)},
+    )
+    await store.record(stored_event)
+
+    class DurableConsumer:
+        def __init__(self, *, crash: bool) -> None:
+            self.crash = crash
+
+        async def consume(self, event: EventEnvelope) -> None:
+            async with database.transaction() as session:
+                await session.execute(
+                    postgres_insert(DecisionEvidenceRow)
+                    .values(
+                        tenant_id=event.tenant_id,
+                        workspace_id=event.workspace_id,
+                        decision_id=f"consumer-effect:{event.event_id}",
+                        decision_type="ConsumerAuthoritativeEffect",
+                        component="Test Durable Consumer",
+                        correlation_id=event.correlation_id,
+                        triggering_id=event.event_id,
+                        recorded_at=event.recorded_at,
+                        payload=b"authoritative-effect",
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=["tenant_id", "workspace_id", "decision_id"]
+                    )
+                )
+            if self.crash:
+                raise RuntimeError("crash after effect")
+
+    crashing_bus = InProcessEventBus()
+    crashing_bus.subscribe(stored_event.event_type, "durable-consumer", DurableConsumer(crash=True))
+    crashing_relay = PostgresOutboxRelay(
+        store,
+        crashing_bus,
+        owner="crashing-worker",
+        batch_size=10,
+        lease_seconds=30,
+        backoff_seconds=0,
+    )
+    assert await crashing_relay.drain() == 0
+
+    recovered_bus = InProcessEventBus()
+    recovered_bus.subscribe(
+        stored_event.event_type,
+        "durable-consumer",
+        DurableConsumer(crash=False),
+    )
+    recovered_relay = PostgresOutboxRelay(
+        PostgresOutboxStore(database),
+        recovered_bus,
+        owner="recovered-worker",
+        batch_size=10,
+        lease_seconds=30,
+        backoff_seconds=0,
+    )
+    assert await recovered_relay.drain() == 1
+    async with database.transaction() as session:
+        effects = tuple(
+            await session.scalars(
+                select(DecisionEvidenceRow).where(
+                    DecisionEvidenceRow.decision_type == "ConsumerAuthoritativeEffect"
+                )
+            )
+        )
+        receipt = await session.get(
+            DeliveryReceiptRow,
+            ("tenant-1", "workspace-1", stored_event.event_id, "durable-consumer"),
+        )
+        assert len(effects) == 1
+        assert receipt is not None and receipt.status == "Delivered"
+        assert receipt.delivery_attempts == 2
+
+
 async def test_retry_creates_new_execution_and_durable_decision_lineage(
     database: PostgresDatabase,
 ) -> None:
@@ -496,11 +1113,26 @@ async def test_incomplete_publication_and_idempotency_resume_after_restart(
     command_envelope = runtime.build_request_command("resume hello", command_id="command-resume")
     acknowledgement = await runtime.run_command(command_envelope)
     assert acknowledgement.result_status is ResultStatus.ACCEPTED
+    conflicting = replace(
+        command_envelope,
+        command_id="command-resume-conflict",
+        payload={"message": "changed while incomplete"},
+    )
+    with pytest.raises(ValueError, match="IdempotencyKey"):
+        await runtime.run_command(conflicting)
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
     await interrupted.close()
 
     await anyio.sleep(0.02)
     recovered = compose(settings)
-    result = await recovered.reference_runtime.run_command(command_envelope)
+    replay_command = replace(
+        command_envelope,
+        command_id="command-resume-redelivery",
+        timestamp=command_envelope.timestamp + timedelta(seconds=1),
+    )
+    result = await recovered.reference_runtime.run_command(replay_command)
     assert result.result_status is ResultStatus.SUCCEEDED
     async with database.transaction() as session:
         assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
@@ -511,6 +1143,16 @@ async def test_incomplete_publication_and_idempotency_resume_after_restart(
             )
         )
         assert len(terminal) == 1
+        manager_claims = tuple(
+            await session.scalars(
+                select(CommandIdempotencyRow).where(
+                    CommandIdempotencyRow.target_component == "Manager"
+                )
+            )
+        )
+        assert len(manager_claims) == 1
+        assert manager_claims[0].command_id == command_envelope.command_id
+        assert manager_claims[0].completed
     await recovered.close()
 
 

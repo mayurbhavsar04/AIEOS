@@ -23,6 +23,7 @@ from aieos.adapters.persistence_postgres import (
     PostgresWorkflowRepository,
     TransactionParticipant,
     checkpoint,
+    scoped_idempotency_lock_key,
 )
 from aieos.capability_registry import CapabilityImplementation, CapabilityRegistry
 from aieos.contracts import AuthorizationContext, ResultEnvelope
@@ -209,7 +210,17 @@ class ReferenceRuntime:
 
     async def run_command(self, command: CommandEnvelope) -> ResultEnvelope:
         if self.database is not None:
-            async with self.database.command_lock(command.command_id):
+            async with self.database.command_lock(scoped_idempotency_lock_key(command)):
+                for participant in self.durable_participants:
+                    await participant.prepare()
+                repository = self.request_repository
+                assert isinstance(repository, PostgresRequestRepository)
+                replay = await repository.replay_command(command)
+                if replay is not None:
+                    stored_command, completed_result = replay
+                    if completed_result is not None:
+                        return completed_result
+                    command = stored_command
                 return await self._run_prepared(command)
         return await self._run_prepared(command)
 
@@ -266,7 +277,14 @@ def compose(
             pool_timeout_seconds=resolved.database_pool_timeout_seconds,
             command_timeout_seconds=resolved.database_command_timeout_seconds,
         )
-        postgres_outbox_store = PostgresOutboxStore(database)
+        postgres_outbox_store = PostgresOutboxStore(
+            database,
+            required_consumers={
+                "ExecutionAttemptSucceeded": ("workflow-engine",),
+                "ExecutionAttemptFailed": ("workflow-engine",),
+                "ExecutionAttemptTimedOut": ("workflow-engine",),
+            },
+        )
         durable_scope = {
             "tenant_id": resolved.tenant_id,
             "workspace_id": resolved.workspace_id,

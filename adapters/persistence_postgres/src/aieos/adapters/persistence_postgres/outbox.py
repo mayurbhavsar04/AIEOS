@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic import TypeAdapter
 from sqlalchemy import and_, func, or_, select
@@ -14,11 +15,17 @@ from aieos.contracts.events import EventEnvelope
 from aieos.event_bus import EventBus
 
 from .database import PostgresDatabase
-from .models import OutboxEventRow
+from .models import DeliveryReceiptRow, OutboxEventRow
 
 
 class _Participant(Protocol):
     async def flush_in_transaction(self, session: AsyncSession) -> None: ...
+
+
+class _ConsumerAwareEventBus(Protocol):
+    def consumer_names(self, event_type: str) -> tuple[str, ...]: ...
+
+    async def deliver_to(self, event: EventEnvelope, consumer_name: str) -> None: ...
 
 
 def utc_now() -> datetime:
@@ -37,8 +44,17 @@ def decode_event(payload: bytes) -> EventEnvelope:
 
 
 class PostgresOutboxStore:
-    def __init__(self, database: PostgresDatabase) -> None:
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        *,
+        required_consumers: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> None:
         self._database = database
+        self._required_consumers = {
+            event_type: tuple(sorted(set(consumers)))
+            for event_type, consumers in (required_consumers or {}).items()
+        }
 
     @property
     def database(self) -> PostgresDatabase:
@@ -52,6 +68,7 @@ class PostgresOutboxStore:
     async def record_in_transaction(self, session: AsyncSession, event: EventEnvelope) -> None:
         """Record beside producer-owned state in the caller's transaction."""
         encoded = encode_event(event)
+        required_consumers = self._required_consumers.get(event.event_type, ())
         statement = insert(OutboxEventRow).values(
             event_id=event.event_id,
             producer=event.producer,
@@ -61,6 +78,7 @@ class PostgresOutboxStore:
             payload=encoded,
             recorded_at=event.recorded_at,
             available_at=event.recorded_at,
+            required_consumer_count=len(required_consumers),
         )
         statement = statement.on_conflict_do_nothing(
             index_elements=["tenant_id", "workspace_id", "event_id"]
@@ -71,6 +89,30 @@ class PostgresOutboxStore:
         )
         if stored is None or stored.payload != encoded:
             raise ValueError("EventId cannot be reused with changed content")
+        if stored.required_consumer_count != len(required_consumers):
+            raise ValueError("EventId cannot be reused with changed consumer obligations")
+        for consumer_name in required_consumers:
+            await session.execute(
+                insert(DeliveryReceiptRow)
+                .values(
+                    tenant_id=event.tenant_id,
+                    workspace_id=event.workspace_id,
+                    event_id=event.event_id,
+                    consumer_name=consumer_name,
+                    status="Pending",
+                    required=True,
+                    delivery_attempts=0,
+                    created_at=event.recorded_at,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        "tenant_id",
+                        "workspace_id",
+                        "event_id",
+                        "consumer_name",
+                    ]
+                )
+            )
 
     async def claim(
         self,
@@ -125,6 +167,138 @@ class PostgresOutboxStore:
             row.lease_owner = None
             row.lease_expires_at = None
             return True
+
+    async def required_receipts(self, event: EventEnvelope) -> tuple[str, ...]:
+        async with self._database.transaction() as session:
+            return tuple(
+                await session.scalars(
+                    select(DeliveryReceiptRow.consumer_name)
+                    .where(
+                        DeliveryReceiptRow.tenant_id == event.tenant_id,
+                        DeliveryReceiptRow.workspace_id == event.workspace_id,
+                        DeliveryReceiptRow.event_id == event.event_id,
+                        DeliveryReceiptRow.required.is_(True),
+                    )
+                    .order_by(DeliveryReceiptRow.consumer_name)
+                )
+            )
+
+    async def claim_receipt(
+        self,
+        event: EventEnvelope,
+        consumer_name: str,
+        *,
+        owner: str,
+        lease_seconds: float,
+        now: datetime | None = None,
+    ) -> bool:
+        instant = now or utc_now()
+        async with self._database.transaction() as session:
+            row = await session.get(
+                DeliveryReceiptRow,
+                (
+                    event.tenant_id,
+                    event.workspace_id,
+                    event.event_id,
+                    consumer_name,
+                ),
+                with_for_update=True,
+            )
+            if row is None or row.status == "Delivered":
+                return False
+            if row.lease_expires_at is not None and row.lease_expires_at >= instant:
+                return False
+            row.status = "Claimed"
+            row.lease_owner = owner
+            row.lease_expires_at = instant + timedelta(seconds=lease_seconds)
+            row.delivery_attempts += 1
+            return True
+
+    async def acknowledge_receipt(
+        self,
+        event: EventEnvelope,
+        consumer_name: str,
+        *,
+        owner: str,
+        now: datetime | None = None,
+    ) -> bool:
+        async with self._database.transaction() as session:
+            row = await session.get(
+                DeliveryReceiptRow,
+                (
+                    event.tenant_id,
+                    event.workspace_id,
+                    event.event_id,
+                    consumer_name,
+                ),
+                with_for_update=True,
+            )
+            if row is None or row.lease_owner != owner or row.status != "Claimed":
+                return False
+            row.status = "Delivered"
+            row.delivered_at = now or utc_now()
+            row.lease_owner = None
+            row.lease_expires_at = None
+            row.last_error = None
+            return True
+
+    async def fail_receipt(
+        self,
+        event: EventEnvelope,
+        consumer_name: str,
+        *,
+        owner: str,
+        error: str,
+    ) -> bool:
+        async with self._database.transaction() as session:
+            row = await session.get(
+                DeliveryReceiptRow,
+                (
+                    event.tenant_id,
+                    event.workspace_id,
+                    event.event_id,
+                    consumer_name,
+                ),
+                with_for_update=True,
+            )
+            if row is None or row.lease_owner != owner or row.status != "Claimed":
+                return False
+            row.status = "Failed"
+            row.last_error = error[:2000]
+            row.lease_owner = None
+            row.lease_expires_at = None
+            return True
+
+    async def all_required_receipts_delivered(self, event: EventEnvelope) -> bool:
+        async with self._database.transaction() as session:
+            outbox = await session.get(
+                OutboxEventRow,
+                (event.tenant_id, event.workspace_id, event.event_id),
+            )
+            if outbox is None:
+                return False
+            required = await session.scalar(
+                select(func.count())
+                .select_from(DeliveryReceiptRow)
+                .where(
+                    DeliveryReceiptRow.tenant_id == event.tenant_id,
+                    DeliveryReceiptRow.workspace_id == event.workspace_id,
+                    DeliveryReceiptRow.event_id == event.event_id,
+                    DeliveryReceiptRow.required.is_(True),
+                )
+            )
+            incomplete = await session.scalar(
+                select(func.count())
+                .select_from(DeliveryReceiptRow)
+                .where(
+                    DeliveryReceiptRow.tenant_id == event.tenant_id,
+                    DeliveryReceiptRow.workspace_id == event.workspace_id,
+                    DeliveryReceiptRow.event_id == event.event_id,
+                    DeliveryReceiptRow.required.is_(True),
+                    DeliveryReceiptRow.status != "Delivered",
+                )
+            )
+        return int(required or 0) == outbox.required_consumer_count and int(incomplete or 0) == 0
 
     async def release_failed(
         self,
@@ -185,6 +359,8 @@ class PostgresOutboxRelay:
         backoff_seconds: float,
     ) -> None:
         self._store = store
+        if not hasattr(event_bus, "consumer_names") or not hasattr(event_bus, "deliver_to"):
+            raise TypeError("durable relay requires a consumer-aware Event Bus")
         self._event_bus = event_bus
         self._owner = owner
         self._batch_size = batch_size
@@ -201,15 +377,41 @@ class PostgresOutboxRelay:
         for event in events:
             if event.tenant_id is None or event.workspace_id is None:
                 raise ValueError("durable Event delivery requires tenant and workspace scope")
-            try:
-                await self._event_bus.publish(event)
-            except Exception as failure:
+            bus = cast(_ConsumerAwareEventBus, self._event_bus)
+            consumers = await self._store.required_receipts(event)
+            failures = 0
+            for consumer_name in consumers:
+                claimed = await self._store.claim_receipt(
+                    event,
+                    consumer_name,
+                    owner=self._owner,
+                    lease_seconds=self._lease_seconds,
+                )
+                if not claimed:
+                    continue
+                try:
+                    await bus.deliver_to(event, consumer_name)
+                except Exception as failure:
+                    failures += 1
+                    await self._store.fail_receipt(
+                        event,
+                        consumer_name,
+                        owner=self._owner,
+                        error=type(failure).__name__,
+                    )
+                else:
+                    await self._store.acknowledge_receipt(
+                        event,
+                        consumer_name,
+                        owner=self._owner,
+                    )
+            if failures or not await self._store.all_required_receipts_delivered(event):
                 await self._store.release_failed(
                     event.event_id,
                     tenant_id=event.tenant_id,
                     workspace_id=event.workspace_id,
                     owner=self._owner,
-                    error=type(failure).__name__,
+                    error="consumer_delivery_incomplete",
                     backoff_seconds=self._backoff_seconds,
                 )
             else:

@@ -41,12 +41,12 @@ class PostgresDatabase:
             yield session
 
     @asynccontextmanager
-    async def command_lock(self, command_id: str) -> AsyncIterator[None]:
-        """Serialize target processing for one stable CommandId across workers."""
+    async def command_lock(self, scoped_idempotency_key: str) -> AsyncIterator[None]:
+        """Serialize one target-owned logical request across workers."""
         async with self.sessions.begin() as session:
             await session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:command_id, 0))"),
-                {"command_id": command_id},
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:scope_key, 0))"),
+                {"scope_key": scoped_idempotency_key},
             )
             yield
 

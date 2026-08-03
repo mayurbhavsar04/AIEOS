@@ -10,6 +10,7 @@ from .runtime import (
     PostgresWorkflowRepository,
     TransactionParticipant,
     checkpoint,
+    scoped_idempotency_lock_key,
 )
 
 __all__ = (
@@ -24,4 +25,5 @@ __all__ = (
     "PostgresWorkflowRepository",
     "TransactionParticipant",
     "checkpoint",
+    "scoped_idempotency_lock_key",
 )

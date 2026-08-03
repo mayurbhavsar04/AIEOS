@@ -63,6 +63,45 @@ def _normalize_result(result: ResultEnvelope) -> ResultEnvelope:
     return replace(result, metadata=metadata)
 
 
+def command_intent_hash(command: CommandEnvelope) -> str:
+    """Hash immutable target-owned intent, excluding delivery identities."""
+    authorization = command.metadata.authorization
+    document = {
+        "command_type": command.command_type,
+        "command_version": command.command_version,
+        "target_component": command.target_component,
+        "initiator": command.initiator,
+        "tenant_id": command.tenant_id,
+        "workspace_id": command.workspace_id,
+        "payload": command.payload,
+        "workflow_id": command.workflow_id,
+        "workflow_step_id": command.workflow_step_id,
+        "execution_id": command.execution_id,
+        "attempt_number": command.metadata.attempt_number,
+        "authorization": {
+            "actor_id": authorization.actor_id,
+            "permissions": sorted(authorization.permissions),
+            "tenant_id": authorization.tenant_id,
+            "workspace_id": authorization.workspace_id,
+            "policy_id": authorization.policy_id,
+            "policy_version_id": authorization.policy_version_id,
+        },
+    }
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    return sha256(canonical).hexdigest()
+
+
+def scoped_idempotency_lock_key(command: CommandEnvelope) -> str:
+    return "\x1f".join(
+        (
+            command.tenant_id,
+            command.workspace_id,
+            command.target_component,
+            command.metadata.idempotency_key,
+        )
+    )
+
+
 async def _immutable_outcome(
     session: AsyncSession,
     result: ResultEnvelope,
@@ -130,15 +169,12 @@ async def _idempotency(
     outcome_id: str | None,
     payload: bytes,
 ) -> None:
-    document = json.loads(_COMMAND.dump_json(command))
-    permissions = document["metadata"]["authorization"]["permissions"]
-    document["metadata"]["authorization"]["permissions"] = sorted(permissions)
-    canonical = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
-    command_hash = sha256(canonical).hexdigest()
+    command_hash = command_intent_hash(command)
     statement = insert(CommandIdempotencyRow).values(
         tenant_id=command.tenant_id,
         workspace_id=command.workspace_id,
         target_component=target,
+        idempotency_key=command.metadata.idempotency_key,
         command_id=command.command_id,
         command_hash=command_hash,
         completed=completed,
@@ -150,7 +186,7 @@ async def _idempotency(
             "tenant_id",
             "workspace_id",
             "target_component",
-            "command_id",
+            "idempotency_key",
         ],
         set_={
             "completed": completed,
@@ -166,11 +202,11 @@ async def _idempotency(
             command.tenant_id,
             command.workspace_id,
             target,
-            command.command_id,
+            command.metadata.idempotency_key,
         ),
     )
     if stored is None or stored.command_hash != command_hash:
-        raise ValueError("CommandId cannot be reused with changed immutable content")
+        raise ValueError("IdempotencyKey cannot be reused with changed immutable intent")
 
 
 class _Prepared:
@@ -446,6 +482,33 @@ class PostgresRequestRepository(_Prepared, InMemoryRequestRepository):
                     self.command_results.setdefault(receipt.command.command_id, receipt.result)
                 if receipt.error is not None:
                     self.command_errors.setdefault(receipt.command.command_id, receipt.error)
+
+    async def replay_command(
+        self, command: CommandEnvelope
+    ) -> tuple[CommandEnvelope, ResultEnvelope | None] | None:
+        """Resolve a scoped logical request before target execution.
+
+        The stored command is replayed for unfinished work so a redelivery with a
+        new CommandId cannot create a second Workflow.
+        """
+        async with self._database.transaction() as session:
+            row = await session.get(
+                CommandIdempotencyRow,
+                (
+                    command.tenant_id,
+                    command.workspace_id,
+                    "Manager",
+                    command.metadata.idempotency_key,
+                ),
+                with_for_update=True,
+            )
+            if row is None:
+                return None
+            if row.command_hash != command_intent_hash(command):
+                raise ValueError("IdempotencyKey cannot be reused with changed immutable intent")
+            receipt = _MANAGER_RECEIPT.validate_json(row.payload)
+            result = _normalize_result(receipt.result) if receipt.result is not None else None
+            return receipt.command, result if row.completed else None
 
     async def flush_in_transaction(self, session: AsyncSession) -> None:
         for command_id, command in self.commands.items():
