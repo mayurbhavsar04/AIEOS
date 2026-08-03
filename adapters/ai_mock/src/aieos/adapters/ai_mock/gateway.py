@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
+from decimal import Decimal
 
-from aieos.ai_gateway import AIInvocationRequest, AIInvocationResponse
+from aieos.ai_gateway import (
+    AIInvocationRequest,
+    AIInvocationResponse,
+    AIUsage,
+    ProviderBehavior,
+    ProviderFailure,
+    ProviderResult,
+)
 from aieos.contracts import (
     ErrorCategory,
     ErrorSeverity,
@@ -77,4 +87,55 @@ class MockAIGateway:
         return AIInvocationResponse(invocation_id, result, content=content)
 
 
-__all__ = ("MockAIGateway",)
+class DeterministicMockProvider:
+    """Configurable provider adapter that never performs network I/O."""
+
+    def __init__(self, key: str, *, prefix: str, transient_failures: int = 0) -> None:
+        self.key = key
+        self.prefix = prefix
+        self.transient_failures = transient_failures
+        self.calls = 0
+
+    async def invoke(
+        self, *, model_key: str, prompt: str, request: AIInvocationRequest
+    ) -> ProviderResult:
+        self.calls += 1
+        if self.transient_failures:
+            self.transient_failures -= 1
+            raise ProviderFailure("AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True)
+        behavior = request.behavior
+        if behavior is ProviderBehavior.TRANSIENT_FAILURE:
+            raise ProviderFailure("AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True)
+        if behavior in {ProviderBehavior.PERMANENT_FAILURE, ProviderBehavior.POLICY_REJECTION}:
+            raise ProviderFailure("AI_PROVIDER_REJECTED", retryable=False)
+        if behavior is ProviderBehavior.TIMEOUT:
+            raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=True)
+        if behavior is ProviderBehavior.CANCELLED:
+            raise ProviderFailure("AI_PROVIDER_CANCELLED", retryable=False)
+        if behavior is ProviderBehavior.MALFORMED:
+            content = "not-json"
+        elif behavior is ProviderBehavior.STRUCTURED or request.output_schema_ref:
+            content = json.dumps({"answer": request.prompt.strip(), "model": model_key})
+        else:
+            content = f"{self.prefix}: {request.prompt.strip()}"
+        usage = None
+        if behavior is not ProviderBehavior.MISSING_USAGE:
+            usage = AIUsage(
+                input_tokens=max(1, len(prompt.encode()) // 4),
+                output_tokens=max(1, len(content.encode()) // 4),
+            )
+        confidence = (
+            Decimal("0.25") if behavior is ProviderBehavior.LOW_CONFIDENCE else Decimal("1")
+        )
+        return ProviderResult(content, usage, confidence=confidence)
+
+    async def stream(
+        self, *, model_key: str, prompt: str, request: AIInvocationRequest
+    ) -> AsyncIterator[str]:
+        result = await self.invoke(model_key=model_key, prompt=prompt, request=request)
+        for word in result.content.split():
+            await asyncio.sleep(0)
+            yield word + " "
+
+
+__all__ = ("DeterministicMockProvider", "MockAIGateway")
