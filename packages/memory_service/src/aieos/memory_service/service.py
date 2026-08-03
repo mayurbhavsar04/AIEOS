@@ -31,9 +31,11 @@ class MemoryRecord:
 
 
 class MemoryRepository(Protocol):
-    def save(self, record: MemoryRecord) -> None: ...
+    async def save(self, record: MemoryRecord) -> None: ...
 
-    def get(self, memory_id: str) -> MemoryRecord | None: ...
+    async def get(
+        self, memory_id: str, *, tenant_id: str, workspace_id: str
+    ) -> MemoryRecord | None: ...
 
 
 class MemoryService:
@@ -52,7 +54,7 @@ class MemoryService:
         self._identifiers = identifiers
         self._clock = clock
 
-    def store(self, write: MemoryWrite) -> MemoryRecord:
+    async def store(self, write: MemoryWrite) -> MemoryRecord:
         self._authorizer.require(
             write.authorization,
             permission="memory.write",
@@ -68,10 +70,10 @@ class MemoryService:
             correlation_id=write.correlation_id,
             provenance=write.provenance,
         )
-        self._repository.save(record)
+        await self._repository.save(record)
         return record
 
-    def fetch(
+    async def fetch(
         self,
         memory_id: str,
         *,
@@ -85,7 +87,9 @@ class MemoryService:
             tenant_id=tenant_id,
             workspace_id=workspace_id,
         )
-        record = self._repository.get(memory_id)
+        record = await self._repository.get(
+            memory_id, tenant_id=tenant_id, workspace_id=workspace_id
+        )
         if record is None:
             raise LookupError(memory_id)
         if record.tenant_id != tenant_id or record.workspace_id != workspace_id:

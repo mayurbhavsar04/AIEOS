@@ -22,6 +22,26 @@ class InProcessEventBus:
             raise ValueError(f"duplicate Event consumer: {consumer_name}")
         registrations.append((consumer_name, consumer))
 
+    def consumer_names(self, event_type: str) -> tuple[str, ...]:
+        return tuple(name for name, _ in self._consumers.get(event_type, ()))
+
+    async def deliver_to(self, event: EventEnvelope, consumer_name: str) -> None:
+        consumer = next(
+            (
+                candidate
+                for name, candidate in self._consumers.get(event.event_type, ())
+                if name == consumer_name
+            ),
+            None,
+        )
+        if consumer is None:
+            raise LookupError(f"Event consumer is not registered: {consumer_name}")
+        receipt = (event.event_id, consumer_name)
+        if receipt in self._delivered:
+            return
+        await consumer.consume(event)
+        self._delivered.add(receipt)
+
     async def publish(self, event: EventEnvelope) -> None:
         if not event.event_id or not event.producer:
             raise ValueError("Event transport envelope is incomplete")

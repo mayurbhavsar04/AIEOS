@@ -11,6 +11,7 @@ from aieos.contracts import (
     AuthorizationContext,
     DataClassification,
     ErrorCategory,
+    ErrorEnvelope,
     ErrorSeverity,
     LogSeverity,
     ObservabilityContext,
@@ -78,6 +79,7 @@ class WorkflowInstance:
     initial_attempt_command: CommandEnvelope | None = None
     retry_commands: dict[str, CommandEnvelope] | None = None
     outcome: ResultEnvelope | None = None
+    error: ErrorEnvelope | None = None
 
     def __post_init__(self) -> None:
         if self.workflow_events is None:
@@ -91,6 +93,7 @@ class WorkflowCommandReceipt:
     command: CommandEnvelope
     result: ResultEnvelope
     workflow_id: str
+    error: ErrorEnvelope | None = None
     state: CommandProcessingState = CommandProcessingState.IN_PROGRESS
 
 
@@ -110,9 +113,13 @@ class InMemoryWorkflowRepository:
         return self.command_receipts.get(command_id)
 
     def begin_command(
-        self, command: CommandEnvelope, result: ResultEnvelope, workflow_id: str
+        self,
+        command: CommandEnvelope,
+        result: ResultEnvelope,
+        workflow_id: str,
+        error: ErrorEnvelope | None = None,
     ) -> WorkflowCommandReceipt:
-        receipt = WorkflowCommandReceipt(command, result, workflow_id)
+        receipt = WorkflowCommandReceipt(command, result, workflow_id, error)
         self.command_receipts[command.command_id] = receipt
         return receipt
 
@@ -122,9 +129,13 @@ class InMemoryWorkflowRepository:
         return receipt.result
 
     def remember_completed_command(
-        self, command: CommandEnvelope, result: ResultEnvelope, workflow_id: str
+        self,
+        command: CommandEnvelope,
+        result: ResultEnvelope,
+        workflow_id: str,
+        error: ErrorEnvelope | None = None,
     ) -> None:
-        receipt = self.begin_command(command, result, workflow_id)
+        receipt = self.begin_command(command, result, workflow_id, error)
         receipt.state = CommandProcessingState.COMPLETED
 
 
@@ -275,6 +286,8 @@ class WorkflowEngine:
 
     async def _resume_start(self, receipt: WorkflowCommandReceipt) -> ResultEnvelope:
         instance = self._repository.instances[receipt.workflow_id]
+        if instance.outcome is not None:
+            return self._repository.complete_command(receipt.command.command_id)
         await self._publish_workflow_event(instance, "WorkflowStarted", receipt.command.command_id)
         if instance.initial_attempt_command is None:
             instance.initial_attempt_command = self._create_attempt_command(
@@ -314,7 +327,7 @@ class WorkflowEngine:
                 command, "WORKFLOW_ALREADY_TERMINAL", "terminal Workflow cannot be cancelled"
             )
         instance.state = WorkflowState.CANCELLED
-        result, _ = self._outcomes.unsuccessful(
+        result, error = self._outcomes.unsuccessful(
             status=ResultStatus.CANCELLED,
             subject=instance.workflow_id,
             producer=self.component_name,
@@ -330,7 +343,13 @@ class WorkflowEngine:
             message="Workflow cancellation became authoritative.",
         )
         instance.outcome = result
-        self._repository.remember_completed_command(command, result, instance.workflow_id)
+        instance.error = error
+        self._repository.remember_completed_command(
+            command,
+            result,
+            instance.workflow_id,
+            error,
+        )
         return result
 
     def _create_attempt_command(
@@ -388,7 +407,7 @@ class WorkflowEngine:
 
     async def _fail(self, instance: WorkflowInstance, event: EventEnvelope) -> None:
         instance.state = WorkflowState.FAILED
-        instance.outcome, _ = self._outcomes.unsuccessful(
+        instance.outcome, instance.error = self._outcomes.unsuccessful(
             status=ResultStatus.FAILED,
             subject=instance.workflow_id,
             producer=self.component_name,
@@ -463,7 +482,7 @@ class WorkflowEngine:
         await self._outbox.drain()
 
     def _reject(self, command: CommandEnvelope, code: str, message: str) -> ResultEnvelope:
-        result, _ = self._outcomes.unsuccessful(
+        result, error = self._outcomes.unsuccessful(
             status=ResultStatus.REJECTED,
             subject=command.workflow_id or command.command_id,
             producer=self.component_name,
@@ -479,7 +498,10 @@ class WorkflowEngine:
             message=message,
         )
         self._repository.remember_completed_command(
-            command, result, command.workflow_id or command.command_id
+            command,
+            result,
+            command.workflow_id or command.command_id,
+            error,
         )
         return result
 

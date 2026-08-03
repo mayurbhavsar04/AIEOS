@@ -1,7 +1,19 @@
 """Typed, immutable host configuration containing references rather than secrets."""
 
-from pydantic import Field
+from enum import StrEnum
+
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class RuntimeAdapter(StrEnum):
+    IN_MEMORY = "memory"
+    POSTGRES = "postgres"
+
+
+class MigrationMode(StrEnum):
+    CHECK = "check"
+    UPGRADE = "upgrade"
 
 
 class HostSettings(BaseSettings):
@@ -23,3 +35,31 @@ class HostSettings(BaseSettings):
     mock_ai_failures_before_success: int = Field(default=0, ge=0)
     mock_ai_delay_seconds: float = Field(default=0.0, ge=0.0)
     reference_timeout_seconds: float = Field(default=1.0, gt=0.0)
+    runtime_adapter: RuntimeAdapter = RuntimeAdapter.IN_MEMORY
+    database_url: SecretStr | None = None
+    database_pool_size: int = Field(default=5, ge=1, le=50)
+    database_pool_timeout_seconds: float = Field(default=10.0, gt=0.0)
+    database_command_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    migration_mode: MigrationMode = MigrationMode.CHECK
+    outbox_poll_interval_seconds: float = Field(default=0.25, gt=0.0)
+    outbox_lease_seconds: float = Field(default=30.0, gt=0.0)
+    outbox_batch_size: int = Field(default=50, ge=1, le=1000)
+    delivery_backoff_seconds: float = Field(default=1.0, gt=0.0)
+
+    @model_validator(mode="after")
+    def require_durable_production(self) -> "HostSettings":
+        if self.runtime_adapter is RuntimeAdapter.POSTGRES and self.database_url is None:
+            raise ValueError("database_url is required for PostgreSQL")
+        if self.environment.lower() == "production" and (
+            self.runtime_adapter is not RuntimeAdapter.POSTGRES or self.database_url is None
+        ):
+            raise ValueError("production requires configured PostgreSQL")
+        return self
+
+    def safe_summary(self) -> dict[str, object]:
+        return {
+            "environment": self.environment,
+            "runtime_adapter": self.runtime_adapter.value,
+            "database_configured": self.database_url is not None,
+            "migration_mode": self.migration_mode.value,
+        }

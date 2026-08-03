@@ -3,7 +3,18 @@ name = "aieos-adapter-persistence-postgres"
 version = "0.0.0"
 description = "AIEOS persistence postgres bootstrap package."
 requires-python = "==3.13.*"
-dependencies = []
+dependencies = [
+  "aieos-contracts",
+  "aieos-domain",
+  "aieos-event-bus",
+  "aieos-memory-service",
+  "aieos-manager",
+  "aieos-skill-runtime",
+  "aieos-workflow-engine",
+  "alembic==1.16.5",
+  "asyncpg==0.30.0",
+  "sqlalchemy[asyncio]==2.0.43",
+]
 
 [build-system]
 requires = ["hatchling==1.27.0"]
@@ -14,3 +25,12 @@ packages = ["src/aieos/adapters/persistence_postgres"]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
+
+[tool.uv.sources]
+aieos-contracts = { workspace = true }
+aieos-domain = { workspace = true }
+aieos-event-bus = { workspace = true }
+aieos-memory-service = { workspace = true }
+aieos-manager = { workspace = true }
+aieos-skill-runtime = { workspace = true }
+aieos-workflow-engine = { workspace = true }
