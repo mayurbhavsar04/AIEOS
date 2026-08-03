@@ -45,6 +45,8 @@ This phase specifies architecture and policy only. It adds no provider SDK, cred
 
 Architecture v1.0, Domain v1.0, ES-004 through ES-008, Runtime Architecture v1.0, ES-009 through ES-011, and approved ADRs/TDRs remain authoritative.
 
+Names ending in `Ref`, `VersionRef`, catalog entry, snapshot, record, or opaque provider reference in this specification are implementation-local value references unless Domain v1.0 already defines the corresponding canonical identity. They MUST NOT acquire global uniqueness, aggregate ownership, or causation semantics and MUST NOT be promoted to new `*Id` types without Domain governance.
+
 1. AI Gateway owns provider abstraction, `AIInvocationId`, provider/model resolution under approved policy, normalization, budget enforcement, usage measurement, provider isolation, structured-output validation, and cancellation/deadline propagation.
 2. AI Gateway MUST NOT own workflow progression, workflow retries, product decisions, business truth, factual verification, Memory, or Skill execution.
 3. Provider-level retries or fallback MAY occur only inside one `AIInvocationId`, within explicit policy and cost limits. `RetryClassification` remains advice; Workflow Engine alone creates a new workflow attempt and `ExecutionId`.
@@ -55,7 +57,7 @@ Architecture v1.0, Domain v1.0, ES-004 through ES-008, Runtime Architecture v1.0
 
 This specification defines:
 
-- canonical provider-neutral AI request, response, stream, provider-attempt, usage, pricing, model-capability, prompt-template, cache, and budget semantics;
+- canonical provider-neutral AI request, response, stream, usage, pricing, model-catalog, prompt-template, cache, and budget semantics; provider-attempt references remain implementation-local opaque metadata;
 - a progressive context and token-minimization policy;
 - deterministic cheapest-capable routing;
 - structured-output validation and bounded repair;
@@ -65,18 +67,18 @@ This specification defines:
 
 ## Canonical request contract
 
-An AI request is immutable after acceptance. A field marked conditional is required whenever its referenced concept exists.
+An AI request is immutable after acceptance. Before acceptance, the directed `CommandId` plus its target-owned `IdempotencyKey` identifies and deduplicates the request under the frozen command contract. A field marked conditional is required whenever its referenced concept exists.
 
 | Field | Requirement | Semantics |
 | --- | --- | --- |
-| `AIInvocationId` | Required | One provider-independent invocation inside one `ExecutionId`. |
 | `TenantId`, `WorkspaceId` | Required | Exact authorization, cache, accounting, and data boundary. |
+| `CommandId`, `IdempotencyKey` | Required | Approved pre-acceptance dispatch and target-owned deduplication context; neither is a substitute for `AIInvocationId`. |
 | `CorrelationId`, `CausationId` | Required | Frozen lineage rules; causation references a Command, Event, or recorded decision. |
 | `RequestId` | Optional context | Request lineage only; never causation. |
 | `WorkflowId`, `WorkflowStepId`, `ExecutionId` | Required for workflow invocation | Stable workflow lineage; bounded provider attempts stay within this execution. |
 | `SkillId`, `SkillVersionId` | Required for Skill invocation | Exact approved Skill identity/version. |
 | `CapabilityId`, `CapabilityContractVersionId` | Required | Exact approved capability contract. |
-| `PromptTemplateId`, `PromptTemplateVersion` | Required | Stable template reference and immutable version; not prompt text. |
+| `PromptTemplateRef`, `PromptTemplateVersionRef` | Required | Implementation-local, non-canonical references to an approved template and immutable version; not new Domain identities and not prompt text. |
 | `PurposeClass`, `TaskClass` | Required | Bounded policy labels used for routing, evaluation, and accounting. |
 | `SystemInstructionRef` | Required | Approved immutable instruction artifact reference. |
 | `TaskInput` | Required | Normalized, classified current input; minimized before provider mapping. |
@@ -92,37 +94,37 @@ An AI request is immutable after acceptance. A field marked conditional is requi
 | `CachePolicyRef`, `BudgetPolicyRef` | Required | Immutable policy versions. |
 | `Metadata` | Optional and minimized | Bounded allowlisted keys only; no raw transcript, secrets, or duplicated payload. |
 
-The request MUST fail closed when identity, scope, policy version, authorization, budget, schema, deadline, or capability requirements are missing or incompatible. Full conversation/history and full Memory records MUST NOT be included by default.
+The request MUST fail closed when dispatch identity, scope, policy version, authorization, budget, schema, deadline, or capability requirements are missing or incompatible. AI Gateway creates one immutable `AIInvocationId` atomically with acceptance and its durable budget reservation; replay of the same accepted command returns an acknowledgement referencing that same invocation. Full conversation/history and full Memory records MUST NOT be included by default.
 
 ## Canonical response contract
 
-Provider SDK objects MUST NOT cross the adapter boundary. A terminal response is immutable and links to the canonical ES-007 `ResultId` or `ErrorId`.
+Provider SDK objects MUST NOT cross the adapter boundary. An asynchronous acceptance is a distinct immutable ES-007 acknowledgement Result that references the Gateway-created `AIInvocationId`; it is not terminal completion. Every terminal response is an immutable ES-007 Result and therefore always has a `ResultId`.
 
 | Field | Requirement | Semantics |
 | --- | --- | --- |
-| `AIInvocationId` | Required | Same logical invocation as request. |
+| `AIInvocationId` | Required after acceptance | Gateway-created identity returned in acknowledgement and every later observation or terminal outcome. |
 | `ContentBlocks` | Conditional | Ordered provider-neutral text, structured, media-reference, or tool-call blocks. |
 | `StructuredOutput` | Conditional | Validated value plus exact schema version. |
 | `ToolCalls` | Conditional | Proposed calls only; execution still requires Skill Runtime authorization. |
 | `FinishReason` | Required | Normalized completed, length, tool-call, safety, cancelled, timed-out, or failed reason. |
-| `ModelCapabilityRef`, `ProviderAdapterRef` | Required | Abstract audited identities; provider internals remain isolated. |
+| `ModelCatalogEntryRef`, `ProviderAdapterRef` | Required | AI-Gateway-local opaque/version references, not canonical Domain identities; provider internals remain isolated. |
 | `InputTokens`, `OutputTokens`, `CachedTokens`, `ReasoningTokens` | Required with availability status | Measured when reported; otherwise explicitly estimated/unavailable. |
-| `EstimatedCost`, `ActualCost`, `PricingVersion` | Required with confidence/status | Normalized amount and reference currency/unit. |
+| `EstimatedCost`, `ActualCost`, `PricingVersionRef` | Required with confidence/status | Normalized amount and an AI-Gateway-local immutable pricing snapshot reference; no new canonical identity. |
 | `Latency`, `CacheDisposition`, `Truncated` | Required | Measured duration, hit/miss/bypass, and completeness signal. |
 | `SafetyOutcome`, `Warnings` | Required | Normalized policy outcome and bounded safe warnings. |
-| `ResultId`, `ErrorId` | Exactly one terminal linkage | Canonical ES-007 authoritative outcome. |
+| `ResultId` | Required for every terminal outcome | Canonical immutable ES-007 Result for the current invocation/operation. |
+| `ErrorId` | Required for `Rejected`, `Failed`, `Cancelled`, and `TimedOut`; conditional for `PartiallySucceeded` | Referenced by the terminal Result exactly as ES-007 requires; never mutually exclusive with `ResultId`. |
 | `RawProviderReference` | Optional | Opaque, access-controlled diagnostic reference; never raw object or default telemetry. |
 
 ## Token-budget decision order
 
-Every invocation decision MUST be recorded and follow this order:
+The accountable Manager, Workflow, Skill, or capability owner performs pre-invocation avoidance and records its decision evidence before `InvokeAI`. AI Gateway receives an already-approved invocation; it MUST NOT execute product/business deterministic logic. Within the accepted AI request, Gateway applies cache, route, context, output, and escalation policy in this order:
 
-1. avoid an AI invocation when deterministic logic can complete the task;
-2. reuse a valid deterministic, cached, or previously approved result;
-3. select the least expensive model satisfying all hard capability, quality, security, residency, latency, and availability requirements;
-4. send only relevant, necessary, non-duplicated context;
-5. constrain output structure, verbosity, and length; and
-6. escalate context, model class, or token budget only for documented quality, confidence, safety, evidence, schema, or completion reasons.
+1. reuse only valid Gateway-owned exact cached content/artifacts under approved policy;
+2. select the least expensive model satisfying all hard capability, quality, security, residency, latency, and availability requirements;
+3. send only relevant, necessary, non-duplicated context;
+4. constrain output structure, verbosity, and length; and
+5. escalate context, model class, or token budget only for documented quality, confidence, safety, evidence, schema, or completion reasons.
 
 Mandatory evidence and policy instructions are never dropped to meet a cost target. A hard quality or safety requirement overrides a soft budget and fails closed when no candidate satisfies both hard constraints and hard budget.
 
@@ -130,7 +132,7 @@ Mandatory evidence and policy instructions are never dropped to meet a cost targ
 
 | Stage | Content | Exit or escalation condition |
 | --- | --- | --- |
-| 0 — deterministic | Rules, approved outputs, exact cache, local computation | Complete without provider, or proceed when model capability is required. |
+| 0 — pre-invocation owner | Manager/Workflow/Skill/capability policy applies deterministic logic or approved business-result reuse and records the decision | No `InvokeAI` and no `AIInvocationId` when resolved; otherwise dispatch the approved request. |
 | 1 — minimal | Approved instruction, current normalized input, output contract | Use when sufficient; escalate only on predeclared complexity/evidence need. |
 | 2 — focused | Small ranked excerpt set with provenance and versions | Escalate for missing required evidence or insufficient confidence. |
 | 3 — expanded | Additional deduplicated evidence or compressed context | Escalate only when model capability/quality remains insufficient. |
@@ -140,19 +142,23 @@ Escalation signals are schema failure, missing mandatory evidence, low measured 
 
 ## Budget hierarchy
 
-Budgets apply at invocation, workflow-step, workflow, capability/AI Employee, and Tenant/Workspace daily/monthly scopes. Hard limits reject or stop new reservations. Soft limits emit a governed signal and MAY allow policy-approved continuation. Reservations MUST be concurrency-safe, scoped, and reconciled against actual usage. Unreported usage uses conservative estimation and is flagged for reconciliation.
+Budgets apply at invocation, workflow-step, workflow, capability/AI Employee, and Tenant/Workspace daily/monthly scopes. Before acceptance, Gateway estimates the maximum charge. Acceptance atomically and durably reserves that estimate across every applicable scope and creates `AIInvocationId`; the existing scoped `CommandId`/`IdempotencyKey` makes reservation replay safe without a new canonical reservation identity. Concurrent reservations serialize or use equivalent atomic conditional enforcement so no hard scope overspends.
 
-Budget failure yields a normalized ES-007 Result/Error and MUST NOT cause AI Gateway to retry a workflow. A provider fallback cannot exceed the remaining invocation reservation.
+Reservations have implementation-local states `pending`, `committed`, `released`, and `expired`. Cancellation, rejection, deadline expiry, or abandoned pre-provider work releases unused reservation. Partial/streaming usage is accumulated monotonically; terminal completion reconciles measured actual cost, cached/reasoning tokens, and unused reservation atomically. Missing or delayed provider usage retains a conservative estimated charge with explicit confidence until later idempotent reconciliation. Overrun is recorded and escalated but never rewrites an authoritative successful Result. Recovery replays the same reservation transition, never double-charges, and repairs expired/orphaned reservations from durable invocation evidence.
+
+Budget failure yields an immutable ES-007 terminal Result referencing its Error and MUST NOT cause AI Gateway to retry a workflow. A provider fallback cannot exceed the remaining invocation reservation.
 
 ## Caching and reuse
 
-Supported policy classes are exact request cache, deterministic structured-output cache, approved-result reuse, prompt/template compilation cache, and adapter-supported prefix cache. Semantic caching is prohibited by default and requires purpose-specific proof that meaning drift, freshness, safety, privacy, and provenance are controlled. Failure caching is short-lived and limited to deterministic non-sensitive failures.
+Supported Gateway policy classes are exact request content/artifact cache, deterministic structured-output content cache, prompt/template compilation cache, and adapter-supported prefix cache. Product/business approved-result reuse occurs before `InvokeAI` under its accountable owner, not inside Gateway. Semantic caching is prohibited by default and requires purpose-specific proof that meaning drift, freshness, safety, privacy, and provenance are controlled. Failure caching is short-lived and limited to deterministic non-sensitive failure content; it never reuses an authoritative Error identity.
 
 Every correctness-sensitive cache key includes Tenant/Workspace, prompt and policy versions, capability/model requirements, normalized task input digest, relevant context identities/versions, schema/tool versions, locale, deterministic parameters, and safety/data policy. Secrets and raw sensitive content MUST NOT become cache keys or shared cache values. Cross-tenant cache reuse is prohibited.
 
+Gateway acceptance occurs before a cache decision, so every cache hit has a new `AIInvocationId` and produces a new immutable `ResultId` for the current subject and lineage. A cache stores validated content/artifact plus bounded provenance only. It MUST NOT reuse prior `ResultId`, `ErrorId`, `AIInvocationId`, `CommandId`, `EventId`, correlation, causation, or authoritative outcome lineage. Source Result/artifact references are provenance metadata allowed by frozen contracts, never the new authoritative outcome.
+
 ## Model capability and routing
 
-The registry records logical model/version, provider adapter, capability contract version, modality features, context/output limits, reasoning/quality/latency tiers, region and data-handling properties, availability/health, pricing reference/version, and deprecation status. Registry maintainers own signed/reviewed catalog updates; stale pricing or capability data makes a candidate ineligible unless a conservative approved policy explicitly permits it.
+The **AI Gateway model routing catalog** records logical model/version, provider adapter, capability contract version, modality features, context/output limits, reasoning/quality/latency tiers, region and data-handling properties, availability/health, pricing reference/version, and deprecation status. It is internal data owned and updated by AI Gateway maintainers, not a new top-level component and not the frozen Capability Registry. Catalog activation is versioned and atomic; stale pricing or capability data makes a candidate ineligible unless a conservative approved policy explicitly permits it.
 
 Routing filters all hard requirements, estimates input/output/cost/latency, and selects the cheapest eligible candidate. Deterministic ties are resolved by policy priority, then lower measured latency, then stable logical identifier. Every selection records candidates considered, exclusions, estimates, policy version, and reason without exposing credentials or sensitive prompt content.
 
@@ -168,11 +174,11 @@ Structured requests reference an immutable schema version. Output is validated o
 
 ## Streaming
 
-Streaming distinguishes immutable acknowledgement, stream start, ordered content/tool deltas, usage updates, terminal completion, cancellation, timeout, and partial-stream failure. Deltas are non-authoritative observations. Only the terminal ES-007 Result/Error is authoritative. Provider event types and objects are converted inside adapters. A cancelled or failed stream cannot later overwrite a terminal outcome.
+Streaming distinguishes immutable acknowledgement, stream start, ordered content/tool deltas, usage updates, terminal completion, cancellation, timeout, and partial-stream failure. Deltas are non-authoritative observations. Only the terminal ES-007 Result is authoritative; unsuccessful terminal Results reference `ErrorId` as required. Provider event types and objects are converted inside adapters. A cancelled or failed stream cannot later overwrite a terminal outcome.
 
 ## Failure, fallback, and provider attempts
 
-Provider attempts have child identities beneath one `AIInvocationId`. AI Gateway MAY retry or use an alternate eligible provider/model inside that invocation only when policy permits equivalent semantics, remaining cost/deadline budgets permit it, and loop/attempt limits are not exceeded. It preserves lineage, records every attempt, and emits normalized failure advice. Workflow Engine remains the only workflow-retry owner.
+Provider attempts are implementation-local operational records beneath one `AIInvocationId`. They may carry opaque adapter-local references for diagnostics, but no new canonical identity or causation semantics. AI Gateway MAY retry or use an alternate eligible provider/model inside that invocation only when policy permits equivalent semantics, remaining cost/deadline budgets permit it, and loop/attempt limits are not exceeded. It preserves invocation lineage, records every attempt, and emits normalized failure advice. Workflow Engine remains the only workflow-retry owner.
 
 ## Security, privacy, and observability
 
@@ -216,11 +222,16 @@ Each task class defines quality metrics, protected safety/factuality cases, and 
 
 ## Acceptance criteria
 
-- [ ] Every request follows deterministic avoid/reuse/route/context/constrain/escalate policy.
+- [ ] Pre-invocation deterministic/business reuse has an accountable non-Gateway owner; accepted requests follow cache/route/context/constrain/escalate policy.
+- [ ] Caller supplies no `AIInvocationId`; Gateway creates it atomically on acceptance and returns it in a distinct acknowledgement Result.
+- [ ] Every terminal outcome has a new immutable `ResultId`; unsuccessful outcomes reference `ErrorId` exactly as ES-007 requires.
 - [ ] Cheapest-capable means all hard capability, quality, security, residency, deadline, and budget constraints pass.
 - [ ] Full history and full Memory are never default context; every context item has a necessity reason.
 - [ ] Input, output, cost, latency, and hierarchical budgets are enforceable and concurrency-safe.
 - [ ] Cache keys are tenant-scoped and contain all correctness-sensitive versions.
+- [ ] Cache hits reuse content/artifacts only and create new invocation and Result lineage without reusing canonical identities.
+- [ ] Hierarchical reservation is atomic, idempotent, concurrency-safe, recoverable, expirable, and reconciled without double charge.
+- [ ] The model routing catalog is internal to AI Gateway and does not alter the frozen Capability Registry.
 - [ ] Estimated and actual usage/cost, savings, and avoided invocations are recorded.
 - [ ] Provider-specific types and credentials remain isolated.
 - [ ] Workflow Engine remains sole workflow-retry owner.

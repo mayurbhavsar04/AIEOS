@@ -9,7 +9,7 @@ Options were no fallback, unbounded provider retries, Workflow-owned provider re
 
 ## Decision
 
-Allow policy-approved provider retries/fallback only inside one `AIInvocationId`, with child attempt identities, equivalent hard requirements, finite attempt/cost/deadline limits, and operational circuit evidence. Workflow Engine alone owns workflow retry and new `ExecutionId` creation.
+Allow policy-approved provider retries/fallback only inside one `AIInvocationId`, with implementation-local opaque provider-attempt references rather than canonical child identities, equivalent hard requirements, finite attempt/cost/deadline limits, and operational circuit evidence. These references are diagnostic metadata and are not causation targets. Workflow Engine alone owns workflow retry and new `ExecutionId` creation.
 
 ## Consequences
 
@@ -18,4 +18,3 @@ Fallback improves availability but can increase cost and semantic variance; qual
 ## Revisit evidence
 
 The reliability owner reviews when fallback causes a protected-quality regression, retry amplification exceeds adopted limits, or provider incidents breach availability despite tuned circuits. Migration preserves one-invocation lineage, ES-007 normalization, budgets, and Workflow Engine authority.
-

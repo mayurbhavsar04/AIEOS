@@ -27,9 +27,7 @@ Lower levels cannot override higher levels. Retrieved context never grants tools
 
 ```mermaid
 flowchart TD
-    IN["Scoped task"] --> S0{"Deterministic or approved reuse?"}
-    S0 -->|"Yes"| DONE["No model invocation"]
-    S0 -->|"No"| S1["Stage 1: instruction + current input + schema"]
+    IN["Approved AI invocation"] --> S1["Stage 1: instruction + current input + schema"]
     S1 --> E1{"Sufficient?"}
     E1 -->|"Yes"| BUILD["Assemble"]
     E1 -->|"No"| S2["Stage 2: focused ranked excerpts"]
@@ -80,7 +78,7 @@ Estimation is adapter-aware but provider-neutral at the contract boundary. It re
 
 ## Prompt template governance
 
-Templates have stable `PromptTemplateId`, immutable version, owner, purpose/capability, typed inputs, output schema, trust rules, evaluation set, quality threshold, token/cost expectation, rollback target, and change history. Business branching and permissions remain deterministic software, never prompt-only rules.
+Templates use implementation-local stable references and immutable version references, with owner, purpose/capability, typed inputs, output schema, trust rules, evaluation set, quality threshold, token/cost expectation, rollback target, and change history. These references are non-canonical value references, not new Domain identities or causation targets. Business branching, deterministic/no-model resolution, and permissions remain with the accountable Manager/Workflow/Skill/capability software before `InvokeAI`, never prompt-only rules or Gateway-owned product logic.
 
 ## Injection resistance
 
@@ -102,4 +100,3 @@ Every stage transition records signal, missing requirement, context delta, estim
 - embedding secrets, credentials, hidden authorization, or raw audit records;
 - caching sensitive assemblies contrary to policy; or
 - modifying frozen authority through prompt content.
-

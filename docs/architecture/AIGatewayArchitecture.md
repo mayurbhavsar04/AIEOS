@@ -22,7 +22,7 @@ It does not own product prompts, Memory, Skill execution, factual verification, 
 flowchart LR
     SR["Skill Runtime"] -->|"InvokeAI"| GW["AI Gateway"]
     GW --> POL["Policy and Budget"]
-    GW --> REG["Model Capability Registry"]
+    GW --> REG["Internal Model Routing Catalog"]
     GW --> PP["Prompt and Context Pipeline"]
     GW --> CA["Cache Boundary"]
     GW --> PA["Provider Adapter Port"]
@@ -39,24 +39,26 @@ sequenceDiagram
     participant S as Skill Runtime
     participant G as AI Gateway
     participant P as Prompt Pipeline
-    participant R as Model Registry
+    participant R as Gateway Model Catalog
     participant B as Budget Ledger
     participant A as Provider Adapter
     participant V as Validator
-    S->>G: InvokeAI scoped request
-    G->>G: Validate identity, policy, authorization
+    S->>G: InvokeAI / CommandId + IdempotencyKey
+    G->>G: Validate scope, policy, authorization
     G->>P: Build minimum sufficient context
     P-->>G: Versioned assembly and token estimate
     G->>R: Resolve eligible candidates
     R-->>G: Capability/pricing snapshots
-    G->>B: Reserve hard budget
+    G->>B: Atomically reserve all hard scopes
     B-->>G: Reservation accepted
+    G->>G: Accept and create AIInvocationId
+    G-->>S: Immutable Accepted Result / AIInvocationId
     G->>A: Provider-neutral invocation mapping
     A-->>G: Normalized response and measured usage
     G->>V: Validate schema and safety outcome
     V-->>G: Valid or bounded repair evidence
     G->>B: Reconcile actual usage/cost
-    G-->>S: Immutable terminal Result or Error
+    G-->>S: Immutable terminal Result / ErrorId when required
 ```
 
 ## Provider adapter isolation
@@ -77,7 +79,7 @@ Adapters own credential use, logical-to-provider model translation, protocol map
 
 ## Canonical lifecycle
 
-AI Invocation states remain `Requested`, `PolicyValidated`, `ProviderSelected`, `Prepared`, `Invoked`, `Retrying`, `Succeeded`, `Failed`, `TimedOut`, and `Cancelled`. Provider attempts are child operational records. Their retry/fallback does not create a new `AIInvocationId` or `ExecutionId`.
+AI Invocation states remain `Requested`, `PolicyValidated`, `ProviderSelected`, `Prepared`, `Invoked`, `Retrying`, `Succeeded`, `Failed`, `TimedOut`, and `Cancelled`. `Requested` begins only after Gateway atomically accepts the request, reserves budget, and creates `AIInvocationId`. Provider attempts are implementation-local operational records with optional opaque references; their retry/fallback creates no canonical child identity and no new `AIInvocationId` or `ExecutionId`.
 
 ```mermaid
 stateDiagram-v2
@@ -125,7 +127,7 @@ sequenceDiagram
     A-->>G: Provider deltas
     G-->>S: StreamStarted and normalized deltas
     A-->>G: Usage updates and completion
-    G-->>S: Immutable terminal Result/Error
+    G-->>S: Immutable terminal Result / ErrorId when required
     opt cancellation or timeout
         S->>G: CancelAIInvocation
         G->>A: Propagate cancellation
@@ -142,10 +144,10 @@ sequenceDiagram
     participant G as AI Gateway
     participant A1 as Provider Attempt 1
     participant A2 as Provider Attempt 2
-    G->>A1: Same AIInvocationId / child attempt 1
+    G->>A1: Same AIInvocationId / opaque local ref
     A1-->>G: Normalized retry-eligible failure
     G->>G: Check policy, semantics, budget, deadline, circuit
-    G->>A2: Same AIInvocationId / child attempt 2
+    G->>A2: Same AIInvocationId / opaque local ref
     A2-->>G: Normalized terminal outcome
 ```
 
@@ -164,3 +166,4 @@ Fallback is disabled unless allowed by immutable policy. It has a maximum attemp
 
 A provider adapter preserving the port is a runtime change with a TDR for its dependency and handling boundary. Any ownership change, new identity, cross-tenant cache, changed retry authority, or provider type leakage requires architecture/contract review.
 
+The model routing catalog is an internal AI Gateway data port with Gateway-owned reviewed updates and atomic version activation. It is neither a platform service nor the frozen Capability Registry, and it does not own product Capability contracts.

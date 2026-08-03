@@ -16,13 +16,13 @@ Provide auditable, tenant-scoped estimates, reservations, measured usage, normal
 
 An immutable usage record contains:
 
-- usage-record identity and `AIInvocationId` (or avoided-invocation decision reference);
+- an implementation-local opaque usage-record reference and `AIInvocationId` (or an existing recorded avoided-invocation decision reference); the opaque reference is not a canonical Domain identity or causation target;
 - Tenant/Workspace, Correlation, Workflow, Step, Execution, Skill, Capability, and product/AI Employee allocation references where applicable;
 - logical model/version and provider-adapter reference;
 - pricing version/effective reference and currency/reference unit;
 - measured or estimated input, output, cached, and reasoning tokens with availability/confidence;
 - estimated pre-invocation cost and actual normalized post-invocation cost;
-- reservation identity, reconciliation status, and variance reason;
+- the existing scoped Command/idempotency context for reservation replay, reconciliation status, and variance reason; no canonical reservation identity is introduced;
 - cache disposition/savings and context-compression token/cost savings;
 - route/budget policy version and decision reason; and
 - timestamps, data classification, redaction status, and lineage.
@@ -43,7 +43,9 @@ flowchart LR
 
 ## Avoided invocation and savings
 
-An avoided-invocation record is useful when deterministic resolution, exact cache, or approved reuse prevented a planned invocation. It records task class, policy, estimate baseline, reason, and estimated savings without fabricating token usage or an `AIInvocationId`.
+An avoided-invocation record is created by the accountable Manager/Workflow/Skill/capability owner when deterministic resolution or approved business reuse prevents dispatch to Gateway. It records task class, policy, estimate baseline, reason, and estimated savings as recorded decision evidence without fabricating token usage or an `AIInvocationId`. Gateway exact-cache hits are accepted invocations and therefore do have a new `AIInvocationId` and new Result lineage, while recording zero provider usage.
+
+Reservation acceptance is atomic across invocation, step, workflow, capability/AI Employee, and Tenant/Workspace scopes. Replay uses the existing scoped Command/idempotency context, concurrent attempts cannot overspend, and abandoned reservations expire or release. Actual cost reconciliation is idempotent and monotonic for streams; delayed/missing provider usage retains a conservative estimated charge until evidence arrives. Recovery never double-charges, and a budget failure is represented by an ES-007 terminal Result referencing its Error without granting retry authority.
 
 Compression savings compare approved before/after estimates and include compression cost. Cache savings use the pricing/catalog snapshot that would have routed the request, marked as estimate rather than realized provider billing.
 
@@ -81,4 +83,3 @@ Policy updates require evaluation evidence, accountable approval, versioning, ro
 ## Retention and compatibility
 
 Retention follows legal, finance, privacy, and tenant policy. Schema versions are explicit; readers tolerate additive fields and reject unknown incompatible major versions. Deletion/anonymization never destroys required financial/audit evidence without approved policy.
-

@@ -9,7 +9,7 @@ Options were provider invoices only, telemetry-only estimates, or immutable invo
 
 ## Decision
 
-Record estimated and actual normalized usage/cost per invocation, retain pricing versions, reconcile reservations, attribute to workflow/skill/capability/product, and record cache/compression/avoidance savings separately. Missing usage is conservatively estimated and labeled.
+Record estimated and actual normalized usage/cost per invocation, retain immutable pricing snapshot references as non-canonical catalog values, reconcile reservations idempotently using existing scoped Command/idempotency context, attribute to workflow/skill/capability/product, and record cache/compression/avoidance savings separately. Missing usage is conservatively estimated and labeled. Recovery, expiry/release, streaming accumulation, delayed usage, and replay cannot double-charge.
 
 ## Consequences
 
@@ -18,4 +18,3 @@ Accounting adds durable records and catalog governance. It never becomes workflo
 ## Revisit evidence
 
 Finance and Gateway owners review when provider invoices cannot reconcile within an adopted variance/window, allocation cannot support approved pricing decisions, or storage/retention violates a documented obligation. Migration preserves historical pricing identity, Tenant/Workspace scope, ES-008 privacy, and result authority.
-

@@ -12,7 +12,9 @@ last_updated: 2026-08-03
 
 Select the cheapest model that satisfies every hard requirement and enforce concurrency-safe budgets without weakening quality or giving AI Gateway workflow-retry authority.
 
-## Capability registry record
+## AI Gateway model routing catalog
+
+This catalog is internal to AI Gateway. It is not a new architectural component and is not the frozen Capability Registry. Gateway maintainers own reviewed catalog writes, freshness, and atomic activation; callers and the Capability Registry are read-independent of its storage.
 
 Each immutable catalog version contains:
 
@@ -48,14 +50,16 @@ flowchart TD
 
 The route record lists candidates considered, exclusion codes, estimates/confidence, selected capability/pricing versions, policy version, tie-break result, and hard/soft constraints. Sensitive provider details are access-controlled and never emitted as unbounded metrics.
 
-## No-model, reuse, or model decision
+## Pre-invocation avoidance and Gateway routing
 
 ```mermaid
 flowchart LR
-    TASK["Task"] --> DET{"Deterministic solution?"}
-    DET -->|"Yes"| AVOID["Record avoided invocation"]
-    DET -->|"No"| CACHE{"Valid scoped reuse?"}
-    CACHE -->|"Yes"| HIT["Return approved cached Result"]
+    TASK["Task"] --> OWNER["Manager / Workflow / Skill / capability owner"]
+    OWNER --> DET{"Deterministic or approved business reuse?"}
+    DET -->|"Yes"| AVOID["Record decision and Result; no InvokeAI"]
+    DET -->|"No"| GATE["AI Gateway accepts request and creates AIInvocationId"]
+    GATE --> CACHE{"Valid scoped content cache?"}
+    CACHE -->|"Yes"| HIT["Create new Result with source provenance"]
     CACHE -->|"No"| MODEL["Route cheapest capable model"]
 ```
 
@@ -68,7 +72,7 @@ flowchart LR
 | Capability / AI Employee | Approved policy allocates and attributes usage. |
 | Tenant/Workspace daily/monthly | Concurrency-safe ledger enforces organizational ceilings. |
 
-Hard limits prevent reservation/invocation. Soft limits create a governed warning and allow continuation only when policy says so. Reservations use exact Tenant/Workspace and attribution keys, expire safely, and reconcile atomically to measured or conservative estimated actuals.
+Hard limits prevent reservation/invocation. Soft limits create a governed warning and allow continuation only when policy says so. The pre-acceptance estimate is reserved atomically across every applicable scope in the same acceptance boundary that creates `AIInvocationId`. Existing scoped `CommandId` and target-owned `IdempotencyKey` provide durable replay identity; no canonical reservation ID is introduced.
 
 ## Reservation and reconciliation
 
@@ -77,15 +81,16 @@ sequenceDiagram
     participant G as AI Gateway
     participant L as Budget Ledger
     participant A as Provider Adapter
-    G->>L: Reserve estimated maximum under all scopes
+    G->>L: Idempotently reserve estimated maximum under all scopes
     L-->>G: Reservation or hard-limit rejection
+    G->>G: Accept and create AIInvocationId atomically
     G->>A: Invoke within reservation
     A-->>G: Usage report / availability markers
     G->>L: Reconcile actual normalized cost
     L-->>G: Reconciliation record
 ```
 
-Concurrent reservations MUST not overspend a hard scope. Missing provider usage uses conservative calculation with explicit confidence and later reconciliation. Pricing changes never rewrite historical cost: records retain the pricing version used.
+Concurrent reservations MUST not overspend a hard scope. Reservation transitions are `pending`, `committed`, `released`, or `expired` implementation-local states. Cancellation and abandonment release unused amounts; crash recovery resumes by the same scoped command/idempotency identity. Streaming usage accumulates monotonically. Missing/delayed provider usage uses conservative calculation with explicit confidence and idempotent later reconciliation. Replays never double-charge. Pricing changes never rewrite historical cost: records retain the pricing snapshot reference used.
 
 ## Progressive escalation
 
@@ -107,13 +112,12 @@ Maximum stages and attempts are finite. A failed invocation does not create a wo
 
 ## Fallback and circuits
 
-Circuit state is operational provider health evidence, not business state. Fallback candidate selection reruns hard filters, preserves `AIInvocationId`, creates a child provider-attempt identity, and obeys a maximum attempt/cost/deadline policy. There is no cyclic fallback graph. Circuit opening or stale health cannot cause a less safe route.
+Circuit state is operational provider health evidence, not business state. Fallback candidate selection reruns hard filters, preserves `AIInvocationId`, records only an implementation-local opaque provider-attempt reference, and obeys a maximum attempt/cost/deadline policy. There is no cyclic fallback graph. Circuit opening or stale health cannot cause a less safe route.
 
 ## Cache routing
 
-Exact and deterministic caches are checked before routing. Semantic cache is disabled unless a separately approved policy proves equivalence and freshness. Cache hits retain source Result identity/provenance and create a new access/accounting record rather than pretending a provider invocation occurred.
+Exact content/artifact caches are checked after Gateway acceptance and before routing. Semantic cache is disabled unless a separately approved policy proves equivalence and freshness. Every hit retains bounded source provenance but creates a new `ResultId` for the current `AIInvocationId`, subject, and lineage. It never reuses source `ResultId`, `ErrorId`, `AIInvocationId`, `CommandId`, `EventId`, correlation, or causation. Product/business result reuse is decided and recorded by the accountable pre-invocation owner before Gateway is called.
 
 ## Quality-cost governance
 
 Each task class has protected quality, factuality, safety, schema, and evidence thresholds. Offline datasets and deterministic mock candidates test selection and escalation. A candidate with lower cost but failing a protected threshold is ineligible. Periodic reviews examine quality, cost, latency, failure, fallback, cache, and estimator error together.
-
