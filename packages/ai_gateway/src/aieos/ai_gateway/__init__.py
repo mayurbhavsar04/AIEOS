@@ -1,5 +1,41 @@
-"""Provider-neutral AI Gateway contract."""
+"""Provider-neutral AI Gateway contract and offline reference runtime."""
 
-from aieos.ai_gateway.gateway import AIGateway, AIInvocationRequest, AIInvocationResponse
+from aieos.ai_gateway.gateway import (
+    Acceptance,
+    AIGateway,
+    AIInvocationRequest,
+    AIInvocationResponse,
+    AIUsage,
+    ContextItem,
+    InvocationState,
+    ModelCatalogEntry,
+    ProviderAdapter,
+    ProviderBehavior,
+    ProviderFailure,
+    ProviderResult,
+    ReferenceAIGateway,
+    ReferenceGatewayStore,
+    ResponseMode,
+    RouteDecision,
+    StreamChunk,
+)
 
-__all__ = ("AIGateway", "AIInvocationRequest", "AIInvocationResponse")
+__all__ = (
+    "AIGateway",
+    "AIInvocationRequest",
+    "AIInvocationResponse",
+    "AIUsage",
+    "Acceptance",
+    "ContextItem",
+    "InvocationState",
+    "ModelCatalogEntry",
+    "ProviderAdapter",
+    "ProviderBehavior",
+    "ProviderFailure",
+    "ProviderResult",
+    "ReferenceAIGateway",
+    "ReferenceGatewayStore",
+    "ResponseMode",
+    "RouteDecision",
+    "StreamChunk",
+)
