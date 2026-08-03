@@ -24,6 +24,7 @@ Codex implements approved Engineering Specifications. Codex does not invent arch
 | **Engineering Governance** | [Engineering Handbook](../02-engineering-handbook/README.md) |
 | **Architecture** | [Architecture v1.0](../03-architecture/README.md) |
 | **First Specification** | [ES-001 — Execution Core](ES-001-Execution-Core.md) |
+| **Current Draft** | [ES-012 — AI Gateway and Token Governance](ES-012-AI-Gateway-and-Token-Governance.md) |
 | **Related Pull Request** | [PR #3 — Establish Engineering Specification process](https://github.com/mayurbhavsar04/AIEOS/pull/3) |
 
 ## Engineering Lifecycle

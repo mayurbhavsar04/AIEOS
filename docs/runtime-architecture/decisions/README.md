@@ -26,6 +26,14 @@ These TDRs apply the repository's ADR discipline to implementation choices witho
 | [TDR-012](TDR-012-CI-Release.md) | GitHub Actions, locked builds, protected releases |
 | [TDR-013](TDR-013-Plugin-Loading.md) | Trusted static plugin/capability registration |
 | [TDR-014](TDR-014-HTTP-Host.md) | FastAPI initial HTTP host |
+| [TDR-015](TDR-015-Provider-Neutral-Gateway-and-Data-Boundary.md) | Provider-neutral AI Gateway adapters and data boundary |
+| [TDR-016](TDR-016-Model-Registry-and-Routing.md) | Versioned model capability registry and cheapest-capable routing |
+| [TDR-017](TDR-017-Token-Estimation-and-Budgets.md) | Token estimation and hierarchical budget enforcement |
+| [TDR-018](TDR-018-Prompt-Context-and-Versioning.md) | Prompt/template versioning and progressive context assembly |
+| [TDR-019](TDR-019-Caching-and-Reuse.md) | Scoped exact/approved caching; semantic cache disabled by default |
+| [TDR-020](TDR-020-Structured-Output-and-Streaming.md) | Provider-neutral structured output and streaming |
+| [TDR-021](TDR-021-Fallback-and-Circuit-Boundary.md) | Bounded in-invocation fallback and circuit boundary |
+| [TDR-022](TDR-022-AI-Usage-and-Cost-Accounting.md) | AI usage and cost accounting |
 
 Every record includes context, drivers, options, rationale, consequences, frozen-baseline compatibility, and revisit triggers. Changes to a frozen baseline require the higher governance path, not a TDR alone.
 
