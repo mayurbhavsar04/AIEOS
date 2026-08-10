@@ -259,6 +259,8 @@ class AIGatewayInvocationRow(Scoped, Base):
     claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     recovery_phase: Mapped[str] = mapped_column(String(32), nullable=False, default="accepted")
     terminal_intent_payload: Mapped[str | None] = mapped_column(Text)
+    terminal_intent_owner: Mapped[str | None] = mapped_column(String(128))
+    terminal_intent_generation: Mapped[int | None] = mapped_column(Integer)
     accepted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     __table_args__ = (

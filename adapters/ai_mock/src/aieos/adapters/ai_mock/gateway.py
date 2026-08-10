@@ -122,6 +122,11 @@ class DeterministicMockProvider:
     def _behavior(self) -> MockProviderBehavior:
         return self._behaviors.pop(0) if self._behaviors else MockProviderBehavior.SUCCESS
 
+    @property
+    def effect_cache_size(self) -> int:
+        """Expose process-local replay state for fresh-adapter durability assertions."""
+        return len(self._effects)
+
     async def invoke(
         self,
         *,

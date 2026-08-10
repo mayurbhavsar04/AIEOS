@@ -262,6 +262,8 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
         self.invocations[invocation.invocation_id] = invocation
 
     async def checkpoint_terminal_intent(self, invocation: GatewayInvocation) -> None:
+        if invocation.execution_owner is None or invocation.claim_generation <= 0:
+            raise ExecutionOwnershipLost("terminal intent requires execution ownership")
         encoded = _INVOCATION.dump_json(invocation).decode()
         async with self._database.transaction() as session:
             result = await session.execute(
@@ -270,6 +272,8 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
                     AIGatewayInvocationRow.tenant_id == invocation.request.tenant_id,
                     AIGatewayInvocationRow.workspace_id == invocation.request.workspace_id,
                     AIGatewayInvocationRow.ai_invocation_id == invocation.invocation_id,
+                    AIGatewayInvocationRow.execution_owner == invocation.execution_owner,
+                    AIGatewayInvocationRow.claim_generation == invocation.claim_generation,
                     AIGatewayInvocationRow.terminal_payload.is_(None),
                     or_(
                         AIGatewayInvocationRow.terminal_intent_payload.is_(None),
@@ -279,12 +283,14 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
                 .values(
                     request_payload=encoded,
                     terminal_intent_payload=encoded,
+                    terminal_intent_owner=invocation.execution_owner,
+                    terminal_intent_generation=invocation.claim_generation,
                     recovery_phase="terminalization_pending",
                     updated_at=datetime.now(invocation.accepted_at.tzinfo),
                 )
             )
             if result.rowcount != 1:
-                raise RuntimeError("AI Gateway terminal intent checkpoint failed")
+                raise ExecutionOwnershipLost("stale terminal intent was fenced")
 
     async def reserve(
         self,
@@ -445,6 +451,54 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
                 )
             )
         return None if payload is None else _PROVIDER_RESULT.validate_json(payload)
+
+    async def reserve_provider_effect(
+        self,
+        invocation_id: str,
+        *,
+        effect_key: str,
+        attempt_number: int,
+        model_key: str,
+        owner: str,
+        generation: int,
+    ) -> None:
+        """Fence and persist a provider idempotency key before initiating its effect."""
+        invocation = await self.load(invocation_id)
+        route = invocation.route
+        if route is None:
+            raise RuntimeError("provider effect reservation requires a durable route")
+        async with self._database.transaction() as session:
+            fenced = await session.scalar(
+                select(AIGatewayInvocationRow.claim_generation).where(
+                    AIGatewayInvocationRow.ai_invocation_id == invocation_id,
+                    AIGatewayInvocationRow.execution_owner == owner,
+                    AIGatewayInvocationRow.claim_generation == generation,
+                )
+            )
+            if fenced is None:
+                raise ExecutionOwnershipLost("stale provider effect reservation was fenced")
+            await session.execute(
+                insert(AIGatewayAttemptRow)
+                .values(
+                    tenant_id=invocation.request.tenant_id,
+                    workspace_id=invocation.request.workspace_id,
+                    ai_invocation_id=invocation_id,
+                    attempt_number=attempt_number,
+                    model_key=model_key,
+                    adapter_key=route.adapter_key,
+                    state="effect_reserved",
+                    effect_reference=effect_key,
+                    recorded_at=datetime.now(invocation.accepted_at.tzinfo),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        "tenant_id",
+                        "workspace_id",
+                        "ai_invocation_id",
+                        "attempt_number",
+                    ]
+                )
+            )
 
     async def record_provider_effect(
         self,

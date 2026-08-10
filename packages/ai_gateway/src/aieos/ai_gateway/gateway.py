@@ -287,6 +287,7 @@ class ReferenceGatewayStore:
         self.attempts: dict[str, list[tuple[int, str, str, AIUsage | None, Decimal]]] = {}
         self._usage_events: dict[str, dict[str, tuple[AIUsage, Decimal]]] = {}
         self._provider_effects: dict[tuple[str, str], ProviderResult] = {}
+        self._provider_effect_reservations: set[tuple[str, str]] = set()
         self._terminal_events: dict[str, asyncio.Event] = {}
         self.tenant_limit = tenant_limit
         self.workspace_limit = workspace_limit or tenant_limit
@@ -522,6 +523,19 @@ class ReferenceGatewayStore:
 
     async def checkpoint_terminal_intent(self, invocation: GatewayInvocation) -> None:
         """Persist an immutable terminal intent before authoritative terminalization."""
+        if invocation.execution_owner is None or invocation.claim_generation <= 0:
+            raise ExecutionOwnershipLost("terminal intent requires execution ownership")
+        await self.assert_execution_owner(
+            invocation.invocation_id,
+            owner=invocation.execution_owner,
+            generation=invocation.claim_generation,
+        )
+        current = self.invocations[invocation.invocation_id]
+        if (
+            current.terminal_intent is not None
+            and current.terminal_intent != invocation.terminal_intent
+        ):
+            raise ExecutionOwnershipLost("immutable terminal intent already exists")
         self.invocations[invocation.invocation_id] = invocation
 
     async def record_usage(
@@ -560,6 +574,21 @@ class ReferenceGatewayStore:
         self, invocation_id: str, *, effect_key: str
     ) -> ProviderResult | None:
         return self._provider_effects.get((invocation_id, effect_key))
+
+    async def reserve_provider_effect(
+        self,
+        invocation_id: str,
+        *,
+        effect_key: str,
+        attempt_number: int,
+        model_key: str,
+        owner: str,
+        generation: int,
+    ) -> None:
+        """Persist the opaque idempotency key before crossing the provider boundary."""
+        del attempt_number, model_key
+        await self.assert_execution_owner(invocation_id, owner=owner, generation=generation)
+        self._provider_effect_reservations.add((invocation_id, effect_key))
 
     async def record_provider_effect(
         self,
@@ -775,31 +804,6 @@ class ReferenceAIGateway:
             )
             route = self._route(request, tokens)
             cache_key = self._cache_key(request, context_digest, route)
-            cached: CachedContent | None = None
-            cache_candidates = [
-                (self._cache_key(request, context_digest, candidate), candidate)
-                for candidate in self._eligible_routes(request, tokens)
-            ]
-            if request.context_items:
-                _, expanded_tokens, expanded_digest = self._assemble(request, stage=1)
-                cache_candidates.extend(
-                    (
-                        self._cache_key(request, expanded_digest, candidate),
-                        candidate,
-                    )
-                    for candidate in self._eligible_routes(request, expanded_tokens)
-                )
-            for candidate_key, candidate_route in cache_candidates:
-                cached = await self.store.cached(
-                    request.tenant_id,
-                    request.workspace_id,
-                    candidate_key,
-                    now=self._clock.now(),
-                )
-                if cached is not None:
-                    cache_key = candidate_key
-                    route = cached.route or candidate_route
-                    break
             invocation.route = route
             self._observe(
                 invocation,
@@ -831,31 +835,6 @@ class ReferenceAIGateway:
                 },
             )
             await self.store.checkpoint(invocation)
-            if (
-                self._cache_eligible(request)
-                and cached is not None
-                and cached.expires_at > self._clock.now()
-            ):
-                usage = replace(cached.usage, cached_tokens=cached.usage.input_tokens)
-                await self.store.reconcile(
-                    invocation_id,
-                    Decimal("0"),
-                    usage,
-                    owner=owner,
-                    generation=generation,
-                )
-                response = self._success(invocation, cached.content, usage, route, cache_hit=True)
-                self._observe(
-                    invocation,
-                    "ai.cache.hit",
-                    {
-                        "cache_key": cache_key,
-                        "estimated_savings": str(route.estimated_cost),
-                        "cached_tokens": usage.cached_tokens,
-                    },
-                )
-                await self.store.checkpoint(invocation)
-                return response
             candidates = [route]
             if request.allow_fallback:
                 candidates.extend(
@@ -879,6 +858,44 @@ class ReferenceAIGateway:
                     self._transition(invocation, InvocationState.RETRYING)
                 invocation.route = candidate
                 await self.store.checkpoint(invocation)
+                cache_key = self._cache_key(request, context_digest, candidate)
+                cached = None
+                if self._cache_eligible(request):
+                    cached = await self.store.cached(
+                        request.tenant_id,
+                        request.workspace_id,
+                        cache_key,
+                        now=self._clock.now(),
+                    )
+                if cached is not None and cached.expires_at > self._clock.now():
+                    usage = AIUsage(
+                        total_input + cached.usage.input_tokens,
+                        total_output + cached.usage.output_tokens,
+                        cached_tokens=cached.usage.input_tokens,
+                        reasoning_tokens=cached.usage.reasoning_tokens,
+                        estimated=cached.usage.estimated,
+                    )
+                    await self.store.reconcile(
+                        invocation_id,
+                        spent,
+                        usage,
+                        owner=owner,
+                        generation=generation,
+                    )
+                    response = self._success(
+                        invocation, cached.content, usage, cached.route or candidate, cache_hit=True
+                    )
+                    self._observe(
+                        invocation,
+                        "ai.cache.hit",
+                        {
+                            "cache_key": cache_key,
+                            "estimated_savings": str(candidate.estimated_cost),
+                            "cached_tokens": usage.cached_tokens,
+                        },
+                    )
+                    await self.store.checkpoint(invocation)
+                    return response
                 self._transition(invocation, InvocationState.INVOKED)
                 self._observe(
                     invocation,
@@ -1672,6 +1689,14 @@ class ReferenceAIGateway:
                     invocation.invocation_id, effect_key=effect_key
                 )
                 if repaired is None:
+                    await self.store.reserve_provider_effect(
+                        invocation.invocation_id,
+                        effect_key=effect_key,
+                        attempt_number=repair_number,
+                        model_key=candidate.model_key,
+                        owner=owner,
+                        generation=generation,
+                    )
                     repair_call = adapter.invoke(
                         model_key=candidate.model_key,
                         prompt=repair_prompt,
