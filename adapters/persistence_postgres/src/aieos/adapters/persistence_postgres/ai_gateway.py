@@ -158,6 +158,7 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
         amount: Decimal,
         *,
         now: datetime,
+        pricing_version: str | None = None,
     ) -> GatewayReservation:
         expires_at = now.replace(microsecond=0) + timedelta(minutes=5)
         async with self._database.transaction() as session:
@@ -196,6 +197,7 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
                         ai_invocation_id=invocation_id,
                         reserved_amount=amount,
                         state="pending",
+                        pricing_version=pricing_version,
                         allocation_payload=(
                             '{"levels":["tenant","workspace"],'
                             f'"tenant_limit":"{self.tenant_limit}",'
@@ -433,6 +435,24 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
                     },
                 )
             )
+
+    async def invalidate_cache(
+        self, tenant_id: str, workspace_id: str, *, cache_key: str | None = None
+    ) -> int:
+        statement = (
+            update(AIGatewayCacheRow)
+            .where(
+                AIGatewayCacheRow.tenant_id == tenant_id,
+                AIGatewayCacheRow.workspace_id == workspace_id,
+                AIGatewayCacheRow.invalidated_at.is_(None),
+            )
+            .values(invalidated_at=datetime.now().astimezone())
+        )
+        if cache_key is not None:
+            statement = statement.where(AIGatewayCacheRow.cache_key == cache_key)
+        async with self._database.transaction() as session:
+            result = await session.execute(statement)
+            return result.rowcount
 
 
 __all__ = ("PostgresAIGatewayStore",)

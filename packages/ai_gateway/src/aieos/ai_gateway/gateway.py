@@ -278,11 +278,21 @@ class ReferenceGatewayStore:
             "mode": request.response_mode.value,
             "schema": request.output_schema_ref,
             "scope": (request.tenant_id, request.workspace_id),
+            "lineage": (request.correlation_id, request.causation_id),
+            "authorization": {
+                "actor": request.authorization.actor_id,
+                "permissions": sorted(request.authorization.permissions),
+                "tenant": request.authorization.tenant_id,
+                "workspace": request.authorization.workspace_id,
+                "policy": request.authorization.policy_id,
+                "policy_version": request.authorization.policy_version_id,
+            },
             "required_capabilities": sorted(request.required_capabilities),
             "quality": request.quality_tier,
             "latency": request.latency_tier,
             "token_limits": (request.max_input_tokens, request.max_output_tokens),
             "cost_limit": str(request.max_total_cost),
+            "deadline": request.deadline.isoformat() if request.deadline is not None else None,
             "context": [
                 (
                     item.reference,
@@ -345,6 +355,7 @@ class ReferenceGatewayStore:
         amount: Decimal,
         *,
         now: datetime,
+        pricing_version: str | None = None,
     ) -> GatewayReservation:
         async with self._lock:
             current = self.reservations.get(invocation_id)
@@ -414,6 +425,18 @@ class ReferenceGatewayStore:
         self, tenant_id: str, workspace_id: str, cache_key: str, value: CachedContent
     ) -> None:
         self.cache[(tenant_id, workspace_id, cache_key)] = value
+
+    async def invalidate_cache(
+        self, tenant_id: str, workspace_id: str, *, cache_key: str | None = None
+    ) -> int:
+        keys = [
+            key
+            for key in self.cache
+            if key[:2] == (tenant_id, workspace_id) and (cache_key is None or key[2] == cache_key)
+        ]
+        for key in keys:
+            del self.cache[key]
+        return len(keys)
 
     async def release(self, invocation_id: str, *, state: str = "released") -> None:
         async with self._lock:
@@ -535,6 +558,7 @@ class ReferenceAIGateway:
                 request.workspace_id,
                 request.max_total_cost,
                 now=self._clock.now(),
+                pricing_version=self._model(route.model_key).pricing_version,
             )
             self._transition(invocation, InvocationState.PREPARED)
             self._observe(
@@ -554,7 +578,15 @@ class ReferenceAIGateway:
                 usage = replace(cached.usage, cached_tokens=cached.usage.input_tokens)
                 await self.store.reconcile(invocation_id, Decimal("0"), usage)
                 response = self._success(invocation, cached.content, usage, route, cache_hit=True)
-                self._observe(invocation, "ai.cache.hit", {"cache_key": cache_key})
+                self._observe(
+                    invocation,
+                    "ai.cache.hit",
+                    {
+                        "cache_key": cache_key,
+                        "estimated_savings": str(route.estimated_cost),
+                        "cached_tokens": usage.cached_tokens,
+                    },
+                )
                 await self.store.checkpoint(invocation)
                 return response
             candidates = [route]
@@ -586,9 +618,19 @@ class ReferenceAIGateway:
                 )
                 adapter = self._adapters[candidate.adapter_key]
                 try:
-                    provider_result = await adapter.invoke(
+                    invocation_call = adapter.invoke(
                         model_key=candidate.model_key, prompt=prompt, request=request
                     )
+                    if request.deadline is None:
+                        provider_result = await invocation_call
+                    else:
+                        remaining = (request.deadline - self._clock.now()).total_seconds()
+                        try:
+                            provider_result = await asyncio.wait_for(
+                                invocation_call, timeout=max(0, remaining)
+                            )
+                        except TimeoutError:
+                            raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=True) from None
                     usage = provider_result.usage or AIUsage(
                         tokens, request.max_output_tokens, estimated=True
                     )
@@ -620,7 +662,18 @@ class ReferenceAIGateway:
                             "cost": str(attempt_cost),
                         },
                     )
-                    content = self._validate_and_repair(request, provider_result.content)
+                    content, repair_usage, repair_cost = await self._validate_and_repair(
+                        invocation,
+                        request=request,
+                        content=provider_result.content,
+                        adapter=adapter,
+                        candidate=candidate,
+                        provider_attempt=attempts,
+                        remaining_cost=request.max_total_cost - spent,
+                    )
+                    spent += repair_cost
+                    total_input += repair_usage.input_tokens
+                    total_output += repair_usage.output_tokens
                     if provider_result.confidence < Decimal("0.5"):
                         last_failure = ProviderFailure("AI_LOW_CONFIDENCE", retryable=True)
                         prompt, tokens, _ = self._assemble(request, stage=1)
@@ -712,9 +765,13 @@ class ReferenceAIGateway:
         yield StreamChunk(accepted.ai_invocation_id, 0, "acknowledgement")
         sequence = 1
         reservation: GatewayReservation | None = None
+        parts: list[str] = []
+        input_tokens = 0
+        partial_usage: AIUsage | None = None
         try:
             self._transition(invocation, InvocationState.POLICY_VALIDATED)
             prompt, tokens, _ = self._assemble(invocation.request)
+            input_tokens = tokens
             route = self._route(invocation.request, tokens)
             invocation.route = route
             self._transition(invocation, InvocationState.PROVIDER_SELECTED)
@@ -725,6 +782,7 @@ class ReferenceAIGateway:
                 invocation.request.workspace_id,
                 invocation.request.max_total_cost,
                 now=self._clock.now(),
+                pricing_version=self._model(route.model_key).pricing_version,
             )
             self._transition(invocation, InvocationState.PREPARED)
             await self.store.checkpoint(invocation)
@@ -737,30 +795,47 @@ class ReferenceAIGateway:
             )
             yield StreamChunk(invocation.invocation_id, sequence, "stream_start")
             sequence += 1
-            parts: list[str] = []
             usage: AIUsage | None = None
             adapter = self._adapters[route.adapter_key]
-            async for event in adapter.stream(
-                model_key=route.model_key, prompt=prompt, request=invocation.request
-            ):
-                if event.kind == "content_delta" and event.content:
-                    parts.append(event.content)
-                    yield StreamChunk(
-                        invocation.invocation_id, sequence, "content_delta", event.content
-                    )
-                    sequence += 1
-                elif event.kind == "usage":
-                    usage = event.usage
-                    yield StreamChunk(invocation.invocation_id, sequence, "usage", usage=usage)
-                    sequence += 1
-                    self._observe(
-                        invocation,
-                        "ai.stream.usage",
-                        {
-                            "input_tokens": usage.input_tokens if usage is not None else 0,
-                            "output_tokens": usage.output_tokens if usage is not None else 0,
-                        },
-                    )
+            timeout_seconds = (
+                None
+                if invocation.request.deadline is None
+                else max(0, (invocation.request.deadline - self._clock.now()).total_seconds())
+            )
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    async for event in adapter.stream(
+                        model_key=route.model_key, prompt=prompt, request=invocation.request
+                    ):
+                        if event.kind == "content_delta" and event.content:
+                            parts.append(event.content)
+                            yield StreamChunk(
+                                invocation.invocation_id,
+                                sequence,
+                                "content_delta",
+                                event.content,
+                            )
+                            sequence += 1
+                        elif event.kind == "usage":
+                            usage = event.usage
+                            yield StreamChunk(
+                                invocation.invocation_id, sequence, "usage", usage=usage
+                            )
+                            sequence += 1
+                            self._observe(
+                                invocation,
+                                "ai.stream.usage",
+                                {
+                                    "input_tokens": (
+                                        usage.input_tokens if usage is not None else 0
+                                    ),
+                                    "output_tokens": (
+                                        usage.output_tokens if usage is not None else 0
+                                    ),
+                                },
+                            )
+            except TimeoutError:
+                raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=False) from None
             content = "".join(parts)
             if self._estimate(content) > invocation.request.max_output_tokens:
                 raise ProviderFailure("AI_OUTPUT_LIMIT_EXCEEDED", retryable=False)
@@ -770,23 +845,69 @@ class ReferenceAIGateway:
             )
             if actual > invocation.request.max_total_cost:
                 raise ProviderFailure("AI_BUDGET_OVERRUN", retryable=False)
+            await self.store.record_attempt(
+                invocation.invocation_id,
+                attempt_number=1,
+                model_key=route.model_key,
+                state="completed",
+                usage=usage,
+                cost=actual,
+            )
             await self.store.reconcile(invocation.invocation_id, actual, usage)
             response = self._success(invocation, content, usage, route)
         except asyncio.CancelledError:
             if reservation is not None:
-                await self.store.release(invocation.invocation_id)
+                if parts and invocation.route is not None:
+                    partial = AIUsage(input_tokens, self._estimate("".join(parts)), estimated=True)
+                    partial_usage = partial
+                    cost = self._model(invocation.route.model_key).estimate_cost(
+                        partial.input_tokens, partial.output_tokens
+                    )
+                    await self.store.record_attempt(
+                        invocation.invocation_id,
+                        attempt_number=1,
+                        model_key=invocation.route.model_key,
+                        state="cancelled_partial",
+                        usage=partial,
+                        cost=cost,
+                    )
+                    await self.store.reconcile(invocation.invocation_id, cost, partial)
+                else:
+                    await self.store.release(invocation.invocation_id)
             response = self._failure(
                 invocation, ProviderFailure("AI_PROVIDER_CANCELLED", retryable=False)
             )
+            if partial_usage is not None:
+                response = replace(response, usage=partial_usage)
+                invocation.terminal = response
         except Exception as error:
             if reservation is not None:
-                await self.store.release(invocation.invocation_id)
+                if parts and invocation.route is not None:
+                    partial = AIUsage(input_tokens, self._estimate("".join(parts)), estimated=True)
+                    partial_usage = partial
+                    cost = self._model(invocation.route.model_key).estimate_cost(
+                        partial.input_tokens, partial.output_tokens
+                    )
+                    await self.store.record_attempt(
+                        invocation.invocation_id,
+                        attempt_number=1,
+                        model_key=invocation.route.model_key,
+                        state="failed_partial",
+                        usage=partial,
+                        cost=cost,
+                    )
+                    await self.store.reconcile(invocation.invocation_id, cost, partial)
+                else:
+                    await self.store.release(invocation.invocation_id)
             failure = (
                 error
                 if isinstance(error, ProviderFailure)
                 else ProviderFailure("AI_STREAM_FAILURE", retryable=False)
             )
             response = self._failure(invocation, failure)
+            if partial_usage is not None:
+                response = replace(response, usage=partial_usage)
+                invocation.terminal = response
         await self.store.checkpoint(invocation)
         yield StreamChunk(
             invocation.invocation_id,
@@ -818,7 +939,20 @@ class ReferenceAIGateway:
         ):
             unique.setdefault((item.reference, item.version), item)
         selected: list[ContextItem] = []
-        used = self._estimate(request.prompt)
+        base_sections = [
+            f"<system ref='{request.system_instruction_ref}'>approved instructions</system>",
+            f"<task>{request.prompt.strip()}</task>",
+        ]
+
+        def render(items: Sequence[ContextItem]) -> str:
+            evidence = [
+                "<evidence "
+                f"ref='{item.reference}' trusted='{str(item.trusted).lower()}' "
+                f"reason='{item.necessity_reason}'>{item.content}</evidence>"
+                for item in items
+            ]
+            return "\n".join((*base_sections, *evidence))
+
         optional_relevance = max(
             (item.relevance for item in unique.values() if not item.mandatory), default=None
         )
@@ -830,21 +964,23 @@ class ReferenceAIGateway:
                 and item.relevance < optional_relevance
             ):
                 continue
-            cost = self._estimate(item.content)
-            if item.mandatory or used + cost <= request.max_input_tokens:
+            if item.mandatory:
                 selected.append(item)
-                used += cost
-        sections = [
-            f"<system ref='{request.system_instruction_ref}'>approved instructions</system>",
-            f"<task>{request.prompt.strip()}</task>",
-        ]
-        sections.extend(
-            "<evidence "
-            f"ref='{item.reference}' trusted='{str(item.trusted).lower()}' "
-            f"reason='{item.necessity_reason}'>{item.content}</evidence>"
-            for item in selected
-        )
-        prompt = "\n".join(sections)
+                continue
+            if self._estimate(render((*selected, item))) <= request.max_input_tokens:
+                selected.append(item)
+                continue
+            low, high = 0, len(item.content)
+            while low < high:
+                middle = (low + high + 1) // 2
+                truncated = replace(item, content=item.content[:middle])
+                if self._estimate(render((*selected, truncated))) <= request.max_input_tokens:
+                    low = middle
+                else:
+                    high = middle - 1
+            if low:
+                selected.append(replace(item, content=item.content[:low]))
+        prompt = render(selected)
         if self._estimate(prompt) > request.max_input_tokens:
             raise ValueError("mandatory context exceeds input token limit")
         digest = hashlib.sha256(
@@ -967,57 +1103,129 @@ class ReferenceAIGateway:
 
     @staticmethod
     def _cache_eligible(request: AIInvocationRequest) -> bool:
-        return request.cache_allowed and request.data_classification in {
-            DataClassification.NON_SENSITIVE,
-            DataClassification.INTERNAL,
-        }
+        return (
+            request.cache_allowed
+            and request.cache_policy_ref not in {"no-store", "cache-disabled"}
+            and request.data_classification
+            in {
+                DataClassification.NON_SENSITIVE,
+                DataClassification.INTERNAL,
+            }
+        )
 
-    @staticmethod
-    def _validate_and_repair(request: AIInvocationRequest, content: str) -> str:
+    async def _validate_and_repair(
+        self,
+        invocation: GatewayInvocation,
+        *,
+        request: AIInvocationRequest,
+        content: str,
+        adapter: ProviderAdapter,
+        candidate: RouteDecision,
+        provider_attempt: int,
+        remaining_cost: Decimal,
+    ) -> tuple[str, AIUsage, Decimal]:
+        """Validate, then perform bounded provider-neutral and metered repair attempts."""
         if request.response_mode is not ResponseMode.STRUCTURED:
             if ReferenceAIGateway._estimate(content) > request.max_output_tokens:
                 raise ProviderFailure("AI_OUTPUT_LIMIT_EXCEEDED", retryable=False)
-            return content
-        for attempt in range(request.repair_attempts + 1):
+            return content, AIUsage(0, 0), Decimal("0")
+        repair_input = repair_output = 0
+        repair_cost = Decimal("0")
+        for repair_attempt in range(request.repair_attempts + 1):
             try:
-                parsed: object = json.loads(content)
-                if not isinstance(parsed, dict):
-                    raise ValueError("structured output must be an object")
-                value = cast(dict[str, object], parsed)
-                if request.output_schema_ref in {"answer-v1", "reference-answer-v1"}:
-                    if set(value) - {"answer", "model"}:
-                        raise ValueError("structured output contains unsupported properties")
-                    if not isinstance(value.get("answer"), str) or not value["answer"]:
-                        raise ValueError("structured output requires a non-empty answer")
-                    if "model" in value and not isinstance(value["model"], str):
-                        raise ValueError("structured output model must be a string")
-                elif request.output_schema_ref == "analysis-v1":
-                    if set(value) != {"result"} or not isinstance(value["result"], dict):
-                        raise ValueError("structured output requires result object")
-                    result = cast(dict[str, object], value["result"])
-                    if set(result) != {"summary", "items"}:
-                        raise ValueError("structured result shape is invalid")
-                    if not isinstance(result["summary"], str) or not result["summary"]:
-                        raise ValueError("structured summary must be a non-empty string")
-                    raw_items = result["items"]
-                    if not isinstance(raw_items, list):
-                        raise ValueError("structured items must be strings")
-                    items = cast(list[object], raw_items)
-                    if not all(isinstance(item, str) for item in items):
-                        raise ValueError("structured items must be strings")
-                else:
-                    raise ValueError("structured output schema is unresolved")
-                return json.dumps(value, sort_keys=True)
+                validated = self._validate_structured(request, content)
+                return validated, AIUsage(repair_input, repair_output), repair_cost
             except (json.JSONDecodeError, ValueError):
-                if attempt >= request.repair_attempts:
-                    raise ProviderFailure("AI_INVALID_RESPONSE", retryable=False) from None
-                if request.output_schema_ref == "analysis-v1":
-                    content = json.dumps(
-                        {"result": {"summary": content[:64] or "repaired", "items": []}}
+                if repair_attempt >= request.repair_attempts:
+                    repair_usage = (
+                        AIUsage(repair_input, repair_output)
+                        if repair_input or repair_output
+                        else None
                     )
+                    raise ProviderFailure(
+                        "AI_INVALID_RESPONSE", retryable=False, usage=repair_usage
+                    ) from None
+                if candidate.estimated_cost > remaining_cost - repair_cost:
+                    raise ProviderFailure("AI_REPAIR_BUDGET_EXHAUSTED", retryable=False) from None
+                repair_prompt = (
+                    f"<repair schema='{request.output_schema_ref}' error='schema-validation'>"
+                    "Return only one conforming JSON value.</repair>"
+                )
+                repair_call = adapter.invoke(
+                    model_key=candidate.model_key,
+                    prompt=repair_prompt,
+                    request=request,
+                )
+                if request.deadline is None:
+                    repaired = await repair_call
                 else:
-                    content = json.dumps({"answer": content[:64] or "repaired"})
+                    remaining = (request.deadline - self._clock.now()).total_seconds()
+                    try:
+                        repaired = await asyncio.wait_for(repair_call, timeout=max(0, remaining))
+                    except TimeoutError:
+                        raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=False) from None
+                usage = repaired.usage or AIUsage(
+                    self._estimate(repair_prompt), request.max_output_tokens, estimated=True
+                )
+                cost = self._model(candidate.model_key).estimate_cost(
+                    usage.input_tokens, usage.output_tokens
+                )
+                repair_input += usage.input_tokens
+                repair_output += usage.output_tokens
+                repair_cost += cost
+                await self.store.record_attempt(
+                    invocation.invocation_id,
+                    attempt_number=provider_attempt * 100 + repair_attempt + 1,
+                    model_key=candidate.model_key,
+                    state="repair",
+                    usage=usage,
+                    cost=cost,
+                )
+                self._observe(
+                    invocation,
+                    "ai.structured.repair",
+                    {
+                        "provider_attempt": provider_attempt,
+                        "repair_attempt": repair_attempt + 1,
+                        "schema_ref": request.output_schema_ref or "missing",
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "cost": str(cost),
+                    },
+                )
+                content = repaired.content
         raise AssertionError("unreachable")
+
+    @staticmethod
+    def _validate_structured(request: AIInvocationRequest, content: str) -> str:
+        parsed: object = json.loads(content)
+        if not isinstance(parsed, dict):
+            raise ValueError("structured output must be an object")
+        value = cast(dict[str, object], parsed)
+        if request.output_schema_ref in {"answer-v1", "reference-answer-v1"}:
+            if set(value) - {"answer", "model"}:
+                raise ValueError("structured output contains unsupported properties")
+            if not isinstance(value.get("answer"), str) or not value["answer"]:
+                raise ValueError("structured output requires a non-empty answer")
+            if "model" in value and not isinstance(value["model"], str):
+                raise ValueError("structured output model must be a string")
+        elif request.output_schema_ref == "analysis-v1":
+            if set(value) != {"result"} or not isinstance(value["result"], dict):
+                raise ValueError("structured output requires result object")
+            result = cast(dict[str, object], value["result"])
+            if set(result) != {"summary", "items"}:
+                raise ValueError("structured result shape is invalid")
+            if not isinstance(result["summary"], str) or not result["summary"]:
+                raise ValueError("structured summary must be a non-empty string")
+            raw_items = result["items"]
+            if not isinstance(raw_items, list):
+                raise ValueError("structured items must be strings")
+            items = cast(list[object], raw_items)
+            if not all(isinstance(item, str) for item in items):
+                raise ValueError("structured items must be strings")
+        else:
+            raise ValueError("structured output schema is unresolved")
+        return json.dumps(value, sort_keys=True)
 
     def _transition(self, invocation: GatewayInvocation, state: InvocationState) -> None:
         invocation.state = state
@@ -1074,6 +1282,17 @@ class ReferenceAIGateway:
             invocation.invocation_id, result, content, usage=usage, route=route, cache_hit=cache_hit
         )
         invocation.terminal = response
+        self._observe(
+            invocation,
+            "ai.invocation.succeeded",
+            {
+                "result_id": result.result_id,
+                "cache_hit": cache_hit,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "model_key": route.model_key,
+            },
+        )
         return response
 
     def _failure(
@@ -1113,6 +1332,17 @@ class ReferenceAIGateway:
             invocation.invocation_id, result, error=error, route=invocation.route
         )
         invocation.terminal = response
+        self._observe(
+            invocation,
+            "ai.invocation.failed",
+            {
+                "result_id": result.result_id,
+                "error_id": error.error_id,
+                "error_code": failure.code,
+                "retryable": failure.retryable,
+                "status": status.value,
+            },
+        )
         return response
 
 

@@ -188,7 +188,7 @@ async def test_fallback_is_bounded_inside_one_invocation() -> None:
 
 @pytest.mark.anyio
 async def test_structured_output_repair_and_bounded_failure() -> None:
-    gateway, _, _ = _gateway(economy_behaviors=(MockProviderBehavior.MALFORMED,))
+    gateway, economy, _ = _gateway(economy_behaviors=(MockProviderBehavior.MALFORMED,))
     repaired = await gateway.invoke(
         _request(
             response_mode=ResponseMode.STRUCTURED,
@@ -196,6 +196,13 @@ async def test_structured_output_repair_and_bounded_failure() -> None:
         )
     )
     assert repaired.result.result_status is ResultStatus.SUCCEEDED
+    assert economy.calls == 2
+    attempts = gateway.store.attempts[repaired.ai_invocation_id]
+    assert [attempt[2] for attempt in attempts] == ["completed", "repair"]
+    assert repaired.usage is not None
+    initial_usage = attempts[0][3]
+    assert initial_usage is not None
+    assert repaired.usage.input_tokens > initial_usage.input_tokens
     gateway2, _, _ = _gateway(economy_behaviors=(MockProviderBehavior.MALFORMED,))
     failed = await gateway2.invoke(
         _request(
@@ -277,6 +284,29 @@ async def test_fingerprint_rejects_changed_policy_and_allows_command_replay() ->
 
 
 @pytest.mark.anyio
+async def test_fingerprint_covers_deadline_and_authorization_policy() -> None:
+    gateway, _, _ = _gateway()
+    await gateway.accept(_request())
+    with pytest.raises(ValueError, match="payload conflict"):
+        await gateway.accept(
+            _request(
+                command_id="deadline-change",
+                deadline=datetime(2026, 8, 3, 0, 1, tzinfo=UTC),
+            )
+        )
+    changed_auth = AuthorizationContext(
+        "test-user",
+        frozenset({"ai.invoke"}),
+        "tenant-a",
+        "workspace-a",
+        "different-policy",
+        "v2",
+    )
+    with pytest.raises(ValueError, match="payload conflict"):
+        await gateway.accept(_request(command_id="auth-change", authorization=changed_auth))
+
+
+@pytest.mark.anyio
 async def test_ineligible_cheaper_model_is_never_selected() -> None:
     gateway, _, _ = _gateway()
     response = await gateway.invoke(
@@ -306,6 +336,20 @@ async def test_sensitive_request_is_not_cached() -> None:
 
 
 @pytest.mark.anyio
+async def test_no_store_cache_policy_is_enforced() -> None:
+    gateway, economy, _ = _gateway()
+    await gateway.invoke(_request(cache_policy_ref="no-store"))
+    await gateway.invoke(
+        _request(
+            command_id="command-no-store",
+            idempotency_key="idem-no-store",
+            cache_policy_ref="no-store",
+        )
+    )
+    assert economy.calls == 2
+
+
+@pytest.mark.anyio
 async def test_output_limit_and_midstream_failure_are_normalized() -> None:
     gateway, _, _ = _gateway()
     failed = await gateway.invoke(_request(max_output_tokens=1))
@@ -317,6 +361,9 @@ async def test_output_limit_and_midstream_failure_are_normalized() -> None:
     assert chunks[-1].kind == "terminal"
     assert chunks[-1].terminal is not None
     assert chunks[-1].terminal.result.result_status is ResultStatus.FAILED
+    assert chunks[-1].usage is not None and chunks[-1].usage.estimated is True
+    reservation = streaming.store.reservations[chunks[-1].ai_invocation_id]
+    assert reservation.state == "committed" and reservation.actual is not None
 
 
 @pytest.mark.anyio
@@ -374,13 +421,41 @@ async def test_cache_identity_includes_route_constraints() -> None:
 
 
 @pytest.mark.anyio
+async def test_cache_invalidation_forces_fresh_provider_execution() -> None:
+    gateway, economy, _ = _gateway()
+    await gateway.invoke(_request())
+    assert await gateway.store.invalidate_cache("tenant-a", "workspace-a") == 1
+    second = await gateway.invoke(
+        _request(command_id="command-invalidated", idempotency_key="idem-invalidated")
+    )
+    assert second.cache_hit is False
+    assert economy.calls == 2
+
+
+@pytest.mark.anyio
+async def test_oversized_optional_context_is_deterministically_truncated() -> None:
+    gateway, economy, _ = _gateway()
+    oversized = "bounded-" * 1000
+    response = await gateway.invoke(
+        _request(
+            context_items=(ContextItem("large", "v1", oversized, 10, "evidence"),),
+            max_input_tokens=128,
+        )
+    )
+    assert response.result.result_status is ResultStatus.SUCCEEDED
+    assert "bounded-" in economy.prompts[0]
+    assert oversized not in economy.prompts[0]
+    assert response.usage is not None and response.usage.input_tokens <= 128
+
+
+@pytest.mark.anyio
 async def test_nested_structured_schema_is_fully_validated_and_repaired() -> None:
     gateway, _, _ = _gateway(economy_behaviors=(MockProviderBehavior.MALFORMED,))
     repaired = await gateway.invoke(
         _request(response_mode=ResponseMode.STRUCTURED, output_schema_ref="analysis-v1")
     )
     assert repaired.result.result_status is ResultStatus.SUCCEEDED
-    assert repaired.content is not None and '"items": []' in repaired.content
+    assert repaired.content is not None and '"items": ["economy-v1"]' in repaired.content
     unresolved = await gateway.invoke(
         _request(
             command_id="command-schema",

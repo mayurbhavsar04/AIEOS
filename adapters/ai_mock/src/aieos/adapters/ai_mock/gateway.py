@@ -145,6 +145,10 @@ class DeterministicMockProvider:
             raise ProviderFailure("AI_PROVIDER_CANCELLED", retryable=False)
         if behavior is MockProviderBehavior.MALFORMED:
             content = "not-json"
+        elif request.output_schema_ref == "analysis-v1":
+            content = json.dumps(
+                {"result": {"summary": request.prompt.strip(), "items": [model_key]}}
+            )
         elif request.output_schema_ref:
             content = json.dumps({"answer": request.prompt.strip(), "model": model_key})
         else:
