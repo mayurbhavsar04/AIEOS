@@ -16,6 +16,7 @@ from aieos.ai_gateway.gateway import (
     AIInvocationResponse,
     AIUsage,
     CachedContent,
+    ExecutionOwnershipLost,
     GatewayInvocation,
     GatewayReservation,
     InvocationState,
@@ -174,6 +175,42 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
                 .values(execution_owner=None, execution_lease_expires_at=None)
             )
 
+    async def renew_execution(
+        self,
+        invocation_id: str,
+        *,
+        owner: str,
+        generation: int,
+        now: datetime,
+        lease: timedelta,
+    ) -> bool:
+        async with self._database.transaction() as session:
+            result = await session.execute(
+                update(AIGatewayInvocationRow)
+                .where(
+                    AIGatewayInvocationRow.ai_invocation_id == invocation_id,
+                    AIGatewayInvocationRow.execution_owner == owner,
+                    AIGatewayInvocationRow.claim_generation == generation,
+                    AIGatewayInvocationRow.terminal_payload.is_(None),
+                )
+                .values(execution_lease_expires_at=now + lease, updated_at=now)
+            )
+        return result.rowcount == 1
+
+    async def assert_execution_owner(
+        self, invocation_id: str, *, owner: str, generation: int
+    ) -> None:
+        async with self._database.transaction() as session:
+            current = await session.scalar(
+                select(AIGatewayInvocationRow.claim_generation).where(
+                    AIGatewayInvocationRow.ai_invocation_id == invocation_id,
+                    AIGatewayInvocationRow.execution_owner == owner,
+                    AIGatewayInvocationRow.claim_generation == generation,
+                )
+            )
+        if current is None:
+            raise ExecutionOwnershipLost("AI Gateway execution ownership was lost")
+
     async def wait_for_terminal(
         self, invocation_id: str, *, timeout: float = 30.0
     ) -> AIInvocationResponse:
@@ -318,7 +355,15 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
         self.reservations[invocation_id] = reservation
         return reservation
 
-    async def reconcile(self, invocation_id: str, actual: Decimal, usage: AIUsage) -> None:
+    async def reconcile(
+        self,
+        invocation_id: str,
+        actual: Decimal,
+        usage: AIUsage,
+        *,
+        owner: str | None = None,
+        generation: int | None = None,
+    ) -> None:
         invocation = await self.load(invocation_id)
         async with self._database.transaction() as session:
             budget = await session.get(
@@ -337,6 +382,8 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
             event_key="terminal-reconciliation",
             kind="actual" if not usage.estimated else "estimated",
             final=True,
+            owner=owner,
+            generation=generation,
         )
 
     async def record_attempt(
@@ -400,7 +447,13 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
         return None if payload is None else _PROVIDER_RESULT.validate_json(payload)
 
     async def record_provider_effect(
-        self, invocation_id: str, *, effect_key: str, result: ProviderResult
+        self,
+        invocation_id: str,
+        *,
+        effect_key: str,
+        result: ProviderResult,
+        owner: str | None = None,
+        generation: int | None = None,
     ) -> None:
         invocation = await self.load(invocation_id)
         route = invocation.route
@@ -408,6 +461,16 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
             raise RuntimeError("provider effect requires a durable route")
         attempt_number = int(effect_key.rsplit(":", 1)[1])
         async with self._database.transaction() as session:
+            if owner is not None and generation is not None:
+                fenced = await session.scalar(
+                    select(AIGatewayInvocationRow.claim_generation).where(
+                        AIGatewayInvocationRow.ai_invocation_id == invocation_id,
+                        AIGatewayInvocationRow.execution_owner == owner,
+                        AIGatewayInvocationRow.claim_generation == generation,
+                    )
+                )
+                if fenced is None:
+                    raise ExecutionOwnershipLost("stale provider effect was fenced")
             await session.execute(
                 insert(AIGatewayAttemptRow)
                 .values(
@@ -452,11 +515,23 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
         kind: str,
         final: bool,
         attempt_number: int | None = None,
+        owner: str | None = None,
+        generation: int | None = None,
     ) -> None:
         """Idempotently append usage and reconcile the cumulative invocation cost."""
         invocation = await self.load(invocation_id)
         now = datetime.now(invocation.accepted_at.tzinfo)
         async with self._database.transaction() as session:
+            if owner is not None and generation is not None:
+                fenced = await session.scalar(
+                    select(AIGatewayInvocationRow.claim_generation).where(
+                        AIGatewayInvocationRow.ai_invocation_id == invocation_id,
+                        AIGatewayInvocationRow.execution_owner == owner,
+                        AIGatewayInvocationRow.claim_generation == generation,
+                    )
+                )
+                if fenced is None:
+                    raise ExecutionOwnershipLost("stale accounting write was fenced")
             if kind == "provider_partial":
                 already_recorded = await session.scalar(
                     select(func.coalesce(func.sum(AIGatewayUsageLedgerRow.cost_amount), 0)).where(

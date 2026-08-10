@@ -203,6 +203,10 @@ class ProviderFailure(RuntimeError):
         self.usage = usage
 
 
+class ExecutionOwnershipLost(RuntimeError):
+    """The durable fencing generation no longer belongs to this worker."""
+
+
 class ProviderAdapter(Protocol):
     key: str
 
@@ -238,6 +242,11 @@ class GatewayInvocation:
     claim_generation: int = 0
     recovery_phase: str = "accepted"
     terminal_intent: AIInvocationResponse | None = None
+    stream_started: bool = False
+    stream_sequence: int = 0
+    stream_content: tuple[str, ...] = ()
+    stream_usage: AIUsage | None = None
+    stream_terminal_emitted: bool = False
 
 
 @dataclass(slots=True)
@@ -257,6 +266,7 @@ class CachedContent:
     usage: AIUsage
     expires_at: datetime
     provenance: str
+    route: RouteDecision | None = None
 
 
 class ReferenceGatewayStore:
@@ -391,6 +401,34 @@ class ReferenceGatewayStore:
                 invocation.execution_owner = None
                 invocation.execution_lease_expires_at = None
 
+    async def renew_execution(
+        self,
+        invocation_id: str,
+        *,
+        owner: str,
+        generation: int,
+        now: datetime,
+        lease: timedelta,
+    ) -> bool:
+        async with self._lock:
+            invocation = self.invocations[invocation_id]
+            if (
+                invocation.terminal is not None
+                or invocation.execution_owner != owner
+                or invocation.claim_generation != generation
+            ):
+                return False
+            invocation.execution_lease_expires_at = now + lease
+            return True
+
+    async def assert_execution_owner(
+        self, invocation_id: str, *, owner: str, generation: int
+    ) -> None:
+        async with self._lock:
+            invocation = self.invocations[invocation_id]
+            if invocation.execution_owner != owner or invocation.claim_generation != generation:
+                raise ExecutionOwnershipLost("AI Gateway execution ownership was lost")
+
     async def wait_for_terminal(
         self, invocation_id: str, *, timeout: float = 30.0
     ) -> AIInvocationResponse:
@@ -446,7 +484,17 @@ class ReferenceGatewayStore:
             self.reservations[invocation_id] = reservation
             return reservation
 
-    async def reconcile(self, invocation_id: str, actual: Decimal, usage: AIUsage) -> None:
+    async def reconcile(
+        self,
+        invocation_id: str,
+        actual: Decimal,
+        usage: AIUsage,
+        *,
+        owner: str | None = None,
+        generation: int | None = None,
+    ) -> None:
+        if owner is not None and generation is not None:
+            await self.assert_execution_owner(invocation_id, owner=owner, generation=generation)
         async with self._lock:
             reservation = self.reservations[invocation_id]
             reservation.state = "committed"
@@ -486,8 +534,12 @@ class ReferenceGatewayStore:
         kind: str,
         final: bool,
         attempt_number: int | None = None,
+        owner: str | None = None,
+        generation: int | None = None,
     ) -> None:
         del attempt_number
+        if owner is not None and generation is not None:
+            await self.assert_execution_owner(invocation_id, owner=owner, generation=generation)
         events = self._usage_events.setdefault(invocation_id, {})
         if kind == "provider_partial":
             cost = max(
@@ -510,8 +562,16 @@ class ReferenceGatewayStore:
         return self._provider_effects.get((invocation_id, effect_key))
 
     async def record_provider_effect(
-        self, invocation_id: str, *, effect_key: str, result: ProviderResult
+        self,
+        invocation_id: str,
+        *,
+        effect_key: str,
+        result: ProviderResult,
+        owner: str | None = None,
+        generation: int | None = None,
     ) -> None:
+        if owner is not None and generation is not None:
+            await self.assert_execution_owner(invocation_id, owner=owner, generation=generation)
         self._provider_effects.setdefault((invocation_id, effect_key), result)
 
     async def cached(
@@ -573,6 +633,8 @@ class ReferenceAIGateway:
         catalog: Sequence[ModelCatalogEntry],
         adapters: Mapping[str, ProviderAdapter],
         store: ReferenceGatewayStore | None = None,
+        execution_lease: timedelta = timedelta(seconds=30),
+        heartbeat_interval: float = 10.0,
     ) -> None:
         self._clock = clock
         self._identifiers = identifiers
@@ -583,6 +645,38 @@ class ReferenceAIGateway:
         self.store = store or ReferenceGatewayStore()
         self._outcomes = OutcomeFactory(clock, identifiers)
         self.lifecycle: dict[str, list[InvocationState]] = {}
+        self._execution_lease = execution_lease
+        self._heartbeat_interval = heartbeat_interval
+
+    async def _heartbeat(
+        self, invocation_id: str, owner: str, generation: int, lost: asyncio.Event
+    ) -> None:
+        while not lost.is_set():
+            await asyncio.sleep(self._heartbeat_interval)
+            try:
+                renewed = await self.store.renew_execution(
+                    invocation_id,
+                    owner=owner,
+                    generation=generation,
+                    now=self._clock.now(),
+                    lease=self._execution_lease,
+                )
+            except Exception:
+                renewed = False
+            if not renewed:
+                lost.set()
+                return
+
+    async def _fence(
+        self,
+        invocation_id: str,
+        owner: str,
+        generation: int,
+        lost: asyncio.Event | None = None,
+    ) -> None:
+        if lost is not None and lost.is_set():
+            raise ExecutionOwnershipLost("AI Gateway execution heartbeat was lost")
+        await self.store.assert_execution_owner(invocation_id, owner=owner, generation=generation)
 
     @property
     def observations(self) -> ObservationRecorder:
@@ -648,12 +742,12 @@ class ReferenceAIGateway:
             return invocation.terminal
         owner = f"gateway-worker:{uuid4().hex}"
         generation = await self.store.claim_execution(
-            invocation_id, owner=owner, now=self._clock.now(), lease=timedelta(seconds=30)
+            invocation_id, owner=owner, now=self._clock.now(), lease=self._execution_lease
         )
         if generation is None:
             return await self.store.wait_for_terminal(invocation_id)
         invocation.execution_owner = owner
-        invocation.execution_lease_expires_at = self._clock.now() + timedelta(seconds=30)
+        invocation.execution_lease_expires_at = self._clock.now() + self._execution_lease
         invocation.claim_generation = generation
         invocation.recovery_phase = "claimed"
         if invocation.terminal_intent is not None:
@@ -667,6 +761,10 @@ class ReferenceAIGateway:
                 )
             return invocation.terminal
         reservation: GatewayReservation | None = None
+        ownership_lost = asyncio.Event()
+        heartbeat = asyncio.create_task(
+            self._heartbeat(invocation_id, owner, generation, ownership_lost)
+        )
         try:
             self._transition(invocation, InvocationState.POLICY_VALIDATED)
             prompt, tokens, context_digest = self._assemble(request)
@@ -677,9 +775,31 @@ class ReferenceAIGateway:
             )
             route = self._route(request, tokens)
             cache_key = self._cache_key(request, context_digest, route)
-            cached = await self.store.cached(
-                request.tenant_id, request.workspace_id, cache_key, now=self._clock.now()
-            )
+            cached: CachedContent | None = None
+            cache_candidates = [
+                (self._cache_key(request, context_digest, candidate), candidate)
+                for candidate in self._eligible_routes(request, tokens)
+            ]
+            if request.context_items:
+                _, expanded_tokens, expanded_digest = self._assemble(request, stage=1)
+                cache_candidates.extend(
+                    (
+                        self._cache_key(request, expanded_digest, candidate),
+                        candidate,
+                    )
+                    for candidate in self._eligible_routes(request, expanded_tokens)
+                )
+            for candidate_key, candidate_route in cache_candidates:
+                cached = await self.store.cached(
+                    request.tenant_id,
+                    request.workspace_id,
+                    candidate_key,
+                    now=self._clock.now(),
+                )
+                if cached is not None:
+                    cache_key = candidate_key
+                    route = cached.route or candidate_route
+                    break
             invocation.route = route
             self._observe(
                 invocation,
@@ -717,7 +837,13 @@ class ReferenceAIGateway:
                 and cached.expires_at > self._clock.now()
             ):
                 usage = replace(cached.usage, cached_tokens=cached.usage.input_tokens)
-                await self.store.reconcile(invocation_id, Decimal("0"), usage)
+                await self.store.reconcile(
+                    invocation_id,
+                    Decimal("0"),
+                    usage,
+                    owner=owner,
+                    generation=generation,
+                )
                 response = self._success(invocation, cached.content, usage, route, cache_hit=True)
                 self._observe(
                     invocation,
@@ -751,6 +877,8 @@ class ReferenceAIGateway:
                     break
                 if attempts > 1:
                     self._transition(invocation, InvocationState.RETRYING)
+                invocation.route = candidate
+                await self.store.checkpoint(invocation)
                 self._transition(invocation, InvocationState.INVOKED)
                 self._observe(
                     invocation,
@@ -782,9 +910,15 @@ class ReferenceAIGateway:
                                 raise ProviderFailure(
                                     "AI_PROVIDER_TIMEOUT", retryable=True
                                 ) from None
+                        await self._fence(invocation_id, owner, generation, ownership_lost)
                         await self.store.record_provider_effect(
-                            invocation_id, effect_key=effect_key, result=provider_result
+                            invocation_id,
+                            effect_key=effect_key,
+                            result=provider_result,
+                            owner=owner,
+                            generation=generation,
                         )
+                    await self._fence(invocation_id, owner, generation, ownership_lost)
                     usage = provider_result.usage or AIUsage(
                         tokens, request.max_output_tokens, estimated=True
                     )
@@ -824,13 +958,16 @@ class ReferenceAIGateway:
                         candidate=candidate,
                         provider_attempt=attempts,
                         remaining_cost=request.max_total_cost - spent,
+                        owner=owner,
+                        generation=generation,
+                        ownership_lost=ownership_lost,
                     )
                     spent += repair_cost
                     total_input += repair_usage.input_tokens
                     total_output += repair_usage.output_tokens
                     if provider_result.confidence < Decimal("0.5"):
                         last_failure = ProviderFailure("AI_LOW_CONFIDENCE", retryable=True)
-                        prompt, tokens, _ = self._assemble(request, stage=1)
+                        prompt, tokens, context_digest = self._assemble(request, stage=1)
                         self._observe(
                             invocation,
                             "ai.context.escalated",
@@ -838,8 +975,16 @@ class ReferenceAIGateway:
                         )
                         continue
                     cumulative_usage = AIUsage(total_input, total_output)
-                    await self.store.reconcile(invocation_id, spent, cumulative_usage)
+                    await self._fence(invocation_id, owner, generation, ownership_lost)
+                    await self.store.reconcile(
+                        invocation_id,
+                        spent,
+                        cumulative_usage,
+                        owner=owner,
+                        generation=generation,
+                    )
                     if self._cache_eligible(request):
+                        cache_key = self._cache_key(request, context_digest, candidate)
                         await self.store.cache_content(
                             request.tenant_id,
                             request.workspace_id,
@@ -849,6 +994,7 @@ class ReferenceAIGateway:
                                 usage,
                                 self._clock.now() + timedelta(minutes=10),
                                 invocation_id,
+                                candidate,
                             ),
                         )
                     response = self._success(invocation, content, cumulative_usage, candidate)
@@ -885,7 +1031,13 @@ class ReferenceAIGateway:
                     if not failure.retryable:
                         break
             if spent > 0:
-                await self.store.reconcile(invocation_id, spent, AIUsage(total_input, total_output))
+                await self.store.reconcile(
+                    invocation_id,
+                    spent,
+                    AIUsage(total_input, total_output),
+                    owner=owner,
+                    generation=generation,
+                )
             else:
                 await self.store.release(invocation_id)
             response = self._failure(
@@ -906,6 +1058,8 @@ class ReferenceAIGateway:
                 await self.store.checkpoint(invocation)
             return response
         except Exception as error:
+            if isinstance(error, ExecutionOwnershipLost):
+                return await self.store.wait_for_terminal(invocation_id)
             if reservation is not None:
                 with suppress(Exception):
                     await self.store.release(invocation_id)
@@ -922,6 +1076,10 @@ class ReferenceAIGateway:
                 await self.store.checkpoint(invocation)
             return response
         finally:
+            ownership_lost.set()
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
             with suppress(Exception):
                 await self.store.release_execution(
                     invocation_id, owner=owner, generation=generation
@@ -932,12 +1090,21 @@ class ReferenceAIGateway:
         invocation = await self.store.load(accepted.ai_invocation_id)
         yield StreamChunk(accepted.ai_invocation_id, 0, "acknowledgement")
         sequence = 1
+        if invocation.terminal is not None:
+            yield StreamChunk(
+                invocation.invocation_id,
+                sequence,
+                "terminal",
+                usage=invocation.terminal.usage,
+                terminal=invocation.terminal,
+            )
+            return
         owner = f"gateway-stream-worker:{uuid4().hex}"
         generation = await self.store.claim_execution(
             invocation.invocation_id,
             owner=owner,
             now=self._clock.now(),
-            lease=timedelta(seconds=30),
+            lease=self._execution_lease,
         )
         if generation is None:
             terminal = await self.store.wait_for_terminal(invocation.invocation_id)
@@ -950,14 +1117,42 @@ class ReferenceAIGateway:
             )
             return
         invocation.execution_owner = owner
-        invocation.execution_lease_expires_at = self._clock.now() + timedelta(seconds=30)
+        invocation.execution_lease_expires_at = self._clock.now() + self._execution_lease
         invocation.claim_generation = generation
         invocation.recovery_phase = "claimed"
         reservation: GatewayReservation | None = None
         parts: list[str] = []
         input_tokens = 0
         partial_usage: AIUsage | None = None
+        ownership_lost = asyncio.Event()
+        heartbeat = asyncio.create_task(
+            self._heartbeat(invocation.invocation_id, owner, generation, ownership_lost)
+        )
+        if invocation.terminal_intent is not None:
+            invocation.terminal = invocation.terminal_intent
+            with suppress(Exception):
+                await self.store.checkpoint(invocation)
+            ownership_lost.set()
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+            with suppress(Exception):
+                await self.store.release_execution(
+                    invocation.invocation_id, owner=owner, generation=generation
+                )
+            yield StreamChunk(
+                invocation.invocation_id,
+                sequence,
+                "terminal",
+                usage=invocation.terminal.usage,
+                terminal=invocation.terminal,
+            )
+            return
         try:
+            if invocation.stream_started:
+                partial_usage = invocation.stream_usage
+                parts = list(invocation.stream_content)
+                raise ProviderFailure("AI_STREAM_RECOVERY_REQUIRED", retryable=False)
             self._transition(invocation, InvocationState.POLICY_VALIDATED)
             prompt, tokens, _ = self._assemble(invocation.request)
             input_tokens = tokens
@@ -977,6 +1172,9 @@ class ReferenceAIGateway:
             await self.store.checkpoint(invocation)
             self._transition(invocation, InvocationState.INVOKED)
             self._transition(invocation, InvocationState.STREAMING)
+            invocation.stream_started = True
+            invocation.stream_sequence = sequence
+            await self.store.checkpoint(invocation)
             self._observe(
                 invocation,
                 "ai.stream.started",
@@ -1004,6 +1202,15 @@ class ReferenceAIGateway:
                             ):
                                 raise ProviderFailure("AI_OUTPUT_LIMIT_EXCEEDED", retryable=False)
                             parts.append(event.content)
+                            invocation.stream_content = tuple(parts)
+                            invocation.stream_sequence = sequence
+                            await self._fence(
+                                invocation.invocation_id,
+                                owner,
+                                generation,
+                                ownership_lost,
+                            )
+                            await self.store.checkpoint(invocation)
                             yield StreamChunk(
                                 invocation.invocation_id,
                                 sequence,
@@ -1024,6 +1231,7 @@ class ReferenceAIGateway:
                                 )
                             usage = reported
                             partial_usage = usage
+                            invocation.stream_usage = usage
                             partial_cost = self._model(route.model_key).estimate_cost(
                                 usage.input_tokens, usage.output_tokens
                             )
@@ -1035,7 +1243,17 @@ class ReferenceAIGateway:
                                 kind="provider_partial",
                                 final=False,
                                 attempt_number=1,
+                                owner=owner,
+                                generation=generation,
                             )
+                            invocation.stream_sequence = sequence
+                            await self._fence(
+                                invocation.invocation_id,
+                                owner,
+                                generation,
+                                ownership_lost,
+                            )
+                            await self.store.checkpoint(invocation)
                             yield StreamChunk(
                                 invocation.invocation_id, sequence, "usage", usage=usage
                             )
@@ -1067,7 +1285,13 @@ class ReferenceAIGateway:
                 usage=usage,
                 cost=actual,
             )
-            await self.store.reconcile(invocation.invocation_id, actual, usage)
+            await self.store.reconcile(
+                invocation.invocation_id,
+                actual,
+                usage,
+                owner=owner,
+                generation=generation,
+            )
             response = self._success(invocation, content, usage, route)
         except asyncio.CancelledError:
             if reservation is not None:
@@ -1087,7 +1311,13 @@ class ReferenceAIGateway:
                         usage=partial,
                         cost=cost,
                     )
-                    await self.store.reconcile(invocation.invocation_id, cost, partial)
+                    await self.store.reconcile(
+                        invocation.invocation_id,
+                        cost,
+                        partial,
+                        owner=owner,
+                        generation=generation,
+                    )
                 else:
                     await self.store.release(invocation.invocation_id)
             response = self._failure(
@@ -1097,6 +1327,20 @@ class ReferenceAIGateway:
                 response = replace(response, usage=partial_usage)
                 invocation.terminal = response
         except Exception as error:
+            if isinstance(error, ExecutionOwnershipLost):
+                ownership_lost.set()
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat
+                terminal = await self.store.wait_for_terminal(invocation.invocation_id)
+                yield StreamChunk(
+                    invocation.invocation_id,
+                    sequence,
+                    "terminal",
+                    usage=terminal.usage,
+                    terminal=terminal,
+                )
+                return
             if reservation is not None:
                 if parts and invocation.route is not None:
                     partial = partial_usage or AIUsage(
@@ -1114,7 +1358,13 @@ class ReferenceAIGateway:
                         usage=partial,
                         cost=cost,
                     )
-                    await self.store.reconcile(invocation.invocation_id, cost, partial)
+                    await self.store.reconcile(
+                        invocation.invocation_id,
+                        cost,
+                        partial,
+                        owner=owner,
+                        generation=generation,
+                    )
                 else:
                     await self.store.release(invocation.invocation_id)
             failure = (
@@ -1126,10 +1376,26 @@ class ReferenceAIGateway:
             if partial_usage is not None:
                 response = replace(response, usage=partial_usage)
                 invocation.terminal = response
-        await self.store.checkpoint(invocation)
-        await self.store.release_execution(
-            invocation.invocation_id, owner=owner, generation=generation
-        )
+        except BaseException:
+            ownership_lost.set()
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+            raise
+        invocation.terminal_intent = response
+        invocation.recovery_phase = "terminalization_pending"
+        with suppress(Exception):
+            await self.store.checkpoint_terminal_intent(invocation)
+            await self._fence(invocation.invocation_id, owner, generation, ownership_lost)
+            await self.store.checkpoint(invocation)
+        ownership_lost.set()
+        heartbeat.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat
+        with suppress(Exception):
+            await self.store.release_execution(
+                invocation.invocation_id, owner=owner, generation=generation
+            )
         yield StreamChunk(
             invocation.invocation_id,
             sequence,
@@ -1337,7 +1603,6 @@ class ReferenceAIGateway:
             repr(sorted(request.deterministic_parameters)),
             model,
             route.adapter_key,
-            route.decision_reference,
         )
         return hashlib.sha256("|".join(values).encode()).hexdigest()
 
@@ -1363,6 +1628,9 @@ class ReferenceAIGateway:
         candidate: RouteDecision,
         provider_attempt: int,
         remaining_cost: Decimal,
+        owner: str,
+        generation: int,
+        ownership_lost: asyncio.Event,
     ) -> tuple[str, AIUsage, Decimal]:
         """Validate, then perform bounded provider-neutral and metered repair attempts."""
         if request.response_mode is not ResponseMode.STRUCTURED:
@@ -1420,9 +1688,20 @@ class ReferenceAIGateway:
                             )
                         except TimeoutError:
                             raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=False) from None
-                    await self.store.record_provider_effect(
-                        invocation.invocation_id, effect_key=effect_key, result=repaired
+                    await self._fence(
+                        invocation.invocation_id,
+                        owner,
+                        generation,
+                        ownership_lost,
                     )
+                    await self.store.record_provider_effect(
+                        invocation.invocation_id,
+                        effect_key=effect_key,
+                        result=repaired,
+                        owner=owner,
+                        generation=generation,
+                    )
+                await self._fence(invocation.invocation_id, owner, generation, ownership_lost)
                 usage = repaired.usage or AIUsage(
                     self._estimate(repair_prompt), request.max_output_tokens, estimated=True
                 )
