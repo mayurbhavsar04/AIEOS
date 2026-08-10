@@ -48,9 +48,19 @@ authoritative. This implementation adds no canonical identity and changes no fro
 - restart recovery resumes by `AIInvocationId`; concurrent duplicate admission is serialized; usage
   events are idempotent; expiry/release and delayed reconciliation cannot double-charge an
   invocation.
-- structured validation has a finite repair limit; provider fallback is finite and remains inside
+- accepted nonterminal invocations use one durable execution owner, an expiring lease, and a
+  compare-and-set claim generation. Recovery reclaims stale leases and consumes durable
+  provider-effect/accounting evidence instead of blindly repeating completed work.
+- normalized terminal intent is separate from its authoritative checkpoint, so a transient
+  persistence failure remains recoverable and cannot escape the accepted public API as a raw error.
+- exact-cache identity is content-addressed from the canonical assembled request, including selected
+  and truncated context content, provenance/stage, both token bounds, policies, route constraints,
+  schema, locale, and deterministic parameters.
+- structured validation measures original and repaired canonical payloads, has a finite repair limit,
+  and admits every repair inside the remaining token/cost envelope; provider fallback remains inside
   one invocation.
-- stream deltas are observations; only the terminal Result is authoritative.
+- stream bounds are enforced before delta visibility and provider-reported partial usage is appended
+  monotonically before terminal completion; only the terminal Result is authoritative.
 - two deterministic mock adapters exercise different capability, cost, and latency profiles.
 
 ## Compatibility
@@ -74,8 +84,9 @@ routing, constraints, token limits, context minimization, fresh cache lineage, s
 budget idempotency, bounded fallback/repair, streaming, error normalization, safe observability,
 host execution, and no external network or credential requirement. Mandatory real-PostgreSQL tests
 also prove migration parity and downgrade/upgrade, restart recovery at every durable boundary,
-concurrent admission, partial and delayed usage, reservation expiry/release, terminal replay, and no
-double charging; CI treats any critical PostgreSQL skip as a failure. Repository formatting,
+concurrent admission and execution, stale-lease reclamation, recoverable terminalization, partial and
+delayed usage, reservation expiry/release, terminal replay, and no double charging; CI treats any
+critical PostgreSQL skip as a failure. Repository formatting,
 linting, strict typing, security, secrets, dependency boundaries, documentation, frozen-baseline
 checks, coverage, and `git diff --check` MUST pass.
 

@@ -3,7 +3,7 @@ title: AI Gateway Reference Implementation
 version: 1.0
 status: Draft
 owner: AI Gateway
-last_updated: 2026-08-03
+last_updated: 2026-08-10
 ---
 
 # AI Gateway Reference Implementation
@@ -19,7 +19,7 @@ frozen [AI Gateway architecture](../architecture/AIGatewayArchitecture.md) witho
 ```mermaid
 flowchart LR
     HOST["Reference host"] --> GW["ReferenceAIGateway"]
-    GW --> STORE["Atomic reference state"]
+    GW --> STORE["Atomic reference state / PostgreSQL"]
     GW --> CATALOG["Gateway-internal model catalog"]
     GW --> PROMPT["Minimum-context assembler"]
     GW --> CACHE["Scoped exact cache"]
@@ -33,6 +33,9 @@ flowchart LR
 and `stream` operations for conformance tests and the reference host. `ReferenceGatewayStore`
 atomically owns admission replay, invocation records, budget reservations, exact content cache, and
 usage reconciliation for the offline runtime. It is an adapter seam, not a new platform component.
+`PostgresAIGatewayStore` implements the same port with durable compare-and-set execution claims,
+expiring leases, claim generations, provider-effect evidence, monotonic usage events, recoverable
+terminal intents, and exactly-once authoritative terminal checkpoints.
 
 ## Invocation flow
 
@@ -48,15 +51,18 @@ sequenceDiagram
     G-->>C: immutable acknowledgement Result
     G->>G: policy, context, routing
     G->>S: reserve under AIInvocationId
-    G->>A: normalized mock invocation
+    G->>S: claim lease + prepare effect key
+    G->>A: normalized mock invocation + effect key
     A-->>G: normalized content and usage
-    G->>S: reconcile once
+    G->>S: effect evidence + monotonic reconciliation
+    G->>S: terminal intent + terminal checkpoint
     G-->>C: fresh immutable terminal Result
 ```
 
 Admission replay is keyed by Tenant/Workspace and scoped `IdempotencyKey`; payload mismatch fails.
-Every post-acceptance budget transition is keyed by `AIInvocationId`. Workflow retry remains outside
-the Gateway.
+Every post-acceptance budget transition is keyed by `AIInvocationId`. A stale execution lease can be
+reclaimed, but recovery continues the same invocation and never becomes a Workflow retry decision.
+Concurrent workers either own the active claim or wait for its immutable terminal outcome.
 
 ## Routing and token minimization
 
@@ -68,16 +74,21 @@ truncated before mandatory policy/evidence content.
 
 ## Cache and lineage
 
-The exact cache key includes scope, template version, normalized task content, capability set,
-selected context-version digest, schema, safety policy, locale, and output limit. Values contain only
-validated content, usage, expiry, and bounded provenance. A hit follows acceptance and creates a new
-`AIInvocationId` and `ResultId`; prior authoritative identity or causation is never reused.
+The exact cache key includes scope, template version, the exact canonical assembled system/task and
+selected/truncated context content, context provenance and stage, input/output bounds, capability and
+route constraints, schema, safety/data/cache policy, locale, and deterministic parameters. Values
+contain only validated content, usage, expiry, and bounded provenance. A hit follows acceptance and
+creates a new `AIInvocationId` and `ResultId`; prior authoritative identity or causation is never
+reused.
 
 ## Structured and streaming paths
 
-Structured JSON is validated outside the mock model. A malformed value receives at most the configured
-repair attempts and repair cannot weaken policy/schema. Streaming produces acknowledgement, stream
-start, ordered deltas, usage, and one terminal Result. Deltas are never authoritative.
+Structured JSON is validated and measured outside the mock model before success. A malformed value
+receives at most the configured repair attempts; every repair is admitted against the remaining token
+and invocation cost envelope and its actual usage is reconciled. Streaming checks the cumulative
+output bound before exposing each delta and durably records monotonic provider usage as it arrives.
+Provider-reported partial usage outranks later estimates. Streaming produces acknowledgement, stream
+start, ordered deltas, usage, and one terminal Result; deltas are never authoritative.
 
 ## Mock provider matrix
 
@@ -94,7 +105,5 @@ Result, route, usage, and cache metadata; it does not expose provider objects or
 
 ## Deferred work
 
-Production provider adapters, durable Gateway storage, semantic cache, embeddings/vector retrieval,
-provider tokenizer calibration, tool execution, product prompts, and AI Employee logic require later
-reviewed milestones.
-
+Production provider adapters, semantic cache, embeddings/vector retrieval, provider tokenizer
+calibration, tool execution, product prompts, and AI Employee logic require later reviewed milestones.

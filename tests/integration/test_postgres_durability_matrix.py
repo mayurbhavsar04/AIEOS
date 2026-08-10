@@ -180,6 +180,125 @@ async def test_ai_gateway_concurrent_duplicate_admission_survives_workers(
     assert one.replay is not two.replay
 
 
+async def test_ai_gateway_concurrent_invoke_has_one_durable_execution_owner(
+    database: PostgresDatabase,
+) -> None:
+    first, first_provider, _ = durable_ai_gateway(database)
+    second, second_provider, _ = durable_ai_gateway(database)
+    one, two = await asyncio.gather(
+        first.invoke(ai_request(idempotency_key="concurrent-execution")),
+        second.invoke(
+            ai_request(
+                command_id="redelivered-concurrent-execution",
+                idempotency_key="concurrent-execution",
+            )
+        ),
+    )
+    assert first_provider.calls + second_provider.calls == 1
+    assert one.ai_invocation_id == two.ai_invocation_id
+    assert one.result.result_id == two.result.result_id
+
+
+async def test_ai_gateway_stale_execution_lease_is_reclaimable(
+    database: PostgresDatabase,
+) -> None:
+    gateway, _, store = durable_ai_gateway(database)
+    accepted = await gateway.accept(ai_request(idempotency_key="stale-execution"))
+    now = datetime(2026, 8, 10, tzinfo=UTC)
+    first_generation = await store.claim_execution(
+        accepted.ai_invocation_id,
+        owner="crashed-worker",
+        now=now,
+        lease=timedelta(seconds=30),
+    )
+    assert first_generation == 1
+    competing = PostgresAIGatewayStore(database)
+    assert (
+        await competing.claim_execution(
+            accepted.ai_invocation_id,
+            owner="early-worker",
+            now=now + timedelta(seconds=29),
+            lease=timedelta(seconds=30),
+        )
+        is None
+    )
+    reclaimed = await competing.claim_execution(
+        accepted.ai_invocation_id,
+        owner="recovery-worker",
+        now=now + timedelta(seconds=31),
+        lease=timedelta(seconds=30),
+    )
+    assert reclaimed == 2
+
+
+async def test_ai_gateway_checkpoint_failure_returns_normalized_recoverable_terminal(
+    database: PostgresDatabase,
+) -> None:
+    class FailFirstCheckpointStore(PostgresAIGatewayStore):
+        failed = False
+
+        async def checkpoint(self, invocation: Any) -> None:
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("injected persistence checkpoint failure")
+            await super().checkpoint(invocation)
+
+    gateway, provider, _ = durable_ai_gateway(database)
+    failing = FailFirstCheckpointStore(database)
+    gateway.store = failing
+    failed = await gateway.invoke(ai_request(idempotency_key="checkpoint-failure"))
+    assert failed.result.result_status is ResultStatus.FAILED
+    assert provider.calls == 0
+
+    restarted, restarted_provider, _ = durable_ai_gateway(database)
+    recovered = await restarted.invoke(
+        ai_request(
+            command_id="checkpoint-failure-recovery",
+            idempotency_key="checkpoint-failure",
+        )
+    )
+    assert recovered.result.result_id == failed.result.result_id
+    assert restarted_provider.calls == 0
+
+
+async def test_ai_gateway_restart_reuses_completed_provider_effect_after_crash(
+    database: PostgresDatabase,
+) -> None:
+    class InjectedCrash(BaseException):
+        pass
+
+    class CrashAfterEffectStore(PostgresAIGatewayStore):
+        crashed = False
+
+        async def record_attempt(self, invocation_id: str, **values: Any) -> None:
+            if not self.crashed:
+                self.crashed = True
+                raise InjectedCrash
+            await super().record_attempt(invocation_id, **values)
+
+    gateway, provider, _ = durable_ai_gateway(database)
+    gateway.store = CrashAfterEffectStore(database)
+    with pytest.raises(InjectedCrash):
+        await gateway.invoke(ai_request(idempotency_key="provider-effect-crash"))
+    assert provider.calls == 1
+
+    restarted, restarted_provider, _ = durable_ai_gateway(database)
+    recovered = await restarted.invoke(
+        ai_request(
+            command_id="provider-effect-recovery",
+            idempotency_key="provider-effect-crash",
+        )
+    )
+    assert recovered.result.result_status is ResultStatus.SUCCEEDED
+    assert restarted_provider.calls == 0
+    async with database.transaction() as session:
+        budget = await session.get(
+            AIGatewayBudgetRow, ("tenant-1", "workspace-1", recovered.ai_invocation_id)
+        )
+        assert budget is not None
+        assert budget.state == "committed"
+
+
 async def test_ai_gateway_partial_delayed_usage_expiry_and_no_double_charge(
     database: PostgresDatabase,
 ) -> None:
@@ -276,8 +395,8 @@ async def test_migration_revision_readiness_and_schema_parity(
     assert await database.migration_readiness() == {
         "ready": True,
         "status": "compatible",
-        "expected_revision": "20260810_0002",
-        "deployed_revision": "20260810_0002",
+        "expected_revision": "20260810_0003",
+        "deployed_revision": "20260810_0003",
     }
     async with database.engine.connect() as connection:
         tables = await connection.run_sync(lambda sync: set(sync.dialect.get_table_names(sync)))
@@ -301,7 +420,7 @@ async def test_readiness_rejects_missing_behind_and_diverged_revision(
         await session.execute(text("UPDATE alembic_version SET version_num='diverged_revision'"))
     assert (await database.migration_readiness())["status"] == "ahead_or_diverged"
     async with database.transaction() as session:
-        await session.execute(text("UPDATE alembic_version SET version_num='20260810_0002'"))
+        await session.execute(text("UPDATE alembic_version SET version_num='20260810_0003'"))
 
 
 async def test_explicit_downgrade_and_upgrade_from_empty_database(
@@ -1239,7 +1358,7 @@ async def test_readiness_reports_unreachable_database_without_leaking_credential
         assert status == {
             "ready": False,
             "status": "database_unreachable",
-            "expected_revision": "20260810_0002",
+            "expected_revision": "20260810_0003",
         }
         assert "secret" not in repr(status)
     finally:

@@ -361,7 +361,7 @@ async def test_output_limit_and_midstream_failure_are_normalized() -> None:
     assert chunks[-1].kind == "terminal"
     assert chunks[-1].terminal is not None
     assert chunks[-1].terminal.result.result_status is ResultStatus.FAILED
-    assert chunks[-1].usage is not None and chunks[-1].usage.estimated is True
+    assert chunks[-1].usage is not None and chunks[-1].usage.estimated is False
     reservation = streaming.store.reservations[chunks[-1].ai_invocation_id]
     assert reservation.state == "committed" and reservation.actual is not None
 
@@ -483,3 +483,84 @@ async def test_observability_has_scoped_redacted_route_budget_cache_and_usage_ev
         "ai.provider.usage",
     } <= operations
     assert all("never-log-this" not in str(record) for record in recorder.records)
+
+
+@pytest.mark.anyio
+async def test_concurrent_invoke_has_one_execution_owner_and_provider_effect() -> None:
+    gateway, economy, _ = _gateway()
+    first, second = await asyncio.gather(
+        gateway.invoke(_request()),
+        gateway.invoke(_request(command_id="redelivered-command")),
+    )
+    assert economy.calls == 1
+    assert first.ai_invocation_id == second.ai_invocation_id
+    assert first.result.result_id == second.result.result_id
+
+
+@pytest.mark.anyio
+async def test_stream_rejects_over_cap_delta_before_caller_visibility() -> None:
+    gateway, _, _ = _gateway()
+    chunks = [chunk async for chunk in gateway.stream(_request(max_output_tokens=1))]
+    assert not any(chunk.kind == "content_delta" for chunk in chunks)
+    assert chunks[-1].terminal is not None
+    assert chunks[-1].terminal.result.result_status is ResultStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_cache_identity_uses_selected_content_and_input_bound() -> None:
+    gateway, economy, _ = _gateway()
+    context = (ContextItem("mutable-ref", "v1", "first content", 10, "evidence"),)
+    await gateway.invoke(_request(context_items=context, max_input_tokens=128))
+    changed = await gateway.invoke(
+        _request(
+            command_id="cache-content-change",
+            idempotency_key="cache-content-change",
+            context_items=(ContextItem("mutable-ref", "v1", "second content", 10, "evidence"),),
+            max_input_tokens=128,
+        )
+    )
+    bound = await gateway.invoke(
+        _request(
+            command_id="cache-bound-change",
+            idempotency_key="cache-bound-change",
+            context_items=context,
+            max_input_tokens=256,
+        )
+    )
+    same = await gateway.invoke(
+        _request(
+            command_id="cache-canonical-same",
+            idempotency_key="cache-canonical-same",
+            context_items=context,
+            max_input_tokens=128,
+        )
+    )
+    assert changed.cache_hit is False
+    assert bound.cache_hit is False
+    assert same.cache_hit is True
+    assert economy.calls == 3
+
+
+@pytest.mark.anyio
+async def test_structured_original_and_repaired_payloads_obey_output_cap() -> None:
+    direct, _, _ = _gateway()
+    oversized = await direct.invoke(
+        _request(
+            response_mode=ResponseMode.STRUCTURED,
+            output_schema_ref="answer-v1",
+            max_output_tokens=2,
+            repair_attempts=0,
+        )
+    )
+    assert oversized.result.result_status is ResultStatus.FAILED
+
+    repaired, provider, _ = _gateway(economy_behaviors=(MockProviderBehavior.MALFORMED,))
+    result = await repaired.invoke(
+        _request(
+            response_mode=ResponseMode.STRUCTURED,
+            output_schema_ref="answer-v1",
+            max_output_tokens=2,
+        )
+    )
+    assert provider.calls == 2
+    assert result.result.result_status is ResultStatus.FAILED

@@ -89,3 +89,12 @@ def test_ai_gateway_migration_is_explicit_reversible_and_indexed() -> None:
     assert "drop_all" not in source
     for purpose in ("replay", "recovery", "budget", "usage", "cache"):
         assert purpose in source
+
+    execution_migration = Path(
+        "adapters/persistence_postgres/migrations/versions/20260810_0003_ai_gateway_execution.py"
+    ).read_text()
+    assert execution_migration.count("op.add_column") == 6
+    assert execution_migration.count("op.drop_column") == 6
+    assert "execution_claim" in execution_migration
+    assert "create_all" not in execution_migration
+    assert "drop_all" not in execution_migration
