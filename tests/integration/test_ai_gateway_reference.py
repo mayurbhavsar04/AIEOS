@@ -542,6 +542,70 @@ async def test_cache_identity_uses_selected_content_and_input_bound() -> None:
 
 
 @pytest.mark.anyio
+async def test_cache_write_uses_final_progressive_context_and_route_identity() -> None:
+    gateway, economy, quality = _gateway(economy_behaviors=(MockProviderBehavior.LOW_CONFIDENCE,))
+    context = (
+        ContextItem("minimal", "v1", "minimum", 10, "initial"),
+        ContextItem("expanded", "v1", "expanded evidence", 1, "escalation"),
+    )
+    first = await gateway.invoke(_request(context_items=context, latency_tier=2))
+    assert first.route is not None and first.route.model_key == "quality-v1"
+
+    reproduced = await gateway.invoke(
+        _request(
+            command_id="expanded-replay",
+            idempotency_key="expanded-replay",
+            context_items=context,
+            latency_tier=2,
+        )
+    )
+    assert reproduced.cache_hit is True
+    assert reproduced.route is not None and reproduced.route.model_key == "quality-v1"
+    assert economy.calls == 1
+    assert quality.calls == 1
+
+    route_a_only = await gateway.invoke(
+        _request(
+            command_id="route-a-only",
+            idempotency_key="route-a-only",
+            context_items=context,
+            allowed_adapters=frozenset({"mock-economy"}),
+            latency_tier=2,
+        )
+    )
+    assert route_a_only.cache_hit is False
+    assert economy.calls == 2
+
+
+@pytest.mark.anyio
+async def test_cache_write_uses_successful_fallback_route() -> None:
+    gateway, economy, quality = _gateway(
+        economy_behaviors=(MockProviderBehavior.TRANSIENT_FAILURE,)
+    )
+    first = await gateway.invoke(_request(latency_tier=2))
+    assert first.route is not None and first.route.model_key == "quality-v1"
+
+    route_a_only = await gateway.invoke(
+        _request(
+            command_id="fallback-route-a-only",
+            idempotency_key="fallback-route-a-only",
+            allowed_adapters=frozenset({"mock-economy"}),
+            latency_tier=2,
+        )
+    )
+    assert route_a_only.cache_hit is False
+
+    fallback_identity = await gateway.invoke(
+        _request(command_id="fallback-hit", idempotency_key="fallback-hit", latency_tier=2)
+    )
+    assert fallback_identity.cache_hit is True
+    assert fallback_identity.route is not None
+    assert fallback_identity.route.model_key == "quality-v1"
+    assert economy.calls == 2
+    assert quality.calls == 1
+
+
+@pytest.mark.anyio
 async def test_structured_original_and_repaired_payloads_obey_output_cap() -> None:
     direct, _, _ = _gateway()
     oversized = await direct.invoke(

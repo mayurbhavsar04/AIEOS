@@ -16,11 +16,11 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from pydantic import SecretStr
-from sqlalchemy import func, insert, select, text
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.exc import IntegrityError
 
-from aieos.adapters.ai_mock import DeterministicMockProvider
+from aieos.adapters.ai_mock import DeterministicMockProvider, MockProviderBehavior
 from aieos.adapters.event_bus_in_process import InProcessEventBus
 from aieos.adapters.observability_default import InMemoryObservationRecorder
 from aieos.adapters.persistence_postgres import (
@@ -31,7 +31,9 @@ from aieos.adapters.persistence_postgres import (
     PostgresWorkflowRepository,
 )
 from aieos.adapters.persistence_postgres.models import (
+    AIGatewayAttemptRow,
     AIGatewayBudgetRow,
+    AIGatewayInvocationRow,
     Base,
     CommandIdempotencyRow,
     DecisionEvidenceRow,
@@ -43,7 +45,16 @@ from aieos.adapters.persistence_postgres.models import (
     WorkflowRow,
     WorkflowStepRow,
 )
-from aieos.ai_gateway import AIInvocationRequest, AIUsage, ModelCatalogEntry, ReferenceAIGateway
+from aieos.ai_gateway import (
+    AIInvocationRequest,
+    AIUsage,
+    ModelCatalogEntry,
+    ProviderResult,
+    ReferenceAIGateway,
+    ResponseMode,
+    RouteDecision,
+)
+from aieos.ai_gateway.gateway import ExecutionOwnershipLost
 from aieos.contracts import AuthorizationContext, ResultEnvelope, ResultStatus
 from aieos.contracts.events import EventEnvelope, EventMetadata
 from aieos.security_support import ScopeAuthorizer
@@ -122,13 +133,18 @@ def ai_request(**overrides: object) -> AIInvocationRequest:
 
 def durable_ai_gateway(
     database: PostgresDatabase,
+    *,
+    provider: DeterministicMockProvider | None = None,
+    clock: Any | None = None,
+    execution_lease: timedelta = timedelta(seconds=30),
+    heartbeat_interval: float = 10.0,
 ) -> tuple[ReferenceAIGateway, DeterministicMockProvider, PostgresAIGatewayStore]:
-    clock = DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
+    effective_clock: Any = clock or DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
     identifiers = DeterministicIdentifiers()
-    provider = DeterministicMockProvider("mock", prefix="Durable")
+    provider = provider or DeterministicMockProvider("mock", prefix="Durable")
     store = PostgresAIGatewayStore(database)
     gateway = ReferenceAIGateway(
-        clock=clock,
+        clock=effective_clock,
         identifiers=identifiers,
         authorizer=ScopeAuthorizer(),
         observations=InMemoryObservationRecorder(identifiers),
@@ -148,6 +164,8 @@ def durable_ai_gateway(
             ),
         ),
         adapters={"mock": provider},
+        execution_lease=execution_lease,
+        heartbeat_interval=heartbeat_interval,
     )
     return gateway, provider, store
 
@@ -231,6 +249,176 @@ async def test_ai_gateway_stale_execution_lease_is_reclaimable(
     assert reclaimed == 2
 
 
+async def test_ai_gateway_lease_renewal_blocks_reclaim_beyond_original_ttl(
+    database: PostgresDatabase,
+) -> None:
+    gateway, _, store = durable_ai_gateway(database)
+    accepted = await gateway.accept(ai_request(idempotency_key="renewed-execution"))
+    started = datetime(2026, 8, 10, tzinfo=UTC)
+    generation = await store.claim_execution(
+        accepted.ai_invocation_id,
+        owner="slow-worker",
+        now=started,
+        lease=timedelta(seconds=30),
+    )
+    assert generation == 1
+    assert await store.renew_execution(
+        accepted.ai_invocation_id,
+        owner="slow-worker",
+        generation=generation,
+        now=started + timedelta(seconds=25),
+        lease=timedelta(seconds=30),
+    )
+    competitor = PostgresAIGatewayStore(database)
+    assert (
+        await competitor.claim_execution(
+            accepted.ai_invocation_id,
+            owner="competitor",
+            now=started + timedelta(seconds=31),
+            lease=timedelta(seconds=30),
+        )
+        is None
+    )
+
+
+async def test_ai_gateway_slow_active_provider_is_heartbeat_renewed(
+    database: PostgresDatabase,
+) -> None:
+    class RealtimeClock:
+        def now(self) -> datetime:
+            return datetime.now(UTC)
+
+    class SlowProvider(DeterministicMockProvider):
+        async def invoke(self, **values: Any) -> ProviderResult:
+            await asyncio.sleep(0.25)
+            return await super().invoke(**values)
+
+    lease = timedelta(seconds=0.1)
+    first_provider = SlowProvider("mock", prefix="Slow")
+    first, _, _ = durable_ai_gateway(
+        database,
+        provider=first_provider,
+        clock=RealtimeClock(),
+        execution_lease=lease,
+        heartbeat_interval=0.02,
+    )
+    second, second_provider, _ = durable_ai_gateway(
+        database,
+        clock=RealtimeClock(),
+        execution_lease=lease,
+        heartbeat_interval=0.02,
+    )
+    first_task = asyncio.create_task(
+        first.invoke(ai_request(idempotency_key="slow-heartbeat-provider"))
+    )
+    await asyncio.sleep(0.14)
+    second_task = asyncio.create_task(
+        second.invoke(
+            ai_request(
+                command_id="slow-heartbeat-competitor",
+                idempotency_key="slow-heartbeat-provider",
+            )
+        )
+    )
+    one, two = await asyncio.gather(first_task, second_task)
+    assert one.result.result_status is ResultStatus.SUCCEEDED
+    assert two.result.result_id == one.result.result_id
+    assert first_provider.calls == 1
+    assert second_provider.calls == 0
+
+
+async def test_ai_gateway_reclaim_increments_generation_and_fences_stale_effect(
+    database: PostgresDatabase,
+) -> None:
+    gateway, _, store = durable_ai_gateway(database)
+    accepted = await gateway.accept(ai_request(idempotency_key="fenced-effect"))
+    invocation = await store.load(accepted.ai_invocation_id)
+    invocation.route = RouteDecision(
+        "route:test",
+        "model-v1",
+        "mock",
+        ("model-v1",),
+        {},
+        Decimal("0.01"),
+        "test route",
+    )
+    started = datetime(2026, 8, 10, tzinfo=UTC)
+    first = await store.claim_execution(
+        accepted.ai_invocation_id,
+        owner="first",
+        now=started,
+        lease=timedelta(seconds=1),
+    )
+    assert first == 1
+    invocation.execution_owner = "first"
+    invocation.claim_generation = first
+    await store.checkpoint(invocation)
+    second_store = PostgresAIGatewayStore(database)
+    second = await second_store.claim_execution(
+        accepted.ai_invocation_id,
+        owner="second",
+        now=started + timedelta(seconds=2),
+        lease=timedelta(seconds=30),
+    )
+    assert second == 2
+    with pytest.raises(ExecutionOwnershipLost):
+        await store.record_provider_effect(
+            accepted.ai_invocation_id,
+            effect_key=f"{accepted.ai_invocation_id}:provider:1",
+            result=ProviderResult("stale", AIUsage(1, 1)),
+            owner="first",
+            generation=first,
+        )
+    with pytest.raises(ExecutionOwnershipLost):
+        await store.record_usage(
+            accepted.ai_invocation_id,
+            usage=AIUsage(1, 1),
+            cost=Decimal("0.01"),
+            event_key="stale-accounting",
+            kind="actual",
+            final=True,
+            owner="first",
+            generation=first,
+        )
+    with pytest.raises(RuntimeError, match="checkpoint failed"):
+        await store.checkpoint(invocation)
+    async with database.transaction() as session:
+        effects = await session.scalar(select(func.count()).select_from(AIGatewayAttemptRow))
+    assert effects == 0
+
+
+async def test_ai_gateway_concurrent_reclaim_race_has_one_generation_winner(
+    database: PostgresDatabase,
+) -> None:
+    gateway, _, store = durable_ai_gateway(database)
+    accepted = await gateway.accept(ai_request(idempotency_key="reclaim-race"))
+    started = datetime(2026, 8, 10, tzinfo=UTC)
+    assert (
+        await store.claim_execution(
+            accepted.ai_invocation_id,
+            owner="crashed",
+            now=started,
+            lease=timedelta(seconds=1),
+        )
+        == 1
+    )
+    one, two = await asyncio.gather(
+        PostgresAIGatewayStore(database).claim_execution(
+            accepted.ai_invocation_id,
+            owner="reclaimer-one",
+            now=started + timedelta(seconds=2),
+            lease=timedelta(seconds=30),
+        ),
+        PostgresAIGatewayStore(database).claim_execution(
+            accepted.ai_invocation_id,
+            owner="reclaimer-two",
+            now=started + timedelta(seconds=2),
+            lease=timedelta(seconds=30),
+        ),
+    )
+    assert sorted(value for value in (one, two) if value is not None) == [2]
+
+
 async def test_ai_gateway_checkpoint_failure_returns_normalized_recoverable_terminal(
     database: PostgresDatabase,
 ) -> None:
@@ -297,6 +485,218 @@ async def test_ai_gateway_restart_reuses_completed_provider_effect_after_crash(
         )
         assert budget is not None
         assert budget.state == "committed"
+
+
+async def test_ai_gateway_stream_crash_after_durable_chunk_recovers_once(
+    database: PostgresDatabase,
+) -> None:
+    class InjectedCrash(BaseException):
+        pass
+
+    class CrashAfterChunkStore(PostgresAIGatewayStore):
+        crashed = False
+
+        async def checkpoint(self, invocation: Any) -> None:
+            await super().checkpoint(invocation)
+            if invocation.stream_content and not self.crashed:
+                self.crashed = True
+                raise InjectedCrash
+
+    gateway, provider, _ = durable_ai_gateway(database)
+    gateway.store = CrashAfterChunkStore(database)
+    with pytest.raises(InjectedCrash):
+        async for _ in gateway.stream(ai_request(idempotency_key="stream-chunk-crash")):
+            pass
+    assert provider.calls == 1
+    async with database.transaction() as session:
+        await session.execute(
+            update(AIGatewayInvocationRow)
+            .where(AIGatewayInvocationRow.idempotency_key == "stream-chunk-crash")
+            .values(execution_lease_expires_at=datetime(2026, 8, 9, tzinfo=UTC))
+        )
+
+    restarted, restarted_provider, _ = durable_ai_gateway(database)
+    chunks = [
+        chunk
+        async for chunk in restarted.stream(
+            ai_request(
+                command_id="stream-chunk-recovery",
+                idempotency_key="stream-chunk-crash",
+            )
+        )
+    ]
+    terminals = [chunk for chunk in chunks if chunk.kind == "terminal"]
+    assert len(terminals) == 1
+    assert terminals[0].terminal is not None
+    assert terminals[0].terminal.result.result_status is ResultStatus.FAILED
+    assert restarted_provider.calls == 0
+
+
+async def test_ai_gateway_stream_terminal_checkpoint_failure_replays_same_result(
+    database: PostgresDatabase,
+) -> None:
+    class FailTerminalCheckpointStore(PostgresAIGatewayStore):
+        failed = False
+
+        async def checkpoint(self, invocation: Any) -> None:
+            if invocation.terminal is not None and not self.failed:
+                self.failed = True
+                raise RuntimeError("injected streaming terminal checkpoint failure")
+            await super().checkpoint(invocation)
+
+    gateway, _, _ = durable_ai_gateway(database)
+    gateway.store = FailTerminalCheckpointStore(database)
+    first = [
+        chunk
+        async for chunk in gateway.stream(ai_request(idempotency_key="stream-terminal-failure"))
+    ]
+    first_terminal = first[-1].terminal
+    assert first_terminal is not None
+    assert first_terminal.result.result_status is ResultStatus.SUCCEEDED
+
+    restarted, restarted_provider, _ = durable_ai_gateway(database)
+    replay = [
+        chunk
+        async for chunk in restarted.stream(
+            ai_request(
+                command_id="stream-terminal-recovery",
+                idempotency_key="stream-terminal-failure",
+            )
+        )
+    ]
+    assert replay[-1].terminal is not None
+    assert replay[-1].terminal.result.result_id == first_terminal.result.result_id
+    assert restarted_provider.calls == 0
+
+
+async def test_ai_gateway_structured_repair_crash_before_effect_recording_reuses_effect(
+    database: PostgresDatabase,
+) -> None:
+    class InjectedCrash(BaseException):
+        pass
+
+    class CrashBeforeRepairEffectRecord(PostgresAIGatewayStore):
+        async def record_provider_effect(self, invocation_id: str, **values: Any) -> None:
+            if ":repair:" in str(values["effect_key"]):
+                raise InjectedCrash
+            await super().record_provider_effect(invocation_id, **values)
+
+    provider = DeterministicMockProvider(
+        "mock", prefix="Durable", behaviors=(MockProviderBehavior.MALFORMED,)
+    )
+    gateway, _, _ = durable_ai_gateway(database, provider=provider)
+    gateway.store = CrashBeforeRepairEffectRecord(database)
+    request = ai_request(
+        idempotency_key="repair-pre-record-crash",
+        response_mode=ResponseMode.STRUCTURED,
+        output_schema_ref="answer-v1",
+    )
+    with pytest.raises(InjectedCrash):
+        await gateway.invoke(request)
+    assert provider.calls == 2
+    async with database.transaction() as session:
+        await session.execute(
+            update(AIGatewayInvocationRow)
+            .where(AIGatewayInvocationRow.idempotency_key == "repair-pre-record-crash")
+            .values(execution_lease_expires_at=datetime(2026, 8, 9, tzinfo=UTC))
+        )
+
+    restarted, _, _ = durable_ai_gateway(database, provider=provider)
+    recovered = await restarted.invoke(replace(request, command_id="repair-pre-record-recovery"))
+    assert recovered.result.result_status is ResultStatus.SUCCEEDED
+    assert provider.calls == 2
+
+
+async def test_ai_gateway_structured_repair_effect_crash_reconciles_without_double_charge(
+    database: PostgresDatabase,
+) -> None:
+    class InjectedCrash(BaseException):
+        pass
+
+    class CrashAfterRepairEffect(PostgresAIGatewayStore):
+        async def record_attempt(self, invocation_id: str, **values: Any) -> None:
+            if int(values["attempt_number"]) >= 100:
+                raise InjectedCrash
+            await super().record_attempt(invocation_id, **values)
+
+    provider = DeterministicMockProvider(
+        "mock", prefix="Durable", behaviors=(MockProviderBehavior.MALFORMED,)
+    )
+    gateway, _, _ = durable_ai_gateway(database, provider=provider)
+    gateway.store = CrashAfterRepairEffect(database)
+    request = ai_request(
+        idempotency_key="repair-post-effect-crash",
+        response_mode=ResponseMode.STRUCTURED,
+        output_schema_ref="answer-v1",
+        max_total_cost=Decimal("0.05"),
+    )
+    with pytest.raises(InjectedCrash):
+        await gateway.invoke(request)
+    async with database.transaction() as session:
+        await session.execute(
+            update(AIGatewayInvocationRow)
+            .where(AIGatewayInvocationRow.idempotency_key == "repair-post-effect-crash")
+            .values(execution_lease_expires_at=datetime(2026, 8, 9, tzinfo=UTC))
+        )
+
+    restarted, _, _ = durable_ai_gateway(database, provider=provider)
+    recovered = await restarted.invoke(replace(request, command_id="repair-effect-recovery"))
+    assert recovered.result.result_status is ResultStatus.SUCCEEDED
+    assert provider.calls == 2
+    async with database.transaction() as session:
+        budget = await session.get(
+            AIGatewayBudgetRow, ("tenant-1", "workspace-1", recovered.ai_invocation_id)
+        )
+        assert budget is not None
+        assert budget.actual_amount is not None
+        assert budget.actual_amount <= request.max_total_cost
+
+
+async def test_ai_gateway_repair_reservation_expiry_releases_after_crash(
+    database: PostgresDatabase,
+) -> None:
+    gateway, _, store = durable_ai_gateway(database)
+    accepted = await gateway.accept(ai_request(idempotency_key="repair-reservation-expiry"))
+    await store.reserve(
+        accepted.ai_invocation_id,
+        "tenant-1",
+        "workspace-1",
+        Decimal("0.05"),
+        now=datetime(2026, 8, 10, tzinfo=UTC),
+        pricing_version="price-v1",
+    )
+    released = await PostgresAIGatewayStore(database).release_expired(
+        now=datetime(2026, 8, 10, 0, 6, tzinfo=UTC)
+    )
+    assert released == (accepted.ai_invocation_id,)
+
+
+async def test_ai_gateway_repair_and_fallback_cumulative_cap_survives_restart(
+    database: PostgresDatabase,
+) -> None:
+    provider = DeterministicMockProvider(
+        "mock",
+        prefix="Durable",
+        behaviors=(MockProviderBehavior.MALFORMED,),
+    )
+    gateway, _, _ = durable_ai_gateway(database, provider=provider)
+    request = ai_request(
+        idempotency_key="repair-cumulative-cap",
+        response_mode=ResponseMode.STRUCTURED,
+        output_schema_ref="answer-v1",
+        max_total_cost=Decimal("0.05"),
+    )
+    response = await gateway.invoke(request)
+    assert response.result.result_status is ResultStatus.SUCCEEDED
+    replayed, _, _ = durable_ai_gateway(database, provider=provider)
+    replay = await replayed.invoke(replace(request, command_id="repair-cap-replay"))
+    assert replay.result.result_id == response.result.result_id
+    async with database.transaction() as session:
+        budget = await session.get(
+            AIGatewayBudgetRow, ("tenant-1", "workspace-1", response.ai_invocation_id)
+        )
+        assert budget is not None and budget.actual_amount is not None
+        assert budget.actual_amount <= request.max_total_cost
 
 
 async def test_ai_gateway_partial_delayed_usage_expiry_and_no_double_charge(
