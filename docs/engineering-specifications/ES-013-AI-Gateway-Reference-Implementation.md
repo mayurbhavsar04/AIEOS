@@ -5,7 +5,7 @@ status: Draft
 owner: CTO / Architect
 implementer: Engineer (Codex)
 milestone: 6 Phase 2
-last_updated: 2026-08-03
+last_updated: 2026-08-10
 ---
 
 # ES-013 — AI Gateway Reference Implementation
@@ -42,6 +42,12 @@ authoritative. This implementation adds no canonical identity and changes no fro
   a fresh invocation and Result lineage.
 - hierarchical reference reservations use `AIInvocationId` for idempotent post-acceptance
   reconciliation and never create a canonical reservation identity.
+- PostgreSQL durably records scoped acceptance/replay fingerprints, lifecycle and routing evidence,
+  hierarchical reservation snapshots, provider attempts, incremental/delayed usage, terminal
+  Result/Error references, and correctness-critical exact-cache metadata.
+- restart recovery resumes by `AIInvocationId`; concurrent duplicate admission is serialized; usage
+  events are idempotent; expiry/release and delayed reconciliation cannot double-charge an
+  invocation.
 - structured validation has a finite repair limit; provider fallback is finite and remains inside
   one invocation.
 - stream deltas are observations; only the terminal Result is authoritative.
@@ -66,14 +72,17 @@ quality, safety, capability, residency, or schema requirement.
 The milestone is complete only when offline tests prove identity ownership, lifecycle order,
 routing, constraints, token limits, context minimization, fresh cache lineage, scope isolation,
 budget idempotency, bounded fallback/repair, streaming, error normalization, safe observability,
-host execution, and no external network or credential requirement. Repository formatting, linting,
-strict typing, security, secrets, dependency boundaries, documentation, frozen-baseline checks,
-coverage, and `git diff --check` MUST pass.
+host execution, and no external network or credential requirement. Mandatory real-PostgreSQL tests
+also prove migration parity and downgrade/upgrade, restart recovery at every durable boundary,
+concurrent admission, partial and delayed usage, reservation expiry/release, terminal replay, and no
+double charging; CI treats any critical PostgreSQL skip as a failure. Repository formatting,
+linting, strict typing, security, secrets, dependency boundaries, documentation, frozen-baseline
+checks, coverage, and `git diff --check` MUST pass.
 
 ## Known limitations and deferrals
 
-- The reference state store is process-local; a production durable adapter follows the existing
-  PostgreSQL patterns in a separately governed milestone.
+- In-memory storage remains available only for deterministic offline composition; PostgreSQL mode
+  uses the durable Gateway adapter and explicit Alembic schema.
 - Token estimation is deterministic and conservative, not a provider tokenizer.
 - The exact cache is implemented; semantic/vector cache remains prohibited.
 - Mock streaming is deterministic and offline; real provider backpressure/protocol mapping is
@@ -87,4 +96,3 @@ coverage, and `git diff --check` MUST pass.
 - all frozen baselines remain byte-for-byte unchanged;
 - canonical repository validation passes; and
 - no merge, tag, release, production provider call, or credential is introduced.
-
