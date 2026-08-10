@@ -6,14 +6,15 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from decimal import Decimal
+from enum import StrEnum
 
 from aieos.ai_gateway import (
     AIInvocationRequest,
     AIInvocationResponse,
     AIUsage,
-    ProviderBehavior,
     ProviderFailure,
     ProviderResult,
+    ProviderStreamEvent,
 )
 from aieos.contracts import (
     ErrorCategory,
@@ -87,55 +88,98 @@ class MockAIGateway:
         return AIInvocationResponse(invocation_id, result, content=content)
 
 
+class MockProviderBehavior(StrEnum):
+    SUCCESS = "success"
+    TRANSIENT_FAILURE = "transient_failure"
+    PERMANENT_FAILURE = "permanent_failure"
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+    MALFORMED = "malformed"
+    LOW_CONFIDENCE = "low_confidence"
+    MISSING_USAGE = "missing_usage"
+    MID_STREAM_FAILURE = "mid_stream_failure"
+
+
 class DeterministicMockProvider:
     """Configurable provider adapter that never performs network I/O."""
 
-    def __init__(self, key: str, *, prefix: str, transient_failures: int = 0) -> None:
+    def __init__(
+        self,
+        key: str,
+        *,
+        prefix: str,
+        transient_failures: int = 0,
+        behaviors: tuple[MockProviderBehavior, ...] = (),
+    ) -> None:
         self.key = key
         self.prefix = prefix
         self.transient_failures = transient_failures
         self.calls = 0
+        self.prompts: list[str] = []
+        self._behaviors = list(behaviors)
+
+    def _behavior(self) -> MockProviderBehavior:
+        return self._behaviors.pop(0) if self._behaviors else MockProviderBehavior.SUCCESS
 
     async def invoke(
         self, *, model_key: str, prompt: str, request: AIInvocationRequest
     ) -> ProviderResult:
         self.calls += 1
+        self.prompts.append(prompt)
+        failure_usage = AIUsage(input_tokens=max(1, len(prompt.encode()) // 4), output_tokens=0)
         if self.transient_failures:
             self.transient_failures -= 1
-            raise ProviderFailure("AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True)
-        behavior = request.behavior
-        if behavior is ProviderBehavior.TRANSIENT_FAILURE:
-            raise ProviderFailure("AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True)
-        if behavior in {ProviderBehavior.PERMANENT_FAILURE, ProviderBehavior.POLICY_REJECTION}:
-            raise ProviderFailure("AI_PROVIDER_REJECTED", retryable=False)
-        if behavior is ProviderBehavior.TIMEOUT:
+            raise ProviderFailure(
+                "AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True, usage=failure_usage
+            )
+        behavior = self._behavior()
+        if behavior is MockProviderBehavior.TRANSIENT_FAILURE:
+            raise ProviderFailure(
+                "AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True, usage=failure_usage
+            )
+        if behavior is MockProviderBehavior.PERMANENT_FAILURE:
+            raise ProviderFailure("AI_PROVIDER_REJECTED", retryable=False, usage=failure_usage)
+        if behavior is MockProviderBehavior.TIMEOUT:
             raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=True)
-        if behavior is ProviderBehavior.CANCELLED:
+        if behavior is MockProviderBehavior.CANCELLED:
             raise ProviderFailure("AI_PROVIDER_CANCELLED", retryable=False)
-        if behavior is ProviderBehavior.MALFORMED:
+        if behavior is MockProviderBehavior.MALFORMED:
             content = "not-json"
-        elif behavior is ProviderBehavior.STRUCTURED or request.output_schema_ref:
+        elif request.output_schema_ref:
             content = json.dumps({"answer": request.prompt.strip(), "model": model_key})
         else:
             content = f"{self.prefix}: {request.prompt.strip()}"
         usage = None
-        if behavior is not ProviderBehavior.MISSING_USAGE:
+        if behavior is not MockProviderBehavior.MISSING_USAGE:
             usage = AIUsage(
                 input_tokens=max(1, len(prompt.encode()) // 4),
                 output_tokens=max(1, len(content.encode()) // 4),
             )
         confidence = (
-            Decimal("0.25") if behavior is ProviderBehavior.LOW_CONFIDENCE else Decimal("1")
+            Decimal("0.25") if behavior is MockProviderBehavior.LOW_CONFIDENCE else Decimal("1")
         )
         return ProviderResult(content, usage, confidence=confidence)
 
     async def stream(
         self, *, model_key: str, prompt: str, request: AIInvocationRequest
-    ) -> AsyncIterator[str]:
-        result = await self.invoke(model_key=model_key, prompt=prompt, request=request)
-        for word in result.content.split():
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        self.calls += 1
+        self.prompts.append(prompt)
+        behavior = self._behavior()
+        content = f"{self.prefix}: {request.prompt.strip()}"
+        for index, word in enumerate(content.split()):
             await asyncio.sleep(0)
-            yield word + " "
+            if behavior is MockProviderBehavior.MID_STREAM_FAILURE and index == 1:
+                raise ProviderFailure("AI_PROVIDER_STREAM_FAILED", retryable=False)
+            yield ProviderStreamEvent("content_delta", content=word + " ")
+        if behavior is not MockProviderBehavior.MISSING_USAGE:
+            yield ProviderStreamEvent(
+                "usage",
+                usage=AIUsage(
+                    input_tokens=max(1, len(prompt.encode()) // 4),
+                    output_tokens=max(1, len(content.encode()) // 4),
+                ),
+            )
 
 
-__all__ = ("DeterministicMockProvider", "MockAIGateway")
+__all__ = ("DeterministicMockProvider", "MockAIGateway", "MockProviderBehavior")

@@ -121,6 +121,7 @@ name = "aieos-adapter-persistence-postgres"
 version = "0.0.0"
 source = { editable = "adapters/persistence_postgres" }
 dependencies = [
+    { name = "aieos-ai-gateway" },
     { name = "aieos-contracts" },
     { name = "aieos-domain" },
     { name = "aieos-event-bus" },
@@ -135,6 +136,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aieos-ai-gateway", editable = "packages/ai_gateway" },
     { name = "aieos-contracts", editable = "packages/contracts" },
     { name = "aieos-domain", editable = "packages/domain" },
     { name = "aieos-event-bus", editable = "packages/event_bus" },

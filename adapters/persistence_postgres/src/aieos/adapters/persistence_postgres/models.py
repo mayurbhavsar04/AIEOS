@@ -1,6 +1,7 @@
 """Private SQLAlchemy persistence types; runtime ports never expose these rows."""
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
@@ -10,6 +11,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -236,3 +238,158 @@ class MemoryRecordRow(Scoped, Base):
         DateTime(timezone=True), server_default=func.now()
     )
     __table_args__ = (CheckConstraint("version > 0"),)
+
+
+class AIGatewayInvocationRow(Scoped, Base):
+    __tablename__ = "ai_gateway_invocations"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    ai_invocation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    intent_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    request_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledgement_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    route_payload: Mapped[str | None] = mapped_column(Text)
+    terminal_payload: Mapped[str | None] = mapped_column(Text)
+    terminal_result_id: Mapped[str | None] = mapped_column(String(128))
+    terminal_error_id: Mapped[str | None] = mapped_column(String(128))
+    accepted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "idempotency_key",
+            name="uq_ai_gateway_scoped_idempotency",
+        ),
+        CheckConstraint(
+            "state IN ('Requested','PolicyValidated','ProviderSelected','Prepared',"
+            "'Invoked','Streaming','Retrying','Succeeded','Failed','TimedOut','Cancelled')",
+            name="ck_ai_gateway_invocation_state",
+        ),
+        Index(
+            "ix_ai_gateway_invocation_recovery",
+            "tenant_id",
+            "workspace_id",
+            "state",
+            "updated_at",
+        ),
+        Index(
+            "ix_ai_gateway_invocation_replay",
+            "tenant_id",
+            "workspace_id",
+            "idempotency_key",
+            "intent_fingerprint",
+        ),
+    )
+
+
+class AIGatewayBudgetRow(Scoped, Base):
+    __tablename__ = "ai_gateway_budgets"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    ai_invocation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    reserved_amount: Mapped[Decimal] = mapped_column(Numeric(24, 12), nullable=False)
+    actual_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 12))
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    usage_payload: Mapped[str | None] = mapped_column(Text)
+    pricing_version: Mapped[str | None] = mapped_column(String(128))
+    pricing_payload: Mapped[str | None] = mapped_column(Text)
+    allocation_payload: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    release_reason: Mapped[str | None] = mapped_column(String(64))
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("tenant_id", "workspace_id", "ai_invocation_id"),
+            (
+                "ai_gateway_invocations.tenant_id",
+                "ai_gateway_invocations.workspace_id",
+                "ai_gateway_invocations.ai_invocation_id",
+            ),
+        ),
+        CheckConstraint(
+            "state IN ('pending','committed','released','expired','usage_pending')",
+            name="ck_ai_gateway_budget_state",
+        ),
+        Index(
+            "ix_ai_gateway_budget_recovery",
+            "tenant_id",
+            "workspace_id",
+            "state",
+            "expires_at",
+        ),
+    )
+
+
+class AIGatewayAttemptRow(Scoped, Base):
+    __tablename__ = "ai_gateway_attempts"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    ai_invocation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    model_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    adapter_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    usage_payload: Mapped[str | None] = mapped_column(Text)
+    cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 12))
+    effect_reference: Mapped[str | None] = mapped_column(String(256))
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("tenant_id", "workspace_id", "ai_invocation_id"),
+            (
+                "ai_gateway_invocations.tenant_id",
+                "ai_gateway_invocations.workspace_id",
+                "ai_gateway_invocations.ai_invocation_id",
+            ),
+        ),
+        CheckConstraint("attempt_number > 0", name="ck_ai_gateway_attempt_number"),
+    )
+
+
+class AIGatewayCacheRow(Scoped, Base):
+    __tablename__ = "ai_gateway_cache"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    cache_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance_ai_invocation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_ai_gateway_cache_expiry", "expires_at"),)
+
+
+class AIGatewayUsageLedgerRow(Scoped, Base):
+    __tablename__ = "ai_gateway_usage_ledger"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    ai_invocation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    usage_event_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    attempt_number: Mapped[int | None] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    usage_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    cost_amount: Mapped[Decimal] = mapped_column(Numeric(24, 12), nullable=False)
+    final: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("tenant_id", "workspace_id", "ai_invocation_id"),
+            (
+                "ai_gateway_invocations.tenant_id",
+                "ai_gateway_invocations.workspace_id",
+                "ai_gateway_invocations.ai_invocation_id",
+            ),
+        ),
+        CheckConstraint("cost_amount >= 0", name="ck_ai_gateway_usage_cost"),
+        Index(
+            "ix_ai_gateway_usage_recovery",
+            "tenant_id",
+            "workspace_id",
+            "ai_invocation_id",
+            "final",
+        ),
+    )

@@ -14,6 +14,7 @@ from aieos.adapters.memory_persistence import InMemoryMemoryRepository
 from aieos.adapters.observability_default import InMemoryObservationRecorder
 from aieos.adapters.persistence_postgres import (
     BufferedPostgresOutbox,
+    PostgresAIGatewayStore,
     PostgresDatabase,
     PostgresDecisionEvidenceRepository,
     PostgresExecutionRepository,
@@ -26,7 +27,7 @@ from aieos.adapters.persistence_postgres import (
     checkpoint,
     scoped_idempotency_lock_key,
 )
-from aieos.ai_gateway import ModelCatalogEntry, ReferenceAIGateway
+from aieos.ai_gateway import ModelCatalogEntry, ReferenceAIGateway, ReferenceGatewayStore
 from aieos.capability_registry import CapabilityImplementation, CapabilityRegistry
 from aieos.contracts import AuthorizationContext, ResultEnvelope
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
@@ -297,6 +298,7 @@ def compose(
         request_repository = PostgresRequestRepository(database, **durable_scope)
         decisions = PostgresDecisionEvidenceRepository(database, **durable_scope)
         memory_repository = PostgresMemoryRepository(database)
+        gateway_store = PostgresAIGatewayStore(database)
         durable_participants = (
             memory_repository,
             workflow_repository,
@@ -326,6 +328,7 @@ def compose(
         execution_repository = InMemoryExecutionRepository()
         request_repository = InMemoryRequestRepository()
         decisions = InMemoryDecisionEvidenceRepository()
+        gateway_store = ReferenceGatewayStore()
         durable_participants = ()
     memory_service = MemoryService(
         repository=memory_repository,
@@ -345,6 +348,7 @@ def compose(
         identifiers=resolved_identifiers,
         authorizer=authorizer,
         observations=observations,
+        store=gateway_store,
         catalog=(
             ModelCatalogEntry(
                 model_key="economy-text-v1",

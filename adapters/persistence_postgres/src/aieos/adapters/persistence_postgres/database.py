@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-EXPECTED_ALEMBIC_REVISION = "20260727_0001"
+EXPECTED_ALEMBIC_REVISION = "20260810_0002"
 
 
 class PostgresDatabase:

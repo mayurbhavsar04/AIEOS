@@ -1,9 +1,12 @@
 """FastAPI host for health and the executable reference workflow."""
 
+import json
+from collections.abc import AsyncIterator
 from typing import cast
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
+from starlette.responses import StreamingResponse
 
 from aieos.ai_gateway import AIInvocationRequest, ResponseMode
 from aieos_api.composition import CompositionRoot
@@ -64,8 +67,10 @@ async def reference_hello(body: HelloRequest, request: Request) -> dict[str, obj
     }
 
 
-@app.post("/reference/ai")
-async def reference_ai(body: MockAIRequest, request: Request) -> dict[str, object]:
+@app.post("/reference/ai", response_model=None)
+async def reference_ai(
+    body: MockAIRequest, request: Request
+) -> dict[str, object] | StreamingResponse:
     """Run one offline provider-neutral AI Gateway reference invocation."""
     runtime = cast(CompositionRoot, request.app.state.composition).reference_runtime
     invocation = AIInvocationRequest(
@@ -84,6 +89,32 @@ async def reference_ai(body: MockAIRequest, request: Request) -> dict[str, objec
         quality_tier=body.quality_tier,
         max_output_tokens=body.max_output_tokens,
     )
+    if body.stream:
+
+        async def events() -> AsyncIterator[bytes]:
+            async for chunk in runtime.reference_ai_gateway.stream(invocation):
+                document: dict[str, object] = {
+                    "ai_invocation_id": chunk.ai_invocation_id,
+                    "sequence": chunk.sequence,
+                    "kind": chunk.kind,
+                }
+                if chunk.content is not None:
+                    document["content"] = chunk.content
+                if chunk.usage is not None:
+                    document["usage"] = {
+                        "input_tokens": chunk.usage.input_tokens,
+                        "output_tokens": chunk.usage.output_tokens,
+                        "estimated": chunk.usage.estimated,
+                    }
+                if chunk.terminal is not None:
+                    document["terminal"] = {
+                        "result_id": chunk.terminal.result.result_id,
+                        "status": chunk.terminal.result.result_status.value,
+                        "error_id": chunk.terminal.result.error_id,
+                    }
+                yield (json.dumps(document, sort_keys=True) + "\n").encode()
+
+        return StreamingResponse(events(), media_type="application/x-ndjson")
     response = await runtime.reference_ai_gateway.invoke(invocation)
     return {
         "ai_invocation_id": response.ai_invocation_id,
