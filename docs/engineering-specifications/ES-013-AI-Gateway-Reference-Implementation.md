@@ -53,12 +53,17 @@ authoritative. This implementation adds no canonical identity and changes no fro
   provider-effect/accounting evidence instead of blindly repeating completed work.
 - normalized terminal intent is separate from its authoritative checkpoint, so a transient
   persistence failure remains recoverable and cannot escape the accepted public API as a raw error.
+  Intent installation is fenced by execution owner/generation, records that authorizing generation,
+  and is immutable after the valid write.
 - exact-cache identity is content-addressed from the canonical assembled request, including selected
   and truncated context content, provenance/stage, both token bounds, policies, route constraints,
   schema, locale, and deterministic parameters.
 - structured validation measures original and repaired canonical payloads, has a finite repair limit,
-  and admits every repair inside the remaining token/cost envelope; provider fallback remains inside
-  one invocation.
+  and admits every repair inside the remaining token/cost envelope. A repair effect's opaque
+  idempotency key is durably reserved before provider invocation so fresh-process recovery does not
+  depend on adapter memory; provider fallback remains inside one invocation.
+- exact-cache lookup follows the progressive-context state machine: only the current assembled stage
+  and selected route are queryable, and escalation/fallback cannot be skipped by a future-stage hit.
 - stream bounds are enforced before delta visibility and provider-reported partial usage is appended
   monotonically before terminal completion; only the terminal Result is authoritative.
 - two deterministic mock adapters exercise different capability, cost, and latency profiles.

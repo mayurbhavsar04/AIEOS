@@ -37,8 +37,9 @@ usage reconciliation for the offline runtime. It is an adapter seam, not a new p
 expiring leases, claim generations, provider-effect evidence, monotonic usage events, recoverable
 terminal intents, and exactly-once authoritative terminal checkpoints.
 An active executor renews its lease on a bounded heartbeat. Renewal, checkpoints, provider-effect
-writes, accounting, and terminalization are fenced by the current owner and claim generation; a
-reclaimer receives the next generation and stale workers cannot commit later side effects.
+writes, accounting, terminal-intent installation, and terminalization are fenced by the current
+owner and claim generation. A valid intent records the authorizing owner/generation and is immutable;
+a reclaimer receives the next generation and stale workers cannot install or alter recovery state.
 
 ## Invocation flow
 
@@ -54,7 +55,7 @@ sequenceDiagram
     G-->>C: immutable acknowledgement Result
     G->>G: policy, context, routing
     G->>S: reserve under AIInvocationId
-    G->>S: claim lease + prepare effect key
+    G->>S: claim lease + durably reserve effect key
     G->>A: normalized mock invocation + effect key
     A-->>G: normalized content and usage
     G->>S: effect evidence + monotonic reconciliation
@@ -82,8 +83,10 @@ The exact cache key is finalized only for a successful effect and includes scope
 the exact final canonical assembled system/task and
 selected/truncated context content, context provenance and stage, input/output bounds, capability and
 the actual successful model/adapter route, schema, safety/data/cache policy, locale, and deterministic
-parameters. Staged lookup candidates may cover reproducible expanded-context or fallback identities,
-but a write is never placed under the initial stage/route after escalation or fallback. Values
+parameters. Lookup queries only the current assembled stage and selected route. Expanded-stage
+identities become eligible after the corresponding escalation signal and assembly step; fallback
+identities become eligible only after that route is selected. A cache hit cannot bypass bounded
+context growth or fallback semantics, and a write is never placed under the initial stage/route. Values
 contain only validated content, usage, expiry, and bounded provenance. A hit follows acceptance and
 creates a new `AIInvocationId` and `ResultId`; prior authoritative identity or causation is never
 reused.
@@ -92,7 +95,10 @@ reused.
 
 Structured JSON is validated and measured outside the mock model before success. A malformed value
 receives at most the configured repair attempts; every repair is admitted against the remaining token
-and invocation cost envelope and its actual usage is reconciled. Streaming checks the cumulative
+and invocation cost envelope and its actual usage is reconciled. Before a repair call, the store
+persists a fenced, opaque provider idempotency/effect key. A fresh process can safely reissue a pending
+effect with that same key or consume durable result evidence, then reconcile usage exactly once.
+Streaming checks the cumulative
 output bound before exposing each delta and durably records monotonic provider usage as it arrives.
 Provider-reported partial usage outranks later estimates. Streaming produces acknowledgement, stream
 start, ordered deltas, usage, and one terminal Result; deltas are never authoritative.
@@ -103,17 +109,20 @@ usage, does not restart the provider stream, and never reports false success.
 
 ## Explicit live PostgreSQL Gateway durability matrix
 
-The CI PostgreSQL gate runs 17 AI Gateway-specific tests with zero skips, separately from the
+The CI PostgreSQL gate runs 20 AI Gateway-specific tests with zero skips, separately from the
 repository-wide PostgreSQL count. They cover:
 
 - acceptance/terminal restart replay and concurrent scoped admission;
 - concurrent execution claim, stale reclaim, active-call heartbeat beyond the original TTL,
-  generation advancement, stale-effect fencing, and a concurrent reclaim race;
+  generation advancement, stale-effect fencing, a concurrent reclaim race, and a cross-generation
+  terminal-intent race in which only the valid generation authorizes recovery;
 - persistence failure during terminal normalization and post-provider-effect/pre-accounting replay;
-- stream crash after a durable chunk/usage boundary and terminal-checkpoint failure with the same
-  replayed Result;
-- structured-repair crash before durable effect recording, crash after repair effect before
-  reconciliation, reservation expiry/release, and cumulative repair/fallback cap after restart;
+- stream crash after a durable chunk/usage boundary, failed chunk-checkpoint persistence, and
+  terminal-checkpoint failure with the same replayed Result and preserved partial usage;
+- structured-repair crash before durable effect recording with a fresh adapter and empty
+  process-local effect cache, crash after repair effect before reconciliation, reservation
+  expiry/release, and cumulative repair/fallback cap after restart;
+- restart isolation proving an expanded-stage cache entry is not queried at the minimal stage;
 - partial/delayed usage, reservation expiry, idempotent replay, and no double charge.
 
 CI additionally runs migration parity/downgrade/upgrade, durable-runtime/outbox tests, cache durability,
