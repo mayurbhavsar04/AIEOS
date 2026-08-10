@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 from pydantic import TypeAdapter
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from aieos.ai_gateway.gateway import (
     Acceptance,
     AIInvocationRequest,
+    AIInvocationResponse,
     AIUsage,
     CachedContent,
     GatewayInvocation,
     GatewayReservation,
     InvocationState,
+    ProviderResult,
     ReferenceGatewayStore,
 )
 from aieos.contracts import ResultEnvelope
@@ -33,6 +36,7 @@ from .models import (
 _INVOCATION = TypeAdapter(GatewayInvocation)
 _CACHE = TypeAdapter(CachedContent)
 _USAGE = TypeAdapter(AIUsage)
+_PROVIDER_RESULT = TypeAdapter(ProviderResult)
 
 
 class PostgresAIGatewayStore(ReferenceGatewayStore):
@@ -103,9 +107,6 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
         return Acceptance(invocation_id, candidate.acknowledgement)
 
     async def load(self, invocation_id: str) -> GatewayInvocation:
-        cached = self.invocations.get(invocation_id)
-        if cached is not None:
-            return cached
         async with self._database.transaction() as session:
             row = await session.scalar(
                 select(AIGatewayInvocationRow).where(
@@ -115,8 +116,74 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
         if row is None:
             raise KeyError(invocation_id)
         invocation = _INVOCATION.validate_json(row.request_payload)
+        if row.terminal_payload is None:
+            invocation.terminal = None
+        if row.terminal_intent_payload is not None:
+            intended = _INVOCATION.validate_json(row.terminal_intent_payload)
+            invocation.terminal_intent = intended.terminal_intent or intended.terminal
+            invocation.recovery_phase = row.recovery_phase
+        invocation.execution_owner = row.execution_owner
+        invocation.execution_lease_expires_at = row.execution_lease_expires_at
+        invocation.claim_generation = row.claim_generation
         self.invocations[invocation_id] = invocation
         return invocation
+
+    async def claim_execution(
+        self, invocation_id: str, *, owner: str, now: datetime, lease: timedelta
+    ) -> int | None:
+        async with self._database.transaction() as session:
+            row = await session.scalar(
+                update(AIGatewayInvocationRow)
+                .where(
+                    AIGatewayInvocationRow.ai_invocation_id == invocation_id,
+                    AIGatewayInvocationRow.terminal_payload.is_(None),
+                    or_(
+                        AIGatewayInvocationRow.execution_owner.is_(None),
+                        AIGatewayInvocationRow.execution_owner == owner,
+                        AIGatewayInvocationRow.execution_lease_expires_at <= now,
+                    ),
+                )
+                .values(
+                    execution_owner=owner,
+                    execution_lease_expires_at=now + lease,
+                    claim_generation=AIGatewayInvocationRow.claim_generation + 1,
+                    recovery_phase="claimed",
+                    updated_at=now,
+                )
+                .returning(AIGatewayInvocationRow)
+            )
+        if row is None:
+            return None
+        invocation = _INVOCATION.validate_json(row.request_payload)
+        invocation.execution_owner = row.execution_owner
+        invocation.execution_lease_expires_at = row.execution_lease_expires_at
+        invocation.claim_generation = row.claim_generation
+        invocation.recovery_phase = row.recovery_phase
+        self.invocations[invocation_id] = invocation
+        return row.claim_generation
+
+    async def release_execution(self, invocation_id: str, *, owner: str, generation: int) -> None:
+        async with self._database.transaction() as session:
+            await session.execute(
+                update(AIGatewayInvocationRow)
+                .where(
+                    AIGatewayInvocationRow.ai_invocation_id == invocation_id,
+                    AIGatewayInvocationRow.execution_owner == owner,
+                    AIGatewayInvocationRow.claim_generation == generation,
+                )
+                .values(execution_owner=None, execution_lease_expires_at=None)
+            )
+
+    async def wait_for_terminal(
+        self, invocation_id: str, *, timeout: float = 30.0
+    ) -> AIInvocationResponse:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            invocation = await self.load(invocation_id)
+            if invocation.terminal is not None:
+                return invocation.terminal
+            await asyncio.sleep(0.01)
+        raise RuntimeError("execution lease ended without terminal outcome")
 
     async def checkpoint(self, invocation: GatewayInvocation) -> None:
         encoded = _INVOCATION.dump_json(invocation).decode()
@@ -127,6 +194,8 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
                     AIGatewayInvocationRow.tenant_id == invocation.request.tenant_id,
                     AIGatewayInvocationRow.workspace_id == invocation.request.workspace_id,
                     AIGatewayInvocationRow.ai_invocation_id == invocation.invocation_id,
+                    AIGatewayInvocationRow.execution_owner == invocation.execution_owner,
+                    AIGatewayInvocationRow.claim_generation == invocation.claim_generation,
                 )
                 .values(
                     state=invocation.state.value,
@@ -144,11 +213,41 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
                         else None
                     ),
                     updated_at=datetime.now(invocation.accepted_at.tzinfo),
+                    recovery_phase=(
+                        "terminalized"
+                        if invocation.terminal is not None
+                        else invocation.recovery_phase
+                    ),
                 )
             )
             if result.rowcount != 1:
                 raise RuntimeError("AI Gateway persistence checkpoint failed")
         self.invocations[invocation.invocation_id] = invocation
+
+    async def checkpoint_terminal_intent(self, invocation: GatewayInvocation) -> None:
+        encoded = _INVOCATION.dump_json(invocation).decode()
+        async with self._database.transaction() as session:
+            result = await session.execute(
+                update(AIGatewayInvocationRow)
+                .where(
+                    AIGatewayInvocationRow.tenant_id == invocation.request.tenant_id,
+                    AIGatewayInvocationRow.workspace_id == invocation.request.workspace_id,
+                    AIGatewayInvocationRow.ai_invocation_id == invocation.invocation_id,
+                    AIGatewayInvocationRow.terminal_payload.is_(None),
+                    or_(
+                        AIGatewayInvocationRow.terminal_intent_payload.is_(None),
+                        AIGatewayInvocationRow.terminal_intent_payload == encoded,
+                    ),
+                )
+                .values(
+                    request_payload=encoded,
+                    terminal_intent_payload=encoded,
+                    recovery_phase="terminalization_pending",
+                    updated_at=datetime.now(invocation.accepted_at.tzinfo),
+                )
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("AI Gateway terminal intent checkpoint failed")
 
     async def reserve(
         self,
@@ -284,6 +383,65 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
                 )
             )
 
+    async def load_provider_effect(
+        self, invocation_id: str, *, effect_key: str
+    ) -> ProviderResult | None:
+        invocation = await self.load(invocation_id)
+        async with self._database.transaction() as session:
+            payload = await session.scalar(
+                select(AIGatewayAttemptRow.result_payload).where(
+                    AIGatewayAttemptRow.tenant_id == invocation.request.tenant_id,
+                    AIGatewayAttemptRow.workspace_id == invocation.request.workspace_id,
+                    AIGatewayAttemptRow.ai_invocation_id == invocation_id,
+                    AIGatewayAttemptRow.effect_reference == effect_key,
+                    AIGatewayAttemptRow.result_payload.is_not(None),
+                )
+            )
+        return None if payload is None else _PROVIDER_RESULT.validate_json(payload)
+
+    async def record_provider_effect(
+        self, invocation_id: str, *, effect_key: str, result: ProviderResult
+    ) -> None:
+        invocation = await self.load(invocation_id)
+        route = invocation.route
+        if route is None:
+            raise RuntimeError("provider effect requires a durable route")
+        attempt_number = int(effect_key.rsplit(":", 1)[1])
+        async with self._database.transaction() as session:
+            await session.execute(
+                insert(AIGatewayAttemptRow)
+                .values(
+                    tenant_id=invocation.request.tenant_id,
+                    workspace_id=invocation.request.workspace_id,
+                    ai_invocation_id=invocation_id,
+                    attempt_number=attempt_number,
+                    model_key=route.model_key,
+                    adapter_key=route.adapter_key,
+                    state="effect_completed",
+                    usage_payload=(
+                        _USAGE.dump_json(result.usage).decode()
+                        if result.usage is not None
+                        else None
+                    ),
+                    effect_reference=effect_key,
+                    result_payload=_PROVIDER_RESULT.dump_json(result).decode(),
+                    recorded_at=datetime.now(invocation.accepted_at.tzinfo),
+                )
+                .on_conflict_do_update(
+                    index_elements=[
+                        "tenant_id",
+                        "workspace_id",
+                        "ai_invocation_id",
+                        "attempt_number",
+                    ],
+                    set_={
+                        "state": "effect_completed",
+                        "effect_reference": effect_key,
+                        "result_payload": _PROVIDER_RESULT.dump_json(result).decode(),
+                    },
+                )
+            )
+
     async def record_usage(
         self,
         invocation_id: str,
@@ -299,6 +457,15 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
         invocation = await self.load(invocation_id)
         now = datetime.now(invocation.accepted_at.tzinfo)
         async with self._database.transaction() as session:
+            if kind == "provider_partial":
+                already_recorded = await session.scalar(
+                    select(func.coalesce(func.sum(AIGatewayUsageLedgerRow.cost_amount), 0)).where(
+                        AIGatewayUsageLedgerRow.tenant_id == invocation.request.tenant_id,
+                        AIGatewayUsageLedgerRow.workspace_id == invocation.request.workspace_id,
+                        AIGatewayUsageLedgerRow.ai_invocation_id == invocation_id,
+                    )
+                )
+                cost = max(Decimal("0"), cost - Decimal(already_recorded or 0))
             await session.execute(
                 insert(AIGatewayUsageLedgerRow)
                 .values(

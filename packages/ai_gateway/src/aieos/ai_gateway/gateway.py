@@ -6,11 +6,13 @@ import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol, cast
+from uuid import uuid4
 
 from aieos.contracts import (
     AuthorizationContext,
@@ -205,7 +207,12 @@ class ProviderAdapter(Protocol):
     key: str
 
     async def invoke(
-        self, *, model_key: str, prompt: str, request: AIInvocationRequest
+        self,
+        *,
+        model_key: str,
+        prompt: str,
+        request: AIInvocationRequest,
+        effect_key: str | None = None,
     ) -> ProviderResult: ...
 
     def stream(
@@ -226,6 +233,11 @@ class GatewayInvocation:
     accepted_at: datetime
     route: RouteDecision | None = None
     terminal: AIInvocationResponse | None = None
+    execution_owner: str | None = None
+    execution_lease_expires_at: datetime | None = None
+    claim_generation: int = 0
+    recovery_phase: str = "accepted"
+    terminal_intent: AIInvocationResponse | None = None
 
 
 @dataclass(slots=True)
@@ -263,6 +275,9 @@ class ReferenceGatewayStore:
         self.cache: dict[tuple[str, str, str], CachedContent] = {}
         self.usage: dict[str, AIUsage] = {}
         self.attempts: dict[str, list[tuple[int, str, str, AIUsage | None, Decimal]]] = {}
+        self._usage_events: dict[str, dict[str, tuple[AIUsage, Decimal]]] = {}
+        self._provider_effects: dict[tuple[str, str], ProviderResult] = {}
+        self._terminal_events: dict[str, asyncio.Event] = {}
         self.tenant_limit = tenant_limit
         self.workspace_limit = workspace_limit or tenant_limit
 
@@ -345,7 +360,49 @@ class ReferenceGatewayStore:
             self.invocations[invocation_id] = GatewayInvocation(
                 request, invocation_id, acknowledgement, InvocationState.REQUESTED, now
             )
+            self._terminal_events[invocation_id] = asyncio.Event()
             return Acceptance(invocation_id, acknowledgement)
+
+    async def claim_execution(
+        self, invocation_id: str, *, owner: str, now: datetime, lease: timedelta
+    ) -> int | None:
+        """Atomically claim an invocation, reclaiming only an expired lease."""
+        async with self._lock:
+            invocation = self.invocations[invocation_id]
+            if invocation.terminal is not None:
+                return None
+            if (
+                invocation.execution_owner is not None
+                and invocation.execution_owner != owner
+                and invocation.execution_lease_expires_at is not None
+                and invocation.execution_lease_expires_at > now
+            ):
+                return None
+            invocation.execution_owner = owner
+            invocation.execution_lease_expires_at = now + lease
+            invocation.claim_generation += 1
+            invocation.recovery_phase = "claimed"
+            return invocation.claim_generation
+
+    async def release_execution(self, invocation_id: str, *, owner: str, generation: int) -> None:
+        async with self._lock:
+            invocation = self.invocations[invocation_id]
+            if invocation.execution_owner == owner and invocation.claim_generation == generation:
+                invocation.execution_owner = None
+                invocation.execution_lease_expires_at = None
+
+    async def wait_for_terminal(
+        self, invocation_id: str, *, timeout: float = 30.0
+    ) -> AIInvocationResponse:
+        invocation = self.invocations[invocation_id]
+        if invocation.terminal is not None:
+            return invocation.terminal
+        event = self._terminal_events.setdefault(invocation_id, asyncio.Event())
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+        terminal = self.invocations[invocation_id].terminal
+        if terminal is None:
+            raise RuntimeError("execution lease ended without terminal outcome")
+        return terminal
 
     async def reserve(
         self,
@@ -412,6 +469,50 @@ class ReferenceGatewayStore:
     async def checkpoint(self, invocation: GatewayInvocation) -> None:
         """Durably checkpoint lifecycle/decision/terminal state in persistent stores."""
         self.invocations[invocation.invocation_id] = invocation
+        if invocation.terminal is not None:
+            self._terminal_events.setdefault(invocation.invocation_id, asyncio.Event()).set()
+
+    async def checkpoint_terminal_intent(self, invocation: GatewayInvocation) -> None:
+        """Persist an immutable terminal intent before authoritative terminalization."""
+        self.invocations[invocation.invocation_id] = invocation
+
+    async def record_usage(
+        self,
+        invocation_id: str,
+        *,
+        usage: AIUsage,
+        cost: Decimal,
+        event_key: str,
+        kind: str,
+        final: bool,
+        attempt_number: int | None = None,
+    ) -> None:
+        del attempt_number
+        events = self._usage_events.setdefault(invocation_id, {})
+        if kind == "provider_partial":
+            cost = max(
+                Decimal("0"), cost - sum((item[1] for item in events.values()), Decimal("0"))
+            )
+        events.setdefault(event_key, (usage, cost))
+        cumulative_cost = sum((item[1] for item in events.values()), Decimal("0"))
+        strongest = max(
+            (item[0] for item in events.values()),
+            key=lambda item: (not item.estimated, item.input_tokens + item.output_tokens),
+        )
+        reservation = self.reservations[invocation_id]
+        reservation.actual = cumulative_cost
+        reservation.state = "committed" if final else "usage_pending"
+        self.usage[invocation_id] = strongest
+
+    async def load_provider_effect(
+        self, invocation_id: str, *, effect_key: str
+    ) -> ProviderResult | None:
+        return self._provider_effects.get((invocation_id, effect_key))
+
+    async def record_provider_effect(
+        self, invocation_id: str, *, effect_key: str, result: ProviderResult
+    ) -> None:
+        self._provider_effects.setdefault((invocation_id, effect_key), result)
 
     async def cached(
         self, tenant_id: str, workspace_id: str, cache_key: str, *, now: datetime
@@ -515,15 +616,55 @@ class ReferenceAIGateway:
 
     async def invoke(self, request: AIInvocationRequest) -> AIInvocationResponse:
         accepted = await self.accept(request)
-        invocation = await self.store.load(accepted.ai_invocation_id)
+        try:
+            invocation = await self.store.load(accepted.ai_invocation_id)
+        except Exception:
+            invocation = GatewayInvocation(
+                request,
+                accepted.ai_invocation_id,
+                accepted.acknowledgement,
+                InvocationState.REQUESTED,
+                accepted.acknowledgement.started_at or self._clock.now(),
+            )
         if invocation.terminal is not None:
             return invocation.terminal
-        return await self.execute(accepted.ai_invocation_id)
+        try:
+            return await self.execute(accepted.ai_invocation_id)
+        except Exception:
+            response = self._failure(
+                invocation, ProviderFailure("AI_GATEWAY_PERSISTENCE_FAILURE", retryable=False)
+            )
+            invocation.terminal_intent = response
+            invocation.recovery_phase = "terminalization_pending"
+            with suppress(Exception):
+                await self.store.checkpoint_terminal_intent(invocation)
+                await self.store.checkpoint(invocation)
+            return response
 
     async def execute(self, invocation_id: str) -> AIInvocationResponse:
         invocation = await self.store.load(invocation_id)
         request = invocation.request
         if invocation.terminal is not None:
+            return invocation.terminal
+        owner = f"gateway-worker:{uuid4().hex}"
+        generation = await self.store.claim_execution(
+            invocation_id, owner=owner, now=self._clock.now(), lease=timedelta(seconds=30)
+        )
+        if generation is None:
+            return await self.store.wait_for_terminal(invocation_id)
+        invocation.execution_owner = owner
+        invocation.execution_lease_expires_at = self._clock.now() + timedelta(seconds=30)
+        invocation.claim_generation = generation
+        invocation.recovery_phase = "claimed"
+        if invocation.terminal_intent is not None:
+            invocation.terminal = invocation.terminal_intent
+            invocation.recovery_phase = "terminalization_pending"
+            try:
+                await self.store.checkpoint(invocation)
+            finally:
+                await self.store.release_execution(
+                    invocation_id, owner=owner, generation=generation
+                )
             return invocation.terminal
         reservation: GatewayReservation | None = None
         try:
@@ -618,19 +759,32 @@ class ReferenceAIGateway:
                 )
                 adapter = self._adapters[candidate.adapter_key]
                 try:
-                    invocation_call = adapter.invoke(
-                        model_key=candidate.model_key, prompt=prompt, request=request
+                    effect_key = f"{invocation_id}:provider:{attempts}"
+                    provider_result = await self.store.load_provider_effect(
+                        invocation_id, effect_key=effect_key
                     )
-                    if request.deadline is None:
-                        provider_result = await invocation_call
-                    else:
-                        remaining = (request.deadline - self._clock.now()).total_seconds()
-                        try:
-                            provider_result = await asyncio.wait_for(
-                                invocation_call, timeout=max(0, remaining)
-                            )
-                        except TimeoutError:
-                            raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=True) from None
+                    if provider_result is None:
+                        invocation_call = adapter.invoke(
+                            model_key=candidate.model_key,
+                            prompt=prompt,
+                            request=request,
+                            effect_key=effect_key,
+                        )
+                        if request.deadline is None:
+                            provider_result = await invocation_call
+                        else:
+                            remaining = (request.deadline - self._clock.now()).total_seconds()
+                            try:
+                                provider_result = await asyncio.wait_for(
+                                    invocation_call, timeout=max(0, remaining)
+                                )
+                            except TimeoutError:
+                                raise ProviderFailure(
+                                    "AI_PROVIDER_TIMEOUT", retryable=True
+                                ) from None
+                        await self.store.record_provider_effect(
+                            invocation_id, effect_key=effect_key, result=provider_result
+                        )
                     usage = provider_result.usage or AIUsage(
                         tokens, request.max_output_tokens, estimated=True
                     )
@@ -745,25 +899,60 @@ class ReferenceAIGateway:
             response = self._failure(
                 invocation, ProviderFailure("AI_PROVIDER_CANCELLED", retryable=False)
             )
-            await self.store.checkpoint(invocation)
+            invocation.terminal_intent = response
+            invocation.recovery_phase = "terminalization_pending"
+            with suppress(Exception):
+                await self.store.checkpoint_terminal_intent(invocation)
+                await self.store.checkpoint(invocation)
             return response
         except Exception as error:
             if reservation is not None:
-                await self.store.release(invocation_id)
+                with suppress(Exception):
+                    await self.store.release(invocation_id)
             code = (
                 "AI_GATEWAY_PERSISTENCE_FAILURE"
                 if "persist" in str(error).lower()
                 else "AI_GATEWAY_FAILURE"
             )
             response = self._failure(invocation, ProviderFailure(code, retryable=False))
-            await self.store.checkpoint(invocation)
+            invocation.terminal_intent = response
+            invocation.recovery_phase = "terminalization_pending"
+            with suppress(Exception):
+                await self.store.checkpoint_terminal_intent(invocation)
+                await self.store.checkpoint(invocation)
             return response
+        finally:
+            with suppress(Exception):
+                await self.store.release_execution(
+                    invocation_id, owner=owner, generation=generation
+                )
 
     async def stream(self, request: AIInvocationRequest) -> AsyncIterator[StreamChunk]:
         accepted = await self.accept(replace(request, response_mode=ResponseMode.STREAM))
         invocation = await self.store.load(accepted.ai_invocation_id)
         yield StreamChunk(accepted.ai_invocation_id, 0, "acknowledgement")
         sequence = 1
+        owner = f"gateway-stream-worker:{uuid4().hex}"
+        generation = await self.store.claim_execution(
+            invocation.invocation_id,
+            owner=owner,
+            now=self._clock.now(),
+            lease=timedelta(seconds=30),
+        )
+        if generation is None:
+            terminal = await self.store.wait_for_terminal(invocation.invocation_id)
+            yield StreamChunk(
+                invocation.invocation_id,
+                sequence,
+                "terminal",
+                usage=terminal.usage,
+                terminal=terminal,
+            )
+            return
+        invocation.execution_owner = owner
+        invocation.execution_lease_expires_at = self._clock.now() + timedelta(seconds=30)
+        invocation.claim_generation = generation
+        invocation.recovery_phase = "claimed"
         reservation: GatewayReservation | None = None
         parts: list[str] = []
         input_tokens = 0
@@ -808,6 +997,12 @@ class ReferenceAIGateway:
                         model_key=route.model_key, prompt=prompt, request=invocation.request
                     ):
                         if event.kind == "content_delta" and event.content:
+                            candidate_content = "".join((*parts, event.content))
+                            if (
+                                self._estimate(candidate_content)
+                                > invocation.request.max_output_tokens
+                            ):
+                                raise ProviderFailure("AI_OUTPUT_LIMIT_EXCEEDED", retryable=False)
                             parts.append(event.content)
                             yield StreamChunk(
                                 invocation.invocation_id,
@@ -817,7 +1012,30 @@ class ReferenceAIGateway:
                             )
                             sequence += 1
                         elif event.kind == "usage":
-                            usage = event.usage
+                            reported = event.usage
+                            if reported is None:
+                                continue
+                            if usage is not None and (
+                                reported.input_tokens < usage.input_tokens
+                                or reported.output_tokens < usage.output_tokens
+                            ):
+                                raise ProviderFailure(
+                                    "AI_NON_MONOTONIC_USAGE", retryable=False, usage=usage
+                                )
+                            usage = reported
+                            partial_usage = usage
+                            partial_cost = self._model(route.model_key).estimate_cost(
+                                usage.input_tokens, usage.output_tokens
+                            )
+                            await self.store.record_usage(
+                                invocation.invocation_id,
+                                usage=usage,
+                                cost=partial_cost,
+                                event_key=f"stream:1:{usage.input_tokens}:{usage.output_tokens}",
+                                kind="provider_partial",
+                                final=False,
+                                attempt_number=1,
+                            )
                             yield StreamChunk(
                                 invocation.invocation_id, sequence, "usage", usage=usage
                             )
@@ -826,12 +1044,8 @@ class ReferenceAIGateway:
                                 invocation,
                                 "ai.stream.usage",
                                 {
-                                    "input_tokens": (
-                                        usage.input_tokens if usage is not None else 0
-                                    ),
-                                    "output_tokens": (
-                                        usage.output_tokens if usage is not None else 0
-                                    ),
+                                    "input_tokens": usage.input_tokens,
+                                    "output_tokens": usage.output_tokens,
                                 },
                             )
             except TimeoutError:
@@ -858,7 +1072,9 @@ class ReferenceAIGateway:
         except asyncio.CancelledError:
             if reservation is not None:
                 if parts and invocation.route is not None:
-                    partial = AIUsage(input_tokens, self._estimate("".join(parts)), estimated=True)
+                    partial = partial_usage or AIUsage(
+                        input_tokens, self._estimate("".join(parts)), estimated=True
+                    )
                     partial_usage = partial
                     cost = self._model(invocation.route.model_key).estimate_cost(
                         partial.input_tokens, partial.output_tokens
@@ -883,7 +1099,9 @@ class ReferenceAIGateway:
         except Exception as error:
             if reservation is not None:
                 if parts and invocation.route is not None:
-                    partial = AIUsage(input_tokens, self._estimate("".join(parts)), estimated=True)
+                    partial = partial_usage or AIUsage(
+                        input_tokens, self._estimate("".join(parts)), estimated=True
+                    )
                     partial_usage = partial
                     cost = self._model(invocation.route.model_key).estimate_cost(
                         partial.input_tokens, partial.output_tokens
@@ -909,6 +1127,9 @@ class ReferenceAIGateway:
                 response = replace(response, usage=partial_usage)
                 invocation.terminal = response
         await self.store.checkpoint(invocation)
+        await self.store.release_execution(
+            invocation.invocation_id, owner=owner, generation=generation
+        )
         yield StreamChunk(
             invocation.invocation_id,
             sequence,
@@ -983,8 +1204,26 @@ class ReferenceAIGateway:
         prompt = render(selected)
         if self._estimate(prompt) > request.max_input_tokens:
             raise ValueError("mandatory context exceeds input token limit")
+        # Cache identity is content-addressed from the exact canonical request sent to
+        # the adapter, not merely from mutable references to its source material.
+        canonical_context = {
+            "prompt": prompt,
+            "stage": stage,
+            "max_input_tokens": request.max_input_tokens,
+            "selected": [
+                {
+                    "reference": item.reference,
+                    "version": item.version,
+                    "content": item.content,
+                    "trusted": item.trusted,
+                    "mandatory": item.mandatory,
+                    "necessity_reason": item.necessity_reason,
+                }
+                for item in selected
+            ],
+        }
         digest = hashlib.sha256(
-            "|".join(f"{item.reference}:{item.version}" for item in selected).encode()
+            json.dumps(canonical_context, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         return prompt, self._estimate(prompt), digest
 
@@ -1091,6 +1330,7 @@ class ReferenceAIGateway:
             ",".join(sorted(request.blocked_adapters)),
             str(request.minimum_security_tier),
             request.locale,
+            str(request.max_input_tokens),
             str(request.max_output_tokens),
             str(request.quality_tier),
             str(request.latency_tier),
@@ -1134,7 +1374,11 @@ class ReferenceAIGateway:
         for repair_attempt in range(request.repair_attempts + 1):
             try:
                 validated = self._validate_structured(request, content)
+                if self._estimate(validated) > request.max_output_tokens:
+                    raise ProviderFailure("AI_OUTPUT_LIMIT_EXCEEDED", retryable=False)
                 return validated, AIUsage(repair_input, repair_output), repair_cost
+            except ProviderFailure:
+                raise
             except (json.JSONDecodeError, ValueError):
                 if repair_attempt >= request.repair_attempts:
                     repair_usage = (
@@ -1145,37 +1389,56 @@ class ReferenceAIGateway:
                     raise ProviderFailure(
                         "AI_INVALID_RESPONSE", retryable=False, usage=repair_usage
                     ) from None
-                if candidate.estimated_cost > remaining_cost - repair_cost:
-                    raise ProviderFailure("AI_REPAIR_BUDGET_EXHAUSTED", retryable=False) from None
                 repair_prompt = (
                     f"<repair schema='{request.output_schema_ref}' error='schema-validation'>"
                     "Return only one conforming JSON value.</repair>"
                 )
-                repair_call = adapter.invoke(
-                    model_key=candidate.model_key,
-                    prompt=repair_prompt,
-                    request=request,
+                repair_envelope = self._model(candidate.model_key).estimate_cost(
+                    self._estimate(repair_prompt), request.max_output_tokens
                 )
-                if request.deadline is None:
-                    repaired = await repair_call
-                else:
-                    remaining = (request.deadline - self._clock.now()).total_seconds()
-                    try:
-                        repaired = await asyncio.wait_for(repair_call, timeout=max(0, remaining))
-                    except TimeoutError:
-                        raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=False) from None
+                if repair_envelope > remaining_cost - repair_cost:
+                    raise ProviderFailure("AI_REPAIR_BUDGET_EXHAUSTED", retryable=False) from None
+                repair_number = provider_attempt * 100 + repair_attempt + 1
+                effect_key = f"{invocation.invocation_id}:repair:{repair_number}"
+                repaired = await self.store.load_provider_effect(
+                    invocation.invocation_id, effect_key=effect_key
+                )
+                if repaired is None:
+                    repair_call = adapter.invoke(
+                        model_key=candidate.model_key,
+                        prompt=repair_prompt,
+                        request=request,
+                        effect_key=effect_key,
+                    )
+                    if request.deadline is None:
+                        repaired = await repair_call
+                    else:
+                        remaining = (request.deadline - self._clock.now()).total_seconds()
+                        try:
+                            repaired = await asyncio.wait_for(
+                                repair_call, timeout=max(0, remaining)
+                            )
+                        except TimeoutError:
+                            raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=False) from None
+                    await self.store.record_provider_effect(
+                        invocation.invocation_id, effect_key=effect_key, result=repaired
+                    )
                 usage = repaired.usage or AIUsage(
                     self._estimate(repair_prompt), request.max_output_tokens, estimated=True
                 )
                 cost = self._model(candidate.model_key).estimate_cost(
                     usage.input_tokens, usage.output_tokens
                 )
+                if cost > remaining_cost - repair_cost:
+                    raise ProviderFailure(
+                        "AI_REPAIR_BUDGET_EXHAUSTED", retryable=False, usage=usage
+                    ) from None
                 repair_input += usage.input_tokens
                 repair_output += usage.output_tokens
                 repair_cost += cost
                 await self.store.record_attempt(
                     invocation.invocation_id,
-                    attempt_number=provider_attempt * 100 + repair_attempt + 1,
+                    attempt_number=repair_number,
                     model_key=candidate.model_key,
                     state="repair",
                     usage=usage,

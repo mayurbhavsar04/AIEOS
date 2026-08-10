@@ -254,6 +254,11 @@ class AIGatewayInvocationRow(Scoped, Base):
     terminal_payload: Mapped[str | None] = mapped_column(Text)
     terminal_result_id: Mapped[str | None] = mapped_column(String(128))
     terminal_error_id: Mapped[str | None] = mapped_column(String(128))
+    execution_owner: Mapped[str | None] = mapped_column(String(128))
+    execution_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    recovery_phase: Mapped[str] = mapped_column(String(32), nullable=False, default="accepted")
+    terminal_intent_payload: Mapped[str | None] = mapped_column(Text)
     accepted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     __table_args__ = (
@@ -274,6 +279,12 @@ class AIGatewayInvocationRow(Scoped, Base):
             "workspace_id",
             "state",
             "updated_at",
+        ),
+        Index(
+            "ix_ai_gateway_execution_claim",
+            "state",
+            "execution_lease_expires_at",
+            "recovery_phase",
         ),
         Index(
             "ix_ai_gateway_invocation_replay",
@@ -336,6 +347,7 @@ class AIGatewayAttemptRow(Scoped, Base):
     usage_payload: Mapped[str | None] = mapped_column(Text)
     cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 12))
     effect_reference: Mapped[str | None] = mapped_column(String(256))
+    result_payload: Mapped[str | None] = mapped_column(Text)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     __table_args__ = (
         ForeignKeyConstraint(

@@ -117,21 +117,35 @@ class DeterministicMockProvider:
         self.calls = 0
         self.prompts: list[str] = []
         self._behaviors = list(behaviors)
+        self._effects: dict[str, ProviderResult | ProviderFailure] = {}
 
     def _behavior(self) -> MockProviderBehavior:
         return self._behaviors.pop(0) if self._behaviors else MockProviderBehavior.SUCCESS
 
     async def invoke(
-        self, *, model_key: str, prompt: str, request: AIInvocationRequest
+        self,
+        *,
+        model_key: str,
+        prompt: str,
+        request: AIInvocationRequest,
+        effect_key: str | None = None,
     ) -> ProviderResult:
+        if effect_key is not None and effect_key in self._effects:
+            replay = self._effects[effect_key]
+            if isinstance(replay, ProviderFailure):
+                raise replay
+            return replay
         self.calls += 1
         self.prompts.append(prompt)
         failure_usage = AIUsage(input_tokens=max(1, len(prompt.encode()) // 4), output_tokens=0)
         if self.transient_failures:
             self.transient_failures -= 1
-            raise ProviderFailure(
+            failure = ProviderFailure(
                 "AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True, usage=failure_usage
             )
+            if effect_key is not None:
+                self._effects[effect_key] = failure
+            raise failure
         behavior = self._behavior()
         if behavior is MockProviderBehavior.TRANSIENT_FAILURE:
             raise ProviderFailure(
@@ -162,7 +176,10 @@ class DeterministicMockProvider:
         confidence = (
             Decimal("0.25") if behavior is MockProviderBehavior.LOW_CONFIDENCE else Decimal("1")
         )
-        return ProviderResult(content, usage, confidence=confidence)
+        result = ProviderResult(content, usage, confidence=confidence)
+        if effect_key is not None:
+            self._effects[effect_key] = result
+        return result
 
     async def stream(
         self, *, model_key: str, prompt: str, request: AIInvocationRequest
@@ -176,6 +193,14 @@ class DeterministicMockProvider:
             if behavior is MockProviderBehavior.MID_STREAM_FAILURE and index == 1:
                 raise ProviderFailure("AI_PROVIDER_STREAM_FAILED", retryable=False)
             yield ProviderStreamEvent("content_delta", content=word + " ")
+            if behavior is MockProviderBehavior.MID_STREAM_FAILURE and index == 0:
+                yield ProviderStreamEvent(
+                    "usage",
+                    usage=AIUsage(
+                        input_tokens=max(1, len(prompt.encode()) // 4),
+                        output_tokens=max(1, len((word + " ").encode()) // 4),
+                    ),
+                )
         if behavior is not MockProviderBehavior.MISSING_USAGE:
             yield ProviderStreamEvent(
                 "usage",
