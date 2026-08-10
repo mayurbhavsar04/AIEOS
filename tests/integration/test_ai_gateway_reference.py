@@ -1,34 +1,41 @@
 """Offline conformance tests for the Milestone 6 Phase 2 gateway."""
 
+import asyncio
+from dataclasses import fields
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
-from aieos.adapters.ai_mock import DeterministicMockProvider
+from aieos.adapters.ai_mock import DeterministicMockProvider, MockProviderBehavior
 from aieos.adapters.observability_default import InMemoryObservationRecorder
 from aieos.ai_gateway import (
     AIInvocationRequest,
     ContextItem,
     InvocationState,
     ModelCatalogEntry,
-    ProviderBehavior,
     ReferenceAIGateway,
     ReferenceGatewayStore,
     ResponseMode,
 )
-from aieos.contracts import AuthorizationContext, ResultStatus
+from aieos.contracts import AuthorizationContext, DataClassification, ResultStatus
 from aieos.security_support import ScopeAuthorizer
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
 
 
 def _gateway(
-    *, transient_failures: int = 0, tenant_limit: str = "100"
+    *,
+    transient_failures: int = 0,
+    tenant_limit: str = "100",
+    economy_behaviors: tuple[MockProviderBehavior, ...] = (),
 ) -> tuple[ReferenceAIGateway, DeterministicMockProvider, DeterministicMockProvider]:
     clock = DeterministicClock(datetime(2026, 8, 3, tzinfo=UTC))
     identifiers = DeterministicIdentifiers()
     economy = DeterministicMockProvider(
-        "mock-economy", prefix="Economy", transient_failures=transient_failures
+        "mock-economy",
+        prefix="Economy",
+        transient_failures=transient_failures,
+        behaviors=economy_behaviors,
     )
     quality = DeterministicMockProvider("mock-quality", prefix="Quality")
     observations = InMemoryObservationRecorder(identifiers)
@@ -116,14 +123,19 @@ async def test_cheapest_capable_routing_and_hard_quality() -> None:
     economy = await gateway.invoke(_request())
     assert economy.route is not None and economy.route.model_key == "economy-v1"
     quality = await gateway.invoke(
-        _request(command_id="command-2", idempotency_key="idem-2", quality_tier=3)
+        _request(
+            command_id="command-2",
+            idempotency_key="idem-2",
+            quality_tier=3,
+            latency_tier=2,
+        )
     )
     assert quality.route is not None and quality.route.model_key == "quality-v1"
 
 
 @pytest.mark.anyio
 async def test_context_deduplication_truncation_and_boundaries() -> None:
-    gateway, _, _ = _gateway()
+    gateway, _, _ = _gateway(economy_behaviors=(MockProviderBehavior.MALFORMED,))
     items = (
         ContextItem("policy", "v1", "mandatory", 1, "safety", mandatory=True),
         ContextItem("dup", "v1", "first", 10, "evidence"),
@@ -168,7 +180,7 @@ async def test_cache_is_tenant_scoped() -> None:
 @pytest.mark.anyio
 async def test_fallback_is_bounded_inside_one_invocation() -> None:
     gateway, economy, quality = _gateway(transient_failures=1)
-    response = await gateway.invoke(_request(max_provider_attempts=2))
+    response = await gateway.invoke(_request(max_provider_attempts=2, latency_tier=2))
     assert response.result.result_status is ResultStatus.SUCCEEDED
     assert economy.calls == 1 and quality.calls == 1
     assert InvocationState.RETRYING in gateway.lifecycle[response.ai_invocation_id]
@@ -176,21 +188,19 @@ async def test_fallback_is_bounded_inside_one_invocation() -> None:
 
 @pytest.mark.anyio
 async def test_structured_output_repair_and_bounded_failure() -> None:
-    gateway, _, _ = _gateway()
+    gateway, _, _ = _gateway(economy_behaviors=(MockProviderBehavior.MALFORMED,))
     repaired = await gateway.invoke(
         _request(
             response_mode=ResponseMode.STRUCTURED,
             output_schema_ref="answer-v1",
-            behavior=ProviderBehavior.MALFORMED,
         )
     )
     assert repaired.result.result_status is ResultStatus.SUCCEEDED
-    gateway2, _, _ = _gateway()
+    gateway2, _, _ = _gateway(economy_behaviors=(MockProviderBehavior.MALFORMED,))
     failed = await gateway2.invoke(
         _request(
             response_mode=ResponseMode.STRUCTURED,
             output_schema_ref="answer-v1",
-            behavior=ProviderBehavior.MALFORMED,
             repair_attempts=0,
         )
     )
@@ -237,3 +247,164 @@ async def test_no_network_or_raw_prompt_in_observability() -> None:
     recorder = gateway.observations
     assert isinstance(recorder, InMemoryObservationRecorder)
     assert all("secret-value" not in str(record) for record in recorder.records)
+
+
+def test_public_request_contains_no_mock_execution_control() -> None:
+    assert "behavior" not in {field.name for field in fields(AIInvocationRequest)}
+
+
+@pytest.mark.anyio
+async def test_concurrent_duplicate_admission_is_single_invocation() -> None:
+    gateway, _, _ = _gateway()
+    first, second = await asyncio.gather(
+        gateway.accept(_request()),
+        gateway.accept(_request(command_id="replay-command")),
+    )
+    assert first.ai_invocation_id == second.ai_invocation_id
+    assert first.replay is not second.replay
+
+
+@pytest.mark.anyio
+async def test_fingerprint_rejects_changed_policy_and_allows_command_replay() -> None:
+    gateway, _, _ = _gateway()
+    accepted = await gateway.accept(_request())
+    replay = await gateway.accept(_request(command_id="another-command"))
+    assert replay.ai_invocation_id == accepted.ai_invocation_id
+    with pytest.raises(ValueError, match="payload conflict"):
+        await gateway.accept(
+            _request(command_id="third-command", safety_policy_ref="different-policy")
+        )
+
+
+@pytest.mark.anyio
+async def test_ineligible_cheaper_model_is_never_selected() -> None:
+    gateway, _, _ = _gateway()
+    response = await gateway.invoke(
+        _request(
+            quality_tier=3,
+            latency_tier=2,
+            required_data_handling=frozenset({"internal"}),
+        )
+    )
+    assert response.route is not None
+    assert response.route.model_key == "quality-v1"
+
+
+@pytest.mark.anyio
+async def test_sensitive_request_is_not_cached() -> None:
+    gateway, economy, _ = _gateway()
+    request = _request(data_classification=DataClassification.RESTRICTED)
+    await gateway.invoke(request)
+    await gateway.invoke(
+        _request(
+            command_id="command-2",
+            idempotency_key="idem-2",
+            data_classification=DataClassification.RESTRICTED,
+        )
+    )
+    assert economy.calls == 2
+
+
+@pytest.mark.anyio
+async def test_output_limit_and_midstream_failure_are_normalized() -> None:
+    gateway, _, _ = _gateway()
+    failed = await gateway.invoke(_request(max_output_tokens=1))
+    assert failed.result.result_status is ResultStatus.FAILED
+
+    streaming, _, _ = _gateway(economy_behaviors=(MockProviderBehavior.MID_STREAM_FAILURE,))
+    chunks = [chunk async for chunk in streaming.stream(_request())]
+    assert any(chunk.kind == "content_delta" for chunk in chunks)
+    assert chunks[-1].kind == "terminal"
+    assert chunks[-1].terminal is not None
+    assert chunks[-1].terminal.result.result_status is ResultStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_failed_fallback_attempt_is_accounted_and_context_escalates_only_on_signal() -> None:
+    gateway, economy, quality = _gateway(economy_behaviors=(MockProviderBehavior.LOW_CONFIDENCE,))
+    context = (
+        ContextItem("top", "v1", "high relevance", 10, "minimal"),
+        ContextItem("later", "v1", "escalated evidence", 1, "low confidence"),
+    )
+    response = await gateway.invoke(
+        _request(context_items=context, max_provider_attempts=2, latency_tier=2)
+    )
+    assert response.result.result_status is ResultStatus.SUCCEEDED
+    assert "escalated evidence" not in economy.prompts[0]
+    assert "escalated evidence" in quality.prompts[0]
+    reservation = gateway.store.reservations[response.ai_invocation_id]
+    assert response.usage is not None
+    first_usage = gateway.store.attempts[response.ai_invocation_id][0][3]
+    assert first_usage is not None
+    successful_cost = (response.usage.input_tokens - first_usage.input_tokens) * Decimal(
+        "0.000004"
+    ) + (response.usage.output_tokens - first_usage.output_tokens) * Decimal("0.000008")
+    assert reservation.actual is not None and reservation.actual > successful_cost
+    assert [attempt[2] for attempt in gateway.store.attempts[response.ai_invocation_id]] == [
+        "low_confidence",
+        "completed",
+    ]
+
+
+@pytest.mark.anyio
+async def test_route_evidence_contains_every_hard_exclusion() -> None:
+    gateway, _, _ = _gateway()
+    response = await gateway.invoke(
+        _request(quality_tier=3, latency_tier=2, blocked_adapters=frozenset({"mock-economy"}))
+    )
+    assert response.route is not None
+    assert response.route.model_key == "quality-v1"
+    assert response.route.excluded == {"economy-v1": "quality"}
+
+
+@pytest.mark.anyio
+async def test_cache_identity_includes_route_constraints() -> None:
+    gateway, economy, quality = _gateway()
+    await gateway.invoke(_request())
+    second = await gateway.invoke(
+        _request(
+            command_id="command-route-cache",
+            idempotency_key="idem-route-cache",
+            quality_tier=3,
+            latency_tier=2,
+        )
+    )
+    assert second.cache_hit is False
+    assert economy.calls == 1 and quality.calls == 1
+
+
+@pytest.mark.anyio
+async def test_nested_structured_schema_is_fully_validated_and_repaired() -> None:
+    gateway, _, _ = _gateway(economy_behaviors=(MockProviderBehavior.MALFORMED,))
+    repaired = await gateway.invoke(
+        _request(response_mode=ResponseMode.STRUCTURED, output_schema_ref="analysis-v1")
+    )
+    assert repaired.result.result_status is ResultStatus.SUCCEEDED
+    assert repaired.content is not None and '"items": []' in repaired.content
+    unresolved = await gateway.invoke(
+        _request(
+            command_id="command-schema",
+            idempotency_key="idem-schema",
+            response_mode=ResponseMode.STRUCTURED,
+            output_schema_ref="unknown-schema",
+            repair_attempts=0,
+        )
+    )
+    assert unresolved.result.result_status is ResultStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_observability_has_scoped_redacted_route_budget_cache_and_usage_evidence() -> None:
+    gateway, _, _ = _gateway()
+    await gateway.invoke(_request(prompt="never-log-this"))
+    recorder = gateway.observations
+    assert isinstance(recorder, InMemoryObservationRecorder)
+    operations = {record.context.operation_name for record in recorder.records}
+    assert {
+        "ai.context.prepared",
+        "ai.route.decided",
+        "ai.budget.reserved",
+        "ai.provider.attempt",
+        "ai.provider.usage",
+    } <= operations
+    assert all("never-log-this" not in str(record) for record in recorder.records)

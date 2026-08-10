@@ -7,6 +7,7 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,14 +20,18 @@ from sqlalchemy import func, insert, select, text
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.exc import IntegrityError
 
+from aieos.adapters.ai_mock import DeterministicMockProvider
 from aieos.adapters.event_bus_in_process import InProcessEventBus
+from aieos.adapters.observability_default import InMemoryObservationRecorder
 from aieos.adapters.persistence_postgres import (
+    PostgresAIGatewayStore,
     PostgresDatabase,
     PostgresOutboxRelay,
     PostgresOutboxStore,
     PostgresWorkflowRepository,
 )
 from aieos.adapters.persistence_postgres.models import (
+    AIGatewayBudgetRow,
     Base,
     CommandIdempotencyRow,
     DecisionEvidenceRow,
@@ -38,8 +43,11 @@ from aieos.adapters.persistence_postgres.models import (
     WorkflowRow,
     WorkflowStepRow,
 )
-from aieos.contracts import ResultEnvelope, ResultStatus
+from aieos.ai_gateway import AIInvocationRequest, AIUsage, ModelCatalogEntry, ReferenceAIGateway
+from aieos.contracts import AuthorizationContext, ResultEnvelope, ResultStatus
 from aieos.contracts.events import EventEnvelope, EventMetadata
+from aieos.security_support import ScopeAuthorizer
+from aieos.testing import DeterministicClock, DeterministicIdentifiers
 from aieos_api.composition import CompositionRoot, compose
 from aieos_api.settings import HostSettings, RuntimeAdapter
 
@@ -47,6 +55,11 @@ pytestmark = [pytest.mark.integration, pytest.mark.postgres_required, pytest.mar
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_TABLES = {
+    "ai_gateway_attempts",
+    "ai_gateway_budgets",
+    "ai_gateway_cache",
+    "ai_gateway_invocations",
+    "ai_gateway_usage_ledger",
     "alembic_version",
     "command_idempotency",
     "decision_evidence",
@@ -75,9 +88,158 @@ async def reset(database: PostgresDatabase) -> None:
             text(
                 "TRUNCATE delivery_receipts, outbox_events, outcomes, "
                 "command_idempotency, executions, workflow_steps, workflows, "
-                "decision_evidence, memory_records CASCADE"
+                "decision_evidence, memory_records, ai_gateway_usage_ledger, "
+                "ai_gateway_attempts, ai_gateway_budgets, ai_gateway_cache, "
+                "ai_gateway_invocations CASCADE"
             )
         )
+
+
+def ai_request(**overrides: object) -> AIInvocationRequest:
+    values: dict[str, object] = {
+        "execution_id": "execution-ai-1",
+        "capability_contract_version_id": "text-v1",
+        "prompt": "durable gateway",
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "correlation_id": "correlation-ai-1",
+        "causation_id": "decision-ai-1",
+        "authorization": AuthorizationContext(
+            "actor-1",
+            frozenset({"ai.invoke"}),
+            "tenant-1",
+            "workspace-1",
+            "policy-1",
+            "v1",
+        ),
+        "command_id": "command-ai-1",
+        "idempotency_key": "idem-ai-1",
+        "max_total_cost": Decimal("1"),
+    }
+    values.update(overrides)
+    return AIInvocationRequest(**values)  # type: ignore[arg-type]
+
+
+def durable_ai_gateway(
+    database: PostgresDatabase,
+) -> tuple[ReferenceAIGateway, DeterministicMockProvider, PostgresAIGatewayStore]:
+    clock = DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
+    identifiers = DeterministicIdentifiers()
+    provider = DeterministicMockProvider("mock", prefix="Durable")
+    store = PostgresAIGatewayStore(database)
+    gateway = ReferenceAIGateway(
+        clock=clock,
+        identifiers=identifiers,
+        authorizer=ScopeAuthorizer(),
+        observations=InMemoryObservationRecorder(identifiers),
+        store=store,
+        catalog=(
+            ModelCatalogEntry(
+                "model-v1",
+                "mock",
+                frozenset({"text", "stream", "structured"}),
+                4096,
+                512,
+                1,
+                1,
+                Decimal("0.000001"),
+                Decimal("0.000002"),
+                "price-v1",
+            ),
+        ),
+        adapters={"mock": provider},
+    )
+    return gateway, provider, store
+
+
+async def test_ai_gateway_acceptance_restart_replay_and_terminal_recovery(
+    database: PostgresDatabase,
+) -> None:
+    first, first_provider, _ = durable_ai_gateway(database)
+    response = await first.invoke(ai_request())
+    assert response.result.result_status is ResultStatus.SUCCEEDED
+    assert first_provider.calls == 1
+
+    restarted, restarted_provider, _ = durable_ai_gateway(database)
+    replay = await restarted.invoke(ai_request(command_id="redelivered-command"))
+    assert replay.ai_invocation_id == response.ai_invocation_id
+    assert replay.result.result_id == response.result.result_id
+    assert restarted_provider.calls == 0
+
+
+async def test_ai_gateway_concurrent_duplicate_admission_survives_workers(
+    database: PostgresDatabase,
+) -> None:
+    first, _, _ = durable_ai_gateway(database)
+    second, _, _ = durable_ai_gateway(database)
+    one, two = await asyncio.gather(
+        first.accept(ai_request()),
+        second.accept(ai_request(command_id="redelivery")),
+    )
+    assert one.ai_invocation_id == two.ai_invocation_id
+    assert one.replay is not two.replay
+
+
+async def test_ai_gateway_partial_delayed_usage_expiry_and_no_double_charge(
+    database: PostgresDatabase,
+) -> None:
+    gateway, _, store = durable_ai_gateway(database)
+    accepted = await gateway.accept(ai_request(idempotency_key="usage-recovery"))
+    await store.reserve(
+        accepted.ai_invocation_id,
+        "tenant-1",
+        "workspace-1",
+        Decimal("1"),
+        now=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    usage = AIUsage(10, 5)
+    await store.record_usage(
+        accepted.ai_invocation_id,
+        usage=usage,
+        cost=Decimal("0.25"),
+        event_key="provider-partial-1",
+        kind="partial",
+        final=False,
+    )
+    await store.record_usage(
+        accepted.ai_invocation_id,
+        usage=usage,
+        cost=Decimal("0.25"),
+        event_key="provider-partial-1",
+        kind="partial",
+        final=False,
+    )
+    assert await store.pending_reconciliation() == (accepted.ai_invocation_id,)
+    restarted = PostgresAIGatewayStore(database)
+    await restarted.record_usage(
+        accepted.ai_invocation_id,
+        usage=usage,
+        cost=Decimal("0.10"),
+        event_key="provider-delayed-final",
+        kind="delayed",
+        final=True,
+    )
+    async with database.transaction() as session:
+        budget = await session.get(
+            AIGatewayBudgetRow, ("tenant-1", "workspace-1", accepted.ai_invocation_id)
+        )
+        assert budget is not None
+        assert budget.actual_amount == Decimal("0.35")
+        assert budget.state == "committed"
+
+    expiring = await gateway.accept(
+        ai_request(idempotency_key="expiring", command_id="command-expiring")
+    )
+    await store.reserve(
+        expiring.ai_invocation_id,
+        "tenant-1",
+        "workspace-1",
+        Decimal("1"),
+        now=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    assert expiring.ai_invocation_id in await restarted.release_expired(
+        now=datetime(2026, 8, 10, 0, 6, tzinfo=UTC)
+    )
 
 
 def event(
@@ -114,8 +276,8 @@ async def test_migration_revision_readiness_and_schema_parity(
     assert await database.migration_readiness() == {
         "ready": True,
         "status": "compatible",
-        "expected_revision": "20260727_0001",
-        "deployed_revision": "20260727_0001",
+        "expected_revision": "20260810_0002",
+        "deployed_revision": "20260810_0002",
     }
     async with database.engine.connect() as connection:
         tables = await connection.run_sync(lambda sync: set(sync.dialect.get_table_names(sync)))
@@ -139,7 +301,7 @@ async def test_readiness_rejects_missing_behind_and_diverged_revision(
         await session.execute(text("UPDATE alembic_version SET version_num='diverged_revision'"))
     assert (await database.migration_readiness())["status"] == "ahead_or_diverged"
     async with database.transaction() as session:
-        await session.execute(text("UPDATE alembic_version SET version_num='20260727_0001'"))
+        await session.execute(text("UPDATE alembic_version SET version_num='20260810_0002'"))
 
 
 async def test_explicit_downgrade_and_upgrade_from_empty_database(
@@ -1077,7 +1239,7 @@ async def test_readiness_reports_unreachable_database_without_leaking_credential
         assert status == {
             "ready": False,
             "status": "database_unreachable",
-            "expected_revision": "20260727_0001",
+            "expected_revision": "20260810_0002",
         }
         assert "secret" not in repr(status)
     finally:

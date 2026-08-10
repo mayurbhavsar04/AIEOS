@@ -76,3 +76,16 @@ def test_historical_migration_is_explicit_and_metadata_independent() -> None:
     assert "op.drop_table" in source
     assert "create_all" not in source
     assert "drop_all" not in source
+
+
+def test_ai_gateway_migration_is_explicit_reversible_and_indexed() -> None:
+    migration = Path(
+        "adapters/persistence_postgres/migrations/versions/20260810_0002_ai_gateway.py"
+    )
+    source = migration.read_text()
+    assert source.count("op.create_table") == 5
+    assert source.count("op.drop_table") == 5
+    assert "create_all" not in source
+    assert "drop_all" not in source
+    for purpose in ("replay", "recovery", "budget", "usage", "cache"):
+        assert purpose in source
