@@ -543,7 +543,13 @@ async def test_cache_identity_uses_selected_content_and_input_bound() -> None:
 
 @pytest.mark.anyio
 async def test_cache_write_uses_final_progressive_context_and_route_identity() -> None:
-    gateway, economy, quality = _gateway(economy_behaviors=(MockProviderBehavior.LOW_CONFIDENCE,))
+    gateway, economy, quality = _gateway(
+        economy_behaviors=(
+            MockProviderBehavior.LOW_CONFIDENCE,
+            MockProviderBehavior.SUCCESS,
+            MockProviderBehavior.LOW_CONFIDENCE,
+        )
+    )
     context = (
         ContextItem("minimal", "v1", "minimum", 10, "initial"),
         ContextItem("expanded", "v1", "expanded evidence", 1, "escalation"),
@@ -551,7 +557,7 @@ async def test_cache_write_uses_final_progressive_context_and_route_identity() -
     first = await gateway.invoke(_request(context_items=context, latency_tier=2))
     assert first.route is not None and first.route.model_key == "quality-v1"
 
-    reproduced = await gateway.invoke(
+    minimal = await gateway.invoke(
         _request(
             command_id="expanded-replay",
             idempotency_key="expanded-replay",
@@ -559,9 +565,30 @@ async def test_cache_write_uses_final_progressive_context_and_route_identity() -
             latency_tier=2,
         )
     )
-    assert reproduced.cache_hit is True
-    assert reproduced.route is not None and reproduced.route.model_key == "quality-v1"
-    assert economy.calls == 1
+    assert minimal.cache_hit is False
+    assert minimal.route is not None and minimal.route.model_key == "economy-v1"
+    assert economy.calls == 2
+    assert quality.calls == 1
+
+    gateway.store.cache = {
+        key: value
+        for key, value in gateway.store.cache.items()
+        if value.route is not None and value.route.model_key == "quality-v1"
+    }
+
+    escalated = await gateway.invoke(
+        _request(
+            command_id="approved-expanded-replay",
+            idempotency_key="approved-expanded-replay",
+            context_items=context,
+            latency_tier=2,
+        )
+    )
+    assert escalated.cache_hit is True
+    assert escalated.route is not None and escalated.route.model_key == "quality-v1"
+    assert escalated.ai_invocation_id != first.ai_invocation_id
+    assert escalated.result.result_id != first.result.result_id
+    assert economy.calls == 3
     assert quality.calls == 1
 
     route_a_only = await gateway.invoke(
@@ -574,13 +601,18 @@ async def test_cache_write_uses_final_progressive_context_and_route_identity() -
         )
     )
     assert route_a_only.cache_hit is False
-    assert economy.calls == 2
+    assert economy.calls == 4
 
 
 @pytest.mark.anyio
 async def test_cache_write_uses_successful_fallback_route() -> None:
     gateway, economy, quality = _gateway(
-        economy_behaviors=(MockProviderBehavior.TRANSIENT_FAILURE,)
+        economy_behaviors=(
+            MockProviderBehavior.TRANSIENT_FAILURE,
+            MockProviderBehavior.SUCCESS,
+            MockProviderBehavior.SUCCESS,
+            MockProviderBehavior.TRANSIENT_FAILURE,
+        )
     )
     first = await gateway.invoke(_request(latency_tier=2))
     assert first.route is not None and first.route.model_key == "quality-v1"
@@ -595,13 +627,30 @@ async def test_cache_write_uses_successful_fallback_route() -> None:
     )
     assert route_a_only.cache_hit is False
 
-    fallback_identity = await gateway.invoke(
+    minimal_identity = await gateway.invoke(
         _request(command_id="fallback-hit", idempotency_key="fallback-hit", latency_tier=2)
+    )
+    assert minimal_identity.cache_hit is False
+    assert minimal_identity.route is not None
+    assert minimal_identity.route.model_key == "economy-v1"
+
+    gateway.store.cache = {
+        key: value
+        for key, value in gateway.store.cache.items()
+        if value.route is not None and value.route.model_key == "quality-v1"
+    }
+
+    fallback_identity = await gateway.invoke(
+        _request(
+            command_id="eligible-fallback-hit",
+            idempotency_key="eligible-fallback-hit",
+            latency_tier=2,
+        )
     )
     assert fallback_identity.cache_hit is True
     assert fallback_identity.route is not None
     assert fallback_identity.route.model_key == "quality-v1"
-    assert economy.calls == 2
+    assert economy.calls == 4
     assert quality.calls == 1
 
 
