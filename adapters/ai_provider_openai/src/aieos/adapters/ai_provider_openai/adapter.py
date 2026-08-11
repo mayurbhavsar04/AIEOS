@@ -73,6 +73,7 @@ class OpenAIProviderAdapter:
         self._owns_client = client is None
         self._effect_boundary = effect_boundary
         self._last_http_diagnostic: dict[str, object] | None = None
+        self._last_terminal_diagnostic: dict[str, object] | None = None
 
     def use_effect_boundary(self, boundary: ProviderEffectBoundary) -> None:
         self._effect_boundary = boundary
@@ -83,7 +84,8 @@ class OpenAIProviderAdapter:
 
     def safe_http_diagnostic(self) -> Mapping[str, object] | None:
         """Return allow-listed provider error metadata for governed validation only."""
-        return dict(self._last_http_diagnostic) if self._last_http_diagnostic is not None else None
+        diagnostic = self._last_terminal_diagnostic or self._last_http_diagnostic
+        return dict(diagnostic) if diagnostic is not None else None
 
     async def invoke(
         self,
@@ -109,6 +111,7 @@ class OpenAIProviderAdapter:
     async def _invoke_once(
         self, model_key: str, prompt: str, request: AIInvocationRequest
     ) -> ProviderResult:
+        self._reset_diagnostics()
         try:
             response = await self._client.post(
                 "/responses", json=self._payload(model_key, prompt, request)
@@ -138,6 +141,7 @@ class OpenAIProviderAdapter:
     async def stream(
         self, *, model_key: str, prompt: str, request: AIInvocationRequest
     ) -> AsyncIterator[ProviderStreamEvent]:
+        self._reset_diagnostics()
         payload = self._payload(model_key, prompt, request)
         payload["stream"] = True
         terminal_seen = False
@@ -212,11 +216,15 @@ class OpenAIProviderAdapter:
                         )
                         usage = self._usage(response_body.get("usage"))
                         latest_usage = self._latest_usage(latest_usage, usage)
-                        failure = self._status_failure(
-                            response_body.get("status")
-                            or str(event_type).removeprefix("response."),
-                            latest_usage,
-                        )
+                        if "status" not in response_body:
+                            response_body["status"] = str(event_type).removeprefix("response.")
+                        failure = self._terminal_failure(response_body)
+                        if failure is None:
+                            failure = ProviderFailure(
+                                "AI_PROVIDER_MALFORMED_RESPONSE",
+                                retryable=False,
+                                usage=latest_usage,
+                            )
                         raise failure
                 if not terminal_seen:
                     raise ProviderFailure(
@@ -324,12 +332,40 @@ class OpenAIProviderAdapter:
             raise ProviderFailure("AI_NON_MONOTONIC_USAGE", retryable=False, usage=current)
         return reported
 
-    @classmethod
-    def _terminal_failure(cls, body: Mapping[str, object]) -> ProviderFailure | None:
+    def _terminal_failure(self, body: Mapping[str, object]) -> ProviderFailure | None:
         status = body.get("status")
         if status == "completed":
             return None
-        return cls._status_failure(status, cls._usage(body.get("usage")))
+        usage = self._usage(body.get("usage"))
+        self._last_terminal_diagnostic = self._safe_terminal_diagnostic(body, usage)
+        return self._status_failure(status, usage)
+
+    @classmethod
+    def _safe_terminal_diagnostic(
+        cls, body: Mapping[str, object], usage: AIUsage | None
+    ) -> dict[str, object]:
+        incomplete_value = body.get("incomplete_details")
+        incomplete = (
+            cast(dict[str, object], incomplete_value) if isinstance(incomplete_value, dict) else {}
+        )
+        status = body.get("status")
+        normalized_status = status if isinstance(status, str) else "unknown"
+        reason = incomplete.get("reason")
+        normalized_reason = reason if isinstance(reason, str) else ""
+        diagnostic: dict[str, object] = {
+            "terminal_status": normalized_status,
+            "incomplete_reason": normalized_reason,
+            "termination_reason": normalized_reason or normalized_status,
+        }
+        if usage is not None:
+            diagnostic["usage"] = {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cached_tokens": usage.cached_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
+                "total_tokens": usage.input_tokens + usage.output_tokens,
+            }
+        return diagnostic
 
     @staticmethod
     def _status_failure(status: object, usage: AIUsage | None) -> ProviderFailure:
@@ -399,3 +435,7 @@ class OpenAIProviderAdapter:
         if status in {400, 404, 409, 422}:
             return ProviderFailure("AI_PROVIDER_REJECTED", retryable=False)
         return ProviderFailure("AI_PROVIDER_UNKNOWN_FAILURE", retryable=status >= 500)
+
+    def _reset_diagnostics(self) -> None:
+        self._last_http_diagnostic = None
+        self._last_terminal_diagnostic = None

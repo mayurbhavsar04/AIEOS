@@ -145,6 +145,49 @@ async def test_non_completed_response_never_succeeds_and_preserves_usage(
 
 
 @pytest.mark.anyio
+async def test_incomplete_response_exposes_only_allow_listed_terminal_diagnostic() -> None:
+    excluded_marker = "raw-provider-payload-must-not-leak"
+    client = _client(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens", "unsafe": excluded_marker},
+                "output_text": excluded_marker,
+                "usage": {
+                    "input_tokens": 9,
+                    "output_tokens": 128,
+                    "total_tokens": 137,
+                    "input_tokens_details": {"cached_tokens": 2},
+                    "output_tokens_details": {"reasoning_tokens": 128},
+                },
+                "provider_private": excluded_marker,
+            },
+        )
+    )
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure, match="AI_PROVIDER_INCOMPLETE_RESPONSE") as raised:
+        await adapter.invoke(model_key="economy-text-v1", prompt="x", request=make_request())
+    assert raised.value.usage is not None
+    assert raised.value.usage.reasoning_tokens == 128
+    diagnostic = adapter.safe_http_diagnostic()
+    assert diagnostic == {
+        "terminal_status": "incomplete",
+        "incomplete_reason": "max_output_tokens",
+        "termination_reason": "max_output_tokens",
+        "usage": {
+            "input_tokens": 9,
+            "output_tokens": 128,
+            "cached_tokens": 2,
+            "reasoning_tokens": 128,
+            "total_tokens": 137,
+        },
+    }
+    assert excluded_marker not in repr(diagnostic)
+    await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_incomplete_non_stream_terminalizes_failed_with_provider_usage() -> None:
     client = _client(
         lambda _request: httpx.Response(
@@ -326,6 +369,53 @@ async def test_explicit_stream_failure_preserves_terminal_usage(
     assert raised.value.code == expected
     assert raised.value.usage is not None
     assert (raised.value.usage.input_tokens, raised.value.usage.output_tokens) == (4, 2)
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_stream_incomplete_preserves_safe_reason_and_detailed_usage() -> None:
+    excluded_marker = "raw-stream-payload-must-not-leak"
+    data = "\n".join(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.incomplete",
+                    "response": {
+                        "status": "incomplete",
+                        "incomplete_details": {
+                            "reason": "max_output_tokens",
+                            "unsafe": excluded_marker,
+                        },
+                        "output_text": excluded_marker,
+                        "usage": {
+                            "input_tokens": 6,
+                            "output_tokens": 128,
+                            "input_tokens_details": {"cached_tokens": 1},
+                            "output_tokens_details": {"reasoning_tokens": 128},
+                        },
+                    },
+                }
+            ),
+            "",
+        )
+    )
+    client = _client(lambda _request: httpx.Response(200, text=data))
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure, match="AI_PROVIDER_INCOMPLETE_RESPONSE") as raised:
+        _ = [
+            event
+            async for event in adapter.stream(
+                model_key="economy-text-v1", prompt="x", request=make_request()
+            )
+        ]
+    assert raised.value.usage is not None
+    assert (raised.value.usage.cached_tokens, raised.value.usage.reasoning_tokens) == (1, 128)
+    diagnostic = adapter.safe_http_diagnostic()
+    assert diagnostic is not None
+    assert diagnostic["terminal_status"] == "incomplete"
+    assert diagnostic["incomplete_reason"] == "max_output_tokens"
+    assert excluded_marker not in repr(diagnostic)
     await client.aclose()
 
 
