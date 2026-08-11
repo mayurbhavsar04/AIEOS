@@ -28,12 +28,14 @@ from aieos.adapters.persistence_postgres import (
     PostgresDatabase,
     PostgresOutboxRelay,
     PostgresOutboxStore,
+    PostgresProviderEffectBoundary,
     PostgresWorkflowRepository,
 )
 from aieos.adapters.persistence_postgres.models import (
     AIGatewayAttemptRow,
     AIGatewayBudgetRow,
     AIGatewayInvocationRow,
+    AIGatewayProviderEffectRow,
     Base,
     CommandIdempotencyRow,
     DecisionEvidenceRow,
@@ -71,6 +73,7 @@ EXPECTED_TABLES = {
     "ai_gateway_budgets",
     "ai_gateway_cache",
     "ai_gateway_invocations",
+    "ai_gateway_provider_effects",
     "ai_gateway_usage_ledger",
     "alembic_version",
     "command_idempotency",
@@ -143,6 +146,7 @@ def durable_ai_gateway(
     effective_clock: Any = clock or DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
     identifiers = DeterministicIdentifiers()
     provider = provider or DeterministicMockProvider("mock", prefix="Durable")
+    provider.use_effect_boundary(PostgresProviderEffectBoundary(database))
     store = PostgresAIGatewayStore(database)
     gateway = ReferenceAIGateway(
         clock=effective_clock,
@@ -782,7 +786,7 @@ async def test_ai_gateway_structured_repair_crash_before_effect_recording_reuses
     recovered = await restarted.invoke(replace(request, command_id="repair-pre-record-recovery"))
     assert recovered.result.result_status is ResultStatus.SUCCEEDED
     assert provider.calls == 2
-    assert fresh_provider.calls == 1
+    assert fresh_provider.calls == 0
     async with database.transaction() as session:
         repair_rows = list(
             await session.scalars(
@@ -795,6 +799,17 @@ async def test_ai_gateway_structured_repair_crash_before_effect_recording_reuses
         assert len(repair_rows) == 1
         assert repair_rows[0].state == "repair"
         assert repair_rows[0].result_payload is not None
+        effects = list(
+            await session.scalars(
+                select(AIGatewayProviderEffectRow).where(
+                    AIGatewayProviderEffectRow.ai_invocation_id == recovered.ai_invocation_id,
+                    AIGatewayProviderEffectRow.effect_type == "structured_repair",
+                )
+            )
+        )
+        assert len(effects) == 1
+        assert effects[0].state == "completed"
+        assert effects[0].dispatch_count == 1
 
 
 async def test_ai_gateway_structured_repair_effect_crash_reconciles_without_double_charge(
@@ -844,6 +859,59 @@ async def test_ai_gateway_structured_repair_effect_crash_reconciles_without_doub
         assert budget is not None
         assert budget.actual_amount is not None
         assert budget.actual_amount <= request.max_total_cost
+
+
+async def test_ai_gateway_ambiguous_provider_effect_refuses_blind_replay(
+    database: PostgresDatabase,
+) -> None:
+    class InjectedCrash(BaseException):
+        pass
+
+    request = ai_request(idempotency_key="repair-ambiguous-effect")
+    gateway, _, _ = durable_ai_gateway(database)
+    accepted = await gateway.accept(request)
+    effect_key = f"{accepted.ai_invocation_id}:repair:101"
+    process_a_calls = 0
+
+    async def process_a_effect() -> ProviderResult:
+        nonlocal process_a_calls
+        process_a_calls += 1
+        raise InjectedCrash
+
+    with pytest.raises(InjectedCrash):
+        await PostgresProviderEffectBoundary(database).execute(
+            request=request,
+            effect_key=effect_key,
+            effect_type="structured_repair",
+            request_hash="canonical-hash",
+            operation=process_a_effect,
+        )
+
+    fresh_process_calls = 0
+
+    async def fresh_process_effect() -> ProviderResult:
+        nonlocal fresh_process_calls
+        fresh_process_calls += 1
+        return ProviderResult("{}", AIUsage(1, 1))
+
+    with pytest.raises(ProviderFailure, match="AI_PROVIDER_EFFECT_AMBIGUOUS"):
+        await PostgresProviderEffectBoundary(database).execute(
+            request=request,
+            effect_key=effect_key,
+            effect_type="structured_repair",
+            request_hash="canonical-hash",
+            operation=fresh_process_effect,
+        )
+    assert process_a_calls == 1
+    assert fresh_process_calls == 0
+    async with database.transaction() as session:
+        effect = await session.get(
+            AIGatewayProviderEffectRow,
+            (request.tenant_id, request.workspace_id, effect_key),
+        )
+        assert effect is not None
+        assert effect.state == "dispatching"
+        assert effect.dispatch_count == 1
 
 
 async def test_ai_gateway_repair_reservation_expiry_releases_after_crash(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from decimal import Decimal
@@ -12,6 +13,7 @@ from aieos.ai_gateway import (
     AIInvocationRequest,
     AIInvocationResponse,
     AIUsage,
+    ProviderEffectBoundary,
     ProviderFailure,
     ProviderResult,
     ProviderStreamEvent,
@@ -110,6 +112,7 @@ class DeterministicMockProvider:
         prefix: str,
         transient_failures: int = 0,
         behaviors: tuple[MockProviderBehavior, ...] = (),
+        effect_boundary: ProviderEffectBoundary | None = None,
     ) -> None:
         self.key = key
         self.prefix = prefix
@@ -118,6 +121,7 @@ class DeterministicMockProvider:
         self.prompts: list[str] = []
         self._behaviors = list(behaviors)
         self._effects: dict[str, ProviderResult | ProviderFailure] = {}
+        self._effect_boundary = effect_boundary
 
     def _behavior(self) -> MockProviderBehavior:
         return self._behaviors.pop(0) if self._behaviors else MockProviderBehavior.SUCCESS
@@ -127,6 +131,10 @@ class DeterministicMockProvider:
         """Expose process-local replay state for fresh-adapter durability assertions."""
         return len(self._effects)
 
+    def use_effect_boundary(self, boundary: ProviderEffectBoundary) -> None:
+        """Attach the provider-owned durable boundary during composition."""
+        self._effect_boundary = boundary
+
     async def invoke(
         self,
         *,
@@ -134,6 +142,50 @@ class DeterministicMockProvider:
         prompt: str,
         request: AIInvocationRequest,
         effect_key: str | None = None,
+    ) -> ProviderResult:
+        if effect_key is not None and self._effect_boundary is not None:
+            request_hash = hashlib.sha256(
+                json.dumps(
+                    {
+                        "model_key": model_key,
+                        "prompt": prompt,
+                        "tenant_id": request.tenant_id,
+                        "workspace_id": request.workspace_id,
+                        "response_mode": request.response_mode.value,
+                        "output_schema_ref": request.output_schema_ref,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            return await self._effect_boundary.execute(
+                request=request,
+                effect_key=effect_key,
+                effect_type=(
+                    "structured_repair" if ":repair:" in effect_key else "provider_invoke"
+                ),
+                request_hash=request_hash,
+                operation=lambda: self._invoke_once(
+                    model_key=model_key,
+                    prompt=prompt,
+                    request=request,
+                    effect_key=None,
+                ),
+            )
+        return await self._invoke_once(
+            model_key=model_key,
+            prompt=prompt,
+            request=request,
+            effect_key=effect_key,
+        )
+
+    async def _invoke_once(
+        self,
+        *,
+        model_key: str,
+        prompt: str,
+        request: AIInvocationRequest,
+        effect_key: str | None,
     ) -> ProviderResult:
         if effect_key is not None and effect_key in self._effects:
             replay = self._effects[effect_key]

@@ -1,6 +1,6 @@
 """Durable PostgreSQL runtime infrastructure adapters."""
 
-from .ai_gateway import PostgresAIGatewayStore
+from .ai_gateway import PostgresAIGatewayStore, PostgresProviderEffectBoundary
 from .database import PostgresDatabase
 from .memory import PostgresMemoryRepository
 from .outbox import BufferedPostgresOutbox, PostgresOutboxRelay, PostgresOutboxStore
@@ -23,6 +23,7 @@ __all__ = (
     "PostgresMemoryRepository",
     "PostgresOutboxRelay",
     "PostgresOutboxStore",
+    "PostgresProviderEffectBoundary",
     "PostgresRequestRepository",
     "PostgresWorkflowRepository",
     "TransactionParticipant",

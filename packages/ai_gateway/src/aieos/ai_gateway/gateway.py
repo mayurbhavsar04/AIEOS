@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -222,6 +222,20 @@ class ProviderAdapter(Protocol):
     def stream(
         self, *, model_key: str, prompt: str, request: AIInvocationRequest
     ) -> AsyncIterator[ProviderStreamEvent]: ...
+
+
+class ProviderEffectBoundary(Protocol):
+    """Process-independent idempotency boundary owned by a provider adapter."""
+
+    async def execute(
+        self,
+        *,
+        request: AIInvocationRequest,
+        effect_key: str,
+        effect_type: str,
+        request_hash: str,
+        operation: Callable[[], Awaitable[ProviderResult]],
+    ) -> ProviderResult: ...
 
 
 class AIGateway(Protocol):

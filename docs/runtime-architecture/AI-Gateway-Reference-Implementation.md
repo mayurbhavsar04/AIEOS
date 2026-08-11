@@ -48,7 +48,7 @@ sequenceDiagram
     participant C as Caller
     participant G as AI Gateway
     participant S as Reference store
-    participant A as Mock adapter
+    participant A as Mock adapter + durable effect sink
     C->>G: provider-neutral request
     G->>G: bounded admission preflight
     G->>S: atomic accept + AIInvocationId
@@ -56,7 +56,8 @@ sequenceDiagram
     G->>G: policy, context, routing
     G->>S: reserve under AIInvocationId
     G->>S: claim lease + durably reserve effect key
-    G->>A: normalized mock invocation + effect key
+    G->>A: normalized mock invocation + opaque effect key
+    A->>A: lock key + persist provider-side result
     A-->>G: normalized content and usage
     G->>S: effect evidence + monotonic reconciliation
     G->>S: terminal intent + terminal checkpoint
@@ -96,8 +97,13 @@ reused.
 Structured JSON is validated and measured outside the mock model before success. A malformed value
 receives at most the configured repair attempts; every repair is admitted against the remaining token
 and invocation cost envelope and its actual usage is reconciled. Before a repair call, the store
-persists a fenced, opaque provider idempotency/effect key. A fresh process can safely reissue a pending
-effect with that same key or consume durable result evidence, then reconcile usage exactly once.
+persists a fenced, opaque provider idempotency/effect key. The deterministic reference adapter then
+executes through a PostgreSQL-backed, process-independent effect sink keyed by that opaque value. The
+sink records the canonical request hash, effect type, claim generation, lifecycle, dispatch count,
+and normalized result before returning. A fresh adapter consumes that provider-side result without
+running the repair body or charging the effect again, then the Gateway reconciles usage exactly once.
+Adapters without a provider-side idempotency guarantee must surface an ambiguous/recoverable outcome
+and refuse blind replay; the reference does not generalize its exactly-once claim to such providers.
 Streaming checks the cumulative
 output bound before exposing each delta and durably records monotonic provider usage as it arrives.
 Provider-reported partial usage outranks later estimates. Streaming produces acknowledgement, stream
@@ -109,7 +115,7 @@ usage, does not restart the provider stream, and never reports false success.
 
 ## Explicit live PostgreSQL Gateway durability matrix
 
-The CI PostgreSQL gate runs 20 AI Gateway-specific tests with zero skips, separately from the
+The CI PostgreSQL gate runs 21 AI Gateway-specific tests with zero skips, separately from the
 repository-wide PostgreSQL count. They cover:
 
 - acceptance/terminal restart replay and concurrent scoped admission;
@@ -119,8 +125,9 @@ repository-wide PostgreSQL count. They cover:
 - persistence failure during terminal normalization and post-provider-effect/pre-accounting replay;
 - stream crash after a durable chunk/usage boundary, failed chunk-checkpoint persistence, and
   terminal-checkpoint failure with the same replayed Result and preserved partial usage;
-- structured-repair crash before durable effect recording with a fresh adapter and empty
-  process-local effect cache, crash after repair effect before reconciliation, reservation
+- structured-repair crash before Gateway effect recording with a fresh adapter and empty
+  process-local effect cache, one provider-side dispatch across both processes, ambiguity-safe
+  refusal after an unknown dispatch, crash after repair effect before reconciliation, reservation
   expiry/release, and cumulative repair/fallback cap after restart;
 - restart isolation proving an expanded-stage cache entry is not queried at the minimal stage;
 - partial/delayed usage, reservation expiry, idempotent replay, and no double charge.

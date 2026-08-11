@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from pydantic import TypeAdapter
@@ -20,6 +21,7 @@ from aieos.ai_gateway.gateway import (
     GatewayInvocation,
     GatewayReservation,
     InvocationState,
+    ProviderFailure,
     ProviderResult,
     ReferenceGatewayStore,
 )
@@ -31,6 +33,7 @@ from .models import (
     AIGatewayBudgetRow,
     AIGatewayCacheRow,
     AIGatewayInvocationRow,
+    AIGatewayProviderEffectRow,
     AIGatewayUsageLedgerRow,
 )
 
@@ -38,6 +41,124 @@ _INVOCATION = TypeAdapter(GatewayInvocation)
 _CACHE = TypeAdapter(CachedContent)
 _USAGE = TypeAdapter(AIUsage)
 _PROVIDER_RESULT = TypeAdapter(ProviderResult)
+
+
+class PostgresProviderEffectBoundary:
+    """Durable idempotency sink for the deterministic reference provider.
+
+    The operation runs while an opaque-key advisory lock is held, and its result is
+    committed before control returns to the Gateway. Fresh adapter instances therefore
+    replay the provider-side result instead of executing the operation body again.
+    """
+
+    def __init__(self, database: PostgresDatabase) -> None:
+        self._database = database
+
+    async def execute(
+        self,
+        *,
+        request: AIInvocationRequest,
+        effect_key: str,
+        effect_type: str,
+        request_hash: str,
+        operation: Callable[[], Awaitable[ProviderResult]],
+    ) -> ProviderResult:
+        marker = ":repair:" if effect_type == "structured_repair" else ":provider:"
+        invocation_id = effect_key.rsplit(marker, 1)[0]
+        now = datetime.now(UTC)
+        # Reserve and commit before dispatch so another process can distinguish a
+        # never-started command from an outcome whose completion is unknown.
+        async with self._database.transaction() as session:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:effect_key, 0))"),
+                {"effect_key": effect_key},
+            )
+            existing = await session.get(
+                AIGatewayProviderEffectRow,
+                (request.tenant_id, request.workspace_id, effect_key),
+            )
+            if existing is not None:
+                if existing.request_hash != request_hash or existing.effect_type != effect_type:
+                    raise ValueError("provider effect key payload conflict")
+                if existing.state == "completed" and existing.result_payload is not None:
+                    return _PROVIDER_RESULT.validate_json(existing.result_payload)
+                if existing.state in {"dispatching", "ambiguous"}:
+                    raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False)
+            else:
+                generation = await session.scalar(
+                    select(AIGatewayInvocationRow.claim_generation).where(
+                        AIGatewayInvocationRow.tenant_id == request.tenant_id,
+                        AIGatewayInvocationRow.workspace_id == request.workspace_id,
+                        AIGatewayInvocationRow.ai_invocation_id == invocation_id,
+                    )
+                )
+                if generation is None:
+                    raise RuntimeError("provider effect requires a durable invocation")
+                await session.execute(
+                    insert(AIGatewayProviderEffectRow).values(
+                        tenant_id=request.tenant_id,
+                        workspace_id=request.workspace_id,
+                        effect_key=effect_key,
+                        ai_invocation_id=invocation_id,
+                        effect_type=effect_type,
+                        request_hash=request_hash,
+                        claim_generation=generation,
+                        state="reserved",
+                        dispatch_count=0,
+                        reserved_at=now,
+                    )
+                )
+
+        # The committed dispatching state is the ambiguity fence. A process that dies
+        # after this point cannot cause a fresh adapter to repeat an unknown effect.
+        async with self._database.transaction() as session:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:effect_key, 0))"),
+                {"effect_key": effect_key},
+            )
+            dispatched = await session.scalar(
+                update(AIGatewayProviderEffectRow)
+                .where(
+                    AIGatewayProviderEffectRow.tenant_id == request.tenant_id,
+                    AIGatewayProviderEffectRow.workspace_id == request.workspace_id,
+                    AIGatewayProviderEffectRow.effect_key == effect_key,
+                    AIGatewayProviderEffectRow.state == "reserved",
+                )
+                .values(
+                    state="dispatching",
+                    dispatch_count=1,
+                    dispatching_at=now,
+                )
+                .returning(AIGatewayProviderEffectRow.effect_key)
+            )
+            if dispatched is None:
+                current = await session.get(
+                    AIGatewayProviderEffectRow,
+                    (request.tenant_id, request.workspace_id, effect_key),
+                )
+                if (
+                    current is not None
+                    and current.state == "completed"
+                    and current.result_payload is not None
+                ):
+                    return _PROVIDER_RESULT.validate_json(current.result_payload)
+                raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False)
+        result = await operation()
+        async with self._database.transaction() as session:
+            await session.execute(
+                update(AIGatewayProviderEffectRow)
+                .where(
+                    AIGatewayProviderEffectRow.tenant_id == request.tenant_id,
+                    AIGatewayProviderEffectRow.workspace_id == request.workspace_id,
+                    AIGatewayProviderEffectRow.effect_key == effect_key,
+                )
+                .values(
+                    state="completed",
+                    result_payload=_PROVIDER_RESULT.dump_json(result).decode(),
+                    completed_at=datetime.now(UTC),
+                )
+            )
+            return result
 
 
 class PostgresAIGatewayStore(ReferenceGatewayStore):

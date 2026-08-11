@@ -60,8 +60,12 @@ authoritative. This implementation adds no canonical identity and changes no fro
   schema, locale, and deterministic parameters.
 - structured validation measures original and repaired canonical payloads, has a finite repair limit,
   and admits every repair inside the remaining token/cost envelope. A repair effect's opaque
-  idempotency key is durably reserved before provider invocation so fresh-process recovery does not
-  depend on adapter memory; provider fallback remains inside one invocation.
+  idempotency key is durably reserved before provider invocation. The deterministic provider uses a
+  PostgreSQL-backed effect sink that locks once per key and durably stores the canonical request hash,
+  lifecycle, single dispatch, and result before returning, so fresh-process recovery performs no
+  second logical effect and does not depend on adapter memory. A provider lacking equivalent durable
+  idempotency must refuse replay as ambiguous rather than claim exactly-once; provider fallback
+  remains inside one invocation.
 - exact-cache lookup follows the progressive-context state machine: only the current assembled stage
   and selected route are queryable, and escalation/fallback cannot be skipped by a future-stage hit.
 - stream bounds are enforced before delta visibility and provider-reported partial usage is appended

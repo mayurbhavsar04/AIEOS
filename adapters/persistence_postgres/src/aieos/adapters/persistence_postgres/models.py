@@ -364,6 +364,39 @@ class AIGatewayAttemptRow(Scoped, Base):
     )
 
 
+class AIGatewayProviderEffectRow(Scoped, Base):
+    """Implementation-local provider operation; not a canonical platform identity."""
+
+    __tablename__ = "ai_gateway_provider_effects"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    effect_key: Mapped[str] = mapped_column(String(256), primary_key=True)
+    ai_invocation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    effect_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    claim_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    result_payload: Mapped[str | None] = mapped_column(Text)
+    dispatch_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    dispatching_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('reserved','dispatching','completed','failed','ambiguous')",
+            name="ck_ai_gateway_provider_effect_state",
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "workspace_id", "ai_invocation_id"),
+            (
+                "ai_gateway_invocations.tenant_id",
+                "ai_gateway_invocations.workspace_id",
+                "ai_gateway_invocations.ai_invocation_id",
+            ),
+        ),
+    )
+
+
 class AIGatewayCacheRow(Scoped, Base):
     __tablename__ = "ai_gateway_cache"
     tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
