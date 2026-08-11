@@ -1057,8 +1057,8 @@ async def test_migration_revision_readiness_and_schema_parity(
     assert await database.migration_readiness() == {
         "ready": True,
         "status": "compatible",
-        "expected_revision": "20260810_0004",
-        "deployed_revision": "20260810_0004",
+        "expected_revision": "20260811_0005",
+        "deployed_revision": "20260811_0005",
     }
     async with database.engine.connect() as connection:
         tables = await connection.run_sync(lambda sync: set(sync.dialect.get_table_names(sync)))
@@ -1082,7 +1082,7 @@ async def test_readiness_rejects_missing_behind_and_diverged_revision(
         await session.execute(text("UPDATE alembic_version SET version_num='diverged_revision'"))
     assert (await database.migration_readiness())["status"] == "ahead_or_diverged"
     async with database.transaction() as session:
-        await session.execute(text("UPDATE alembic_version SET version_num='20260810_0004'"))
+        await session.execute(text("UPDATE alembic_version SET version_num='20260811_0005'"))
 
 
 async def test_explicit_downgrade_and_upgrade_from_empty_database(
@@ -2020,7 +2020,7 @@ async def test_readiness_reports_unreachable_database_without_leaking_credential
         assert status == {
             "ready": False,
             "status": "database_unreachable",
-            "expected_revision": "20260810_0004",
+            "expected_revision": "20260811_0005",
         }
         assert "secret" not in repr(status)
     finally:

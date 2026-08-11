@@ -105,3 +105,10 @@ def test_ai_gateway_migration_is_explicit_reversible_and_indexed() -> None:
     assert fencing_migration.count("op.drop_column") == 2
     assert "create_all" not in fencing_migration
     assert "drop_all" not in fencing_migration
+    effect_boundary_migration = Path(
+        "adapters/persistence_postgres/migrations/versions/20260811_0005_provider_effect_boundary.py"
+    ).read_text()
+    assert effect_boundary_migration.count("op.create_table") == 1
+    assert effect_boundary_migration.count("op.drop_table") == 1
+    assert "create_all" not in effect_boundary_migration
+    assert "drop_all" not in effect_boundary_migration
