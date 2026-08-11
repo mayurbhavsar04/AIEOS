@@ -381,8 +381,13 @@ class OpenAIProviderAdapter:
         if status == 403:
             return ProviderFailure("AI_PROVIDER_PERMISSION_DENIED", retryable=False)
         if status == 429:
-            quota_codes = {"insufficient_quota", "billing_hard_limit_reached"}
-            return ProviderFailure("AI_PROVIDER_RATE_LIMITED", retryable=code not in quota_codes)
+            quota_codes = {
+                "insufficient_quota",
+                "billing_hard_limit_reached",
+                "credit_balance_exhausted",
+            }
+            is_quota = code in quota_codes or error_type == "insufficient_quota"
+            return ProviderFailure("AI_PROVIDER_RATE_LIMITED", retryable=not is_quota)
         if status == 408:
             return ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=True)
         if status in {500, 502, 504}:

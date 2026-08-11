@@ -462,7 +462,15 @@ async def test_http_failure_accepts_an_already_consumed_stream_body() -> None:
 @pytest.mark.anyio
 async def test_quota_429_is_not_treated_as_transient() -> None:
     client = _client(
-        lambda _request: httpx.Response(429, json={"error": {"code": "insufficient_quota"}})
+        lambda _request: httpx.Response(
+            429,
+            json={
+                "error": {
+                    "type": "insufficient_quota",
+                    "code": "credit_balance_exhausted",
+                }
+            },
+        )
     )
     adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
     with pytest.raises(ProviderFailure) as raised:
