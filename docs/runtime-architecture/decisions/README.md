@@ -34,6 +34,7 @@ These TDRs apply the repository's ADR discipline to implementation choices witho
 | [TDR-020](TDR-020-Structured-Output-and-Streaming.md) | Provider-neutral structured output and streaming |
 | [TDR-021](TDR-021-Fallback-and-Circuit-Boundary.md) | Bounded in-invocation fallback and circuit boundary |
 | [TDR-022](TDR-022-AI-Usage-and-Cost-Accounting.md) | AI usage and cost accounting |
+| [TDR-023](TDR-023-First-Real-AI-Provider.md) | OpenAI as the first, non-exclusive real provider adapter |
 
 Every record includes context, drivers, options, rationale, consequences, frozen-baseline compatibility, and revisit triggers. Changes to a frozen baseline require the higher governance path, not a TDR alone.
 
