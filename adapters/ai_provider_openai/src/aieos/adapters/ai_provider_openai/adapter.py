@@ -72,6 +72,7 @@ class OpenAIProviderAdapter:
         )
         self._owns_client = client is None
         self._effect_boundary = effect_boundary
+        self._last_http_diagnostic: dict[str, object] | None = None
 
     def use_effect_boundary(self, boundary: ProviderEffectBoundary) -> None:
         self._effect_boundary = boundary
@@ -79,6 +80,10 @@ class OpenAIProviderAdapter:
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+    def safe_http_diagnostic(self) -> Mapping[str, object] | None:
+        """Return allow-listed provider error metadata for governed validation only."""
+        return dict(self._last_http_diagnostic) if self._last_http_diagnostic is not None else None
 
     async def invoke(
         self,
@@ -139,7 +144,9 @@ class OpenAIProviderAdapter:
         latest_usage: AIUsage | None = None
         try:
             async with self._client.stream("POST", "/responses", json=payload) as response:
-                response.raise_for_status()
+                if not response.is_success:
+                    await response.aread()
+                    raise self._http_failure(response)
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
                         continue
@@ -221,8 +228,6 @@ class OpenAIProviderAdapter:
             raise
         except httpx.TimeoutException as error:
             raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=True) from error
-        except httpx.HTTPStatusError as error:
-            raise self._http_failure(error.response) from error
         except (httpx.RequestError, json.JSONDecodeError) as error:
             raise ProviderFailure(
                 "AI_PROVIDER_STREAM_FAILED", retryable=True, usage=latest_usage
@@ -238,10 +243,14 @@ class OpenAIProviderAdapter:
     def _payload(
         self, model_key: str, prompt: str, request: AIInvocationRequest
     ) -> dict[str, object]:
+        mapping = MODEL_BY_KEY.get(model_key)
+        if mapping is None:
+            raise ProviderFailure("AI_MODEL_NOT_AVAILABLE", retryable=False)
         payload: dict[str, object] = {
-            "model": self._provider_model(model_key),
+            "model": mapping.provider_model,
             "input": prompt,
-            "max_output_tokens": request.max_output_tokens,
+            "max_output_tokens": max(request.max_output_tokens, mapping.minimum_output_tokens),
+            "reasoning": {"effort": mapping.reasoning_effort},
             "store": False,
         }
         if request.response_mode is ResponseMode.STRUCTURED:
@@ -340,24 +349,40 @@ class OpenAIProviderAdapter:
     def _count(value: object) -> int:
         return value if isinstance(value, int) and value >= 0 else 0
 
-    @staticmethod
-    def _http_failure(response: httpx.Response) -> ProviderFailure:
+    def _http_failure(self, response: httpx.Response) -> ProviderFailure:
         status = response.status_code
         code = ""
+        error_type = ""
+        param = ""
+        message = ""
         try:
             body = cast(dict[str, object], response.json())
             error = body.get("error", {})
             if isinstance(error, dict):
                 error_body = cast(dict[str, object], error)
                 code = str(error_body.get("code") or error_body.get("type") or "")
-        except ValueError:
+                error_type = str(error_body.get("type") or "")
+                param = str(error_body.get("param") or "")
+                if param == "max_output_tokens":
+                    message = str(error_body.get("message") or "")[:240]
+        except (ValueError, httpx.ResponseNotRead):
             pass
+        self._last_http_diagnostic = {
+            "status": status,
+            "type": error_type,
+            "code": code,
+            "param": param,
+            "message": message,
+            "request_id": response.headers.get("x-request-id", ""),
+            "retry_after": response.headers.get("retry-after", ""),
+        }
         if status == 401:
             return ProviderFailure("AI_PROVIDER_AUTHENTICATION_FAILED", retryable=False)
         if status == 403:
             return ProviderFailure("AI_PROVIDER_PERMISSION_DENIED", retryable=False)
         if status == 429:
-            return ProviderFailure("AI_PROVIDER_RATE_LIMITED", retryable=True)
+            quota_codes = {"insufficient_quota", "billing_hard_limit_reached"}
+            return ProviderFailure("AI_PROVIDER_RATE_LIMITED", retryable=code not in quota_codes)
         if status == 408:
             return ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=True)
         if status in {500, 502, 504}:

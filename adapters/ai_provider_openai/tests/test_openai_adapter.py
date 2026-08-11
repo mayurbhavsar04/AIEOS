@@ -101,7 +101,8 @@ async def test_maps_request_response_and_detailed_usage() -> None:
     assert seen == {
         "model": "gpt-5-mini-2025-08-07",
         "input": "Reply OK",
-        "max_output_tokens": 8,
+        "max_output_tokens": 16,
+        "reasoning": {"effort": "minimal"},
         "store": False,
     }
     assert result.content == "OK"
@@ -215,6 +216,24 @@ async def test_maps_structured_output_without_replacing_gateway_validation() -> 
             },
         }
     }
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_provider_minimum_does_not_change_caller_facing_output_limit() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"status": "completed", "output_text": "OK"})
+
+    client = _client(handler)
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    request = make_request(max_output_tokens=1)
+    result = await adapter.invoke(model_key="economy-text-v1", prompt="Reply OK", request=request)
+    assert seen["max_output_tokens"] == 16
+    assert result.content == "OK"
+    assert request.max_output_tokens == 1
     await client.aclose()
 
 
@@ -387,6 +406,68 @@ async def test_normalizes_provider_errors(
     with pytest.raises(ProviderFailure) as raised:
         await adapter.invoke(model_key="economy-text-v1", prompt="Reply OK", request=make_request())
     assert (raised.value.code, raised.value.retryable) == (expected, retryable)
+    await client.aclose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"code": "invalid_request_error"}},
+        "upstream rejected the request",
+    ],
+)
+async def test_stream_http_error_body_is_consumed_and_normalized(body: object) -> None:
+    encoded = json.dumps(body).encode() if isinstance(body, dict) else str(body).encode()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            content=encoded,
+            headers={
+                "content-type": "application/json" if isinstance(body, dict) else "text/plain"
+            },
+        )
+
+    client = httpx.AsyncClient(
+        base_url="https://example.invalid/v1", transport=httpx.MockTransport(handler)
+    )
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        _ = [
+            event
+            async for event in adapter.stream(
+                model_key="economy-text-v1", prompt="x", request=make_request()
+            )
+        ]
+    assert (raised.value.code, raised.value.retryable) == ("AI_PROVIDER_REJECTED", False)
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_http_failure_accepts_an_already_consumed_stream_body() -> None:
+    response = httpx.Response(
+        400,
+        json={"error": {"code": "invalid_request_error"}},
+    )
+    await response.aread()
+    client = _client(lambda _: response)
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        await adapter.invoke(model_key="economy-text-v1", prompt="x", request=make_request())
+    assert (raised.value.code, raised.value.retryable) == ("AI_PROVIDER_REJECTED", False)
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_quota_429_is_not_treated_as_transient() -> None:
+    client = _client(
+        lambda _request: httpx.Response(429, json={"error": {"code": "insufficient_quota"}})
+    )
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        await adapter.invoke(model_key="economy-text-v1", prompt="x", request=make_request())
+    assert (raised.value.code, raised.value.retryable) == ("AI_PROVIDER_RATE_LIMITED", False)
     await client.aclose()
 
 

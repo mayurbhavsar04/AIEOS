@@ -14,6 +14,8 @@ class OpenAIModelMapping:
     pricing_reference: str
     data_handling: str
     version_policy: str
+    minimum_output_tokens: int
+    reasoning_effort: str
 
 
 OPENAI_MODEL_CATALOG = (
@@ -38,6 +40,8 @@ OPENAI_MODEL_CATALOG = (
         pricing_reference="https://developers.openai.com/api/docs/models/gpt-5-mini",
         data_handling="API data controls apply; ZDR eligibility is feature/account dependent",
         version_policy="Pinned snapshot; review before deprecation or price/capability change",
+        minimum_output_tokens=16,
+        reasoning_effort="minimal",
     ),
 )
 
