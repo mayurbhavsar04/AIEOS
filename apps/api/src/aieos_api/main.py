@@ -1,10 +1,14 @@
 """FastAPI host for health and the executable reference workflow."""
 
+import json
+from collections.abc import AsyncIterator
 from typing import cast
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
+from starlette.responses import StreamingResponse
 
+from aieos.ai_gateway import AIInvocationRequest, ResponseMode
 from aieos_api.composition import CompositionRoot
 from aieos_api.lifecycle import lifespan
 
@@ -17,6 +21,15 @@ class HelloRequest(BaseModel):
     timeout_seconds: float | None = Field(default=None, gt=0)
     command_id: str | None = Field(default=None, min_length=1)
     idempotency_key: str | None = Field(default=None, min_length=1)
+
+
+class MockAIRequest(BaseModel):
+    prompt: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    structured: bool = False
+    stream: bool = False
+    quality_tier: int = Field(default=1, ge=1, le=3)
+    max_output_tokens: int = Field(default=128, ge=1, le=4096)
 
 
 @app.get("/health")
@@ -51,6 +64,73 @@ async def reference_hello(body: HelloRequest, request: Request) -> dict[str, obj
         "value": result.value_reference,
         "error_id": result.error_id,
         "metadata": dict(result.metadata),
+    }
+
+
+@app.post("/reference/ai", response_model=None)
+async def reference_ai(
+    body: MockAIRequest, request: Request
+) -> dict[str, object] | StreamingResponse:
+    """Run one offline provider-neutral AI Gateway reference invocation."""
+    runtime = cast(CompositionRoot, request.app.state.composition).reference_runtime
+    invocation = AIInvocationRequest(
+        execution_id=runtime.identifiers.new("execution"),
+        capability_contract_version_id="text-generation-v1",
+        prompt=body.prompt,
+        tenant_id=runtime.settings.tenant_id,
+        workspace_id=runtime.settings.workspace_id,
+        correlation_id=runtime.identifiers.new("correlation"),
+        causation_id=runtime.identifiers.new("decision"),
+        authorization=runtime.authorization,
+        command_id=runtime.identifiers.new("command"),
+        idempotency_key=body.idempotency_key,
+        response_mode=ResponseMode.STRUCTURED if body.structured else ResponseMode.TEXT,
+        output_schema_ref="reference-answer-v1" if body.structured else None,
+        quality_tier=body.quality_tier,
+        max_output_tokens=body.max_output_tokens,
+    )
+    if body.stream:
+
+        async def events() -> AsyncIterator[bytes]:
+            async for chunk in runtime.reference_ai_gateway.stream(invocation):
+                document: dict[str, object] = {
+                    "ai_invocation_id": chunk.ai_invocation_id,
+                    "sequence": chunk.sequence,
+                    "kind": chunk.kind,
+                }
+                if chunk.content is not None:
+                    document["content"] = chunk.content
+                if chunk.usage is not None:
+                    document["usage"] = {
+                        "input_tokens": chunk.usage.input_tokens,
+                        "output_tokens": chunk.usage.output_tokens,
+                        "estimated": chunk.usage.estimated,
+                    }
+                if chunk.terminal is not None:
+                    document["terminal"] = {
+                        "result_id": chunk.terminal.result.result_id,
+                        "status": chunk.terminal.result.result_status.value,
+                        "error_id": chunk.terminal.result.error_id,
+                    }
+                yield (json.dumps(document, sort_keys=True) + "\n").encode()
+
+        return StreamingResponse(events(), media_type="application/x-ndjson")
+    response = await runtime.reference_ai_gateway.invoke(invocation)
+    return {
+        "ai_invocation_id": response.ai_invocation_id,
+        "result_id": response.result.result_id,
+        "status": response.result.result_status.value,
+        "content": response.content,
+        "error_id": response.result.error_id,
+        "cache_hit": response.cache_hit,
+        "route": response.route.model_key if response.route else None,
+        "usage": None
+        if response.usage is None
+        else {
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+            "estimated": response.usage.estimated,
+        },
     }
 
 

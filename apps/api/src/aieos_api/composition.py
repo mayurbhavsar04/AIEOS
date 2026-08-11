@@ -1,8 +1,9 @@
 """Explicit composition root for the executable AIEOS reference workflow."""
 
 from dataclasses import dataclass
+from decimal import Decimal
 
-from aieos.adapters.ai_mock import MockAIGateway
+from aieos.adapters.ai_mock import DeterministicMockProvider, MockAIGateway
 from aieos.adapters.command_dispatch_in_process import InProcessCommandDispatcher
 from aieos.adapters.event_bus_in_process import (
     InMemoryOutboxStore,
@@ -13,6 +14,7 @@ from aieos.adapters.memory_persistence import InMemoryMemoryRepository
 from aieos.adapters.observability_default import InMemoryObservationRecorder
 from aieos.adapters.persistence_postgres import (
     BufferedPostgresOutbox,
+    PostgresAIGatewayStore,
     PostgresDatabase,
     PostgresDecisionEvidenceRepository,
     PostgresExecutionRepository,
@@ -25,6 +27,7 @@ from aieos.adapters.persistence_postgres import (
     checkpoint,
     scoped_idempotency_lock_key,
 )
+from aieos.ai_gateway import ModelCatalogEntry, ReferenceAIGateway, ReferenceGatewayStore
 from aieos.capability_registry import CapabilityImplementation, CapabilityRegistry
 from aieos.contracts import AuthorizationContext, ResultEnvelope
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
@@ -132,6 +135,7 @@ class ReferenceRuntime:
     memory_service: MemoryService
     memory_repository: InMemoryMemoryRepository | PostgresMemoryRepository
     ai_gateway: MockAIGateway
+    reference_ai_gateway: ReferenceAIGateway
     observations: InMemoryObservationRecorder
     workflow_repository: InMemoryWorkflowRepository
     execution_repository: InMemoryExecutionRepository
@@ -294,6 +298,7 @@ def compose(
         request_repository = PostgresRequestRepository(database, **durable_scope)
         decisions = PostgresDecisionEvidenceRepository(database, **durable_scope)
         memory_repository = PostgresMemoryRepository(database)
+        gateway_store = PostgresAIGatewayStore(database)
         durable_participants = (
             memory_repository,
             workflow_repository,
@@ -323,6 +328,7 @@ def compose(
         execution_repository = InMemoryExecutionRepository()
         request_repository = InMemoryRequestRepository()
         decisions = InMemoryDecisionEvidenceRepository()
+        gateway_store = ReferenceGatewayStore()
         durable_participants = ()
     memory_service = MemoryService(
         repository=memory_repository,
@@ -336,6 +342,43 @@ def compose(
         authorizer=authorizer,
         failures_before_success=resolved.mock_ai_failures_before_success,
         delay_seconds=resolved.mock_ai_delay_seconds,
+    )
+    reference_ai_gateway = ReferenceAIGateway(
+        clock=resolved_clock,
+        identifiers=resolved_identifiers,
+        authorizer=authorizer,
+        observations=observations,
+        store=gateway_store,
+        catalog=(
+            ModelCatalogEntry(
+                model_key="economy-text-v1",
+                adapter_key="mock-economy",
+                capabilities=frozenset({"text", "structured", "stream"}),
+                context_limit=4096,
+                max_output=1024,
+                quality_tier=1,
+                latency_tier=1,
+                input_cost_per_token=Decimal("0.000001"),
+                output_cost_per_token=Decimal("0.000002"),
+                pricing_version="reference-2026-08",
+            ),
+            ModelCatalogEntry(
+                model_key="quality-text-v1",
+                adapter_key="mock-quality",
+                capabilities=frozenset({"text", "structured", "stream", "reasoning"}),
+                context_limit=16384,
+                max_output=4096,
+                quality_tier=3,
+                latency_tier=2,
+                input_cost_per_token=Decimal("0.000004"),
+                output_cost_per_token=Decimal("0.000008"),
+                pricing_version="reference-2026-08",
+            ),
+        ),
+        adapters={
+            "mock-economy": DeterministicMockProvider("mock-economy", prefix="Economy"),
+            "mock-quality": DeterministicMockProvider("mock-quality", prefix="Quality"),
+        },
     )
     capabilities = CapabilityRegistry(
         (
@@ -413,6 +456,7 @@ def compose(
         memory_service=memory_service,
         memory_repository=memory_repository,
         ai_gateway=ai_gateway,
+        reference_ai_gateway=reference_ai_gateway,
         observations=observations,
         workflow_repository=workflow_repository,
         execution_repository=execution_repository,

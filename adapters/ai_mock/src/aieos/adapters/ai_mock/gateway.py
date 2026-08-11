@@ -3,8 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+from collections.abc import AsyncIterator
+from decimal import Decimal
+from enum import StrEnum
 
-from aieos.ai_gateway import AIInvocationRequest, AIInvocationResponse
+from aieos.ai_gateway import (
+    AIInvocationRequest,
+    AIInvocationResponse,
+    AIUsage,
+    ProviderEffectBoundary,
+    ProviderFailure,
+    ProviderResult,
+    ProviderStreamEvent,
+)
 from aieos.contracts import (
     ErrorCategory,
     ErrorSeverity,
@@ -77,4 +90,182 @@ class MockAIGateway:
         return AIInvocationResponse(invocation_id, result, content=content)
 
 
-__all__ = ("MockAIGateway",)
+class MockProviderBehavior(StrEnum):
+    SUCCESS = "success"
+    TRANSIENT_FAILURE = "transient_failure"
+    PERMANENT_FAILURE = "permanent_failure"
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+    MALFORMED = "malformed"
+    LOW_CONFIDENCE = "low_confidence"
+    MISSING_USAGE = "missing_usage"
+    MID_STREAM_FAILURE = "mid_stream_failure"
+
+
+class DeterministicMockProvider:
+    """Configurable provider adapter that never performs network I/O."""
+
+    def __init__(
+        self,
+        key: str,
+        *,
+        prefix: str,
+        transient_failures: int = 0,
+        behaviors: tuple[MockProviderBehavior, ...] = (),
+        effect_boundary: ProviderEffectBoundary | None = None,
+    ) -> None:
+        self.key = key
+        self.prefix = prefix
+        self.transient_failures = transient_failures
+        self.calls = 0
+        self.prompts: list[str] = []
+        self._behaviors = list(behaviors)
+        self._effects: dict[str, ProviderResult | ProviderFailure] = {}
+        self._effect_boundary = effect_boundary
+
+    def _behavior(self) -> MockProviderBehavior:
+        return self._behaviors.pop(0) if self._behaviors else MockProviderBehavior.SUCCESS
+
+    @property
+    def effect_cache_size(self) -> int:
+        """Expose process-local replay state for fresh-adapter durability assertions."""
+        return len(self._effects)
+
+    def use_effect_boundary(self, boundary: ProviderEffectBoundary) -> None:
+        """Attach the provider-owned durable boundary during composition."""
+        self._effect_boundary = boundary
+
+    async def invoke(
+        self,
+        *,
+        model_key: str,
+        prompt: str,
+        request: AIInvocationRequest,
+        effect_key: str | None = None,
+    ) -> ProviderResult:
+        if effect_key is not None and self._effect_boundary is not None:
+            request_hash = hashlib.sha256(
+                json.dumps(
+                    {
+                        "model_key": model_key,
+                        "prompt": prompt,
+                        "tenant_id": request.tenant_id,
+                        "workspace_id": request.workspace_id,
+                        "response_mode": request.response_mode.value,
+                        "output_schema_ref": request.output_schema_ref,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            return await self._effect_boundary.execute(
+                request=request,
+                effect_key=effect_key,
+                effect_type=(
+                    "structured_repair" if ":repair:" in effect_key else "provider_invoke"
+                ),
+                request_hash=request_hash,
+                operation=lambda: self._invoke_once(
+                    model_key=model_key,
+                    prompt=prompt,
+                    request=request,
+                    effect_key=None,
+                ),
+            )
+        return await self._invoke_once(
+            model_key=model_key,
+            prompt=prompt,
+            request=request,
+            effect_key=effect_key,
+        )
+
+    async def _invoke_once(
+        self,
+        *,
+        model_key: str,
+        prompt: str,
+        request: AIInvocationRequest,
+        effect_key: str | None,
+    ) -> ProviderResult:
+        if effect_key is not None and effect_key in self._effects:
+            replay = self._effects[effect_key]
+            if isinstance(replay, ProviderFailure):
+                raise replay
+            return replay
+        self.calls += 1
+        self.prompts.append(prompt)
+        failure_usage = AIUsage(input_tokens=max(1, len(prompt.encode()) // 4), output_tokens=0)
+        if self.transient_failures:
+            self.transient_failures -= 1
+            failure = ProviderFailure(
+                "AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True, usage=failure_usage
+            )
+            if effect_key is not None:
+                self._effects[effect_key] = failure
+            raise failure
+        behavior = self._behavior()
+        if behavior is MockProviderBehavior.TRANSIENT_FAILURE:
+            raise ProviderFailure(
+                "AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True, usage=failure_usage
+            )
+        if behavior is MockProviderBehavior.PERMANENT_FAILURE:
+            raise ProviderFailure("AI_PROVIDER_REJECTED", retryable=False, usage=failure_usage)
+        if behavior is MockProviderBehavior.TIMEOUT:
+            raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=True)
+        if behavior is MockProviderBehavior.CANCELLED:
+            raise ProviderFailure("AI_PROVIDER_CANCELLED", retryable=False)
+        if behavior is MockProviderBehavior.MALFORMED:
+            content = "not-json"
+        elif request.output_schema_ref == "analysis-v1":
+            content = json.dumps(
+                {"result": {"summary": request.prompt.strip(), "items": [model_key]}}
+            )
+        elif request.output_schema_ref:
+            content = json.dumps({"answer": request.prompt.strip(), "model": model_key})
+        else:
+            content = f"{self.prefix}: {request.prompt.strip()}"
+        usage = None
+        if behavior is not MockProviderBehavior.MISSING_USAGE:
+            usage = AIUsage(
+                input_tokens=max(1, len(prompt.encode()) // 4),
+                output_tokens=max(1, len(content.encode()) // 4),
+            )
+        confidence = (
+            Decimal("0.25") if behavior is MockProviderBehavior.LOW_CONFIDENCE else Decimal("1")
+        )
+        result = ProviderResult(content, usage, confidence=confidence)
+        if effect_key is not None:
+            self._effects[effect_key] = result
+        return result
+
+    async def stream(
+        self, *, model_key: str, prompt: str, request: AIInvocationRequest
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        self.calls += 1
+        self.prompts.append(prompt)
+        behavior = self._behavior()
+        content = f"{self.prefix}: {request.prompt.strip()}"
+        for index, word in enumerate(content.split()):
+            await asyncio.sleep(0)
+            if behavior is MockProviderBehavior.MID_STREAM_FAILURE and index == 1:
+                raise ProviderFailure("AI_PROVIDER_STREAM_FAILED", retryable=False)
+            yield ProviderStreamEvent("content_delta", content=word + " ")
+            if behavior is MockProviderBehavior.MID_STREAM_FAILURE and index == 0:
+                yield ProviderStreamEvent(
+                    "usage",
+                    usage=AIUsage(
+                        input_tokens=max(1, len(prompt.encode()) // 4),
+                        output_tokens=max(1, len((word + " ").encode()) // 4),
+                    ),
+                )
+        if behavior is not MockProviderBehavior.MISSING_USAGE:
+            yield ProviderStreamEvent(
+                "usage",
+                usage=AIUsage(
+                    input_tokens=max(1, len(prompt.encode()) // 4),
+                    output_tokens=max(1, len(content.encode()) // 4),
+                ),
+            )
+
+
+__all__ = ("DeterministicMockProvider", "MockAIGateway", "MockProviderBehavior")

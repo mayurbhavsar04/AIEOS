@@ -3,7 +3,13 @@ name = "aieos-ai-gateway"
 version = "0.0.0"
 description = "AIEOS ai gateway bootstrap package."
 requires-python = "==3.13.*"
-dependencies = ["aieos-contracts"]
+dependencies = [
+  "aieos-contracts",
+  "aieos-domain",
+  "aieos-observability",
+  "aieos-result-error-support",
+  "aieos-security-support",
+]
 
 [build-system]
 requires = ["hatchling==1.27.0"]
@@ -17,3 +23,7 @@ packages = ["src/aieos/ai_gateway"]
 
 [tool.uv.sources]
 aieos-contracts = { workspace = true }
+aieos-domain = { workspace = true }
+aieos-observability = { workspace = true }
+aieos-result-error-support = { workspace = true }
+aieos-security-support = { workspace = true }

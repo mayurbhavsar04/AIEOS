@@ -4,6 +4,7 @@ version = "0.0.0"
 description = "AIEOS persistence postgres bootstrap package."
 requires-python = "==3.13.*"
 dependencies = [
+  "aieos-ai-gateway",
   "aieos-contracts",
   "aieos-domain",
   "aieos-event-bus",
@@ -27,6 +28,7 @@ packages = ["src/aieos/adapters/persistence_postgres"]
 "src" = ""
 
 [tool.uv.sources]
+aieos-ai-gateway = { workspace = true }
 aieos-contracts = { workspace = true }
 aieos-domain = { workspace = true }
 aieos-event-bus = { workspace = true }

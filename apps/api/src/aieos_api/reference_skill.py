@@ -30,6 +30,8 @@ class HelloAIEOSSkill:
                 correlation_id=skill_input.correlation_id,
                 causation_id=skill_input.causation_id,
                 authorization=skill_input.authorization,
+                command_id=skill_input.causation_id,
+                idempotency_key=skill_input.execution_id,
             )
         )
         if ai_response.error is not None or ai_response.content is None:
