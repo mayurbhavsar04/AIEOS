@@ -46,12 +46,13 @@ exclude = ["**/.venv", "**/__pycache__"]
 reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-config --strict-markers"
+addopts = "-ra --strict-config --strict-markers -m 'not live_provider'"
 pythonpath = ["."]
 testpaths = ["packages", "apps", "adapters", "tests"]
 markers = [
   "integration: bootstrap integration checks",
   "postgres_required: mandatory live PostgreSQL durability checks",
+  "live_provider: explicitly governed paid-provider conformance checks",
   "e2e: end-to-end placeholders",
 ]
 

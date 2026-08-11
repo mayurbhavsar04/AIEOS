@@ -1,0 +1,1 @@
+"""Private OpenAI protocol mapping."""

@@ -1074,6 +1074,12 @@ class ReferenceAIGateway:
             response = self._failure(
                 invocation, last_failure or ProviderFailure("AI_GATEWAY_FAILURE", retryable=False)
             )
+            if total_input > 0 or total_output > 0:
+                response = replace(
+                    response,
+                    usage=AIUsage(input_tokens=total_input, output_tokens=total_output),
+                )
+                invocation.terminal = response
             await self.store.checkpoint(invocation)
             return response
         except asyncio.CancelledError:
@@ -1372,8 +1378,15 @@ class ReferenceAIGateway:
                     terminal=terminal,
                 )
                 return
+            failure = (
+                error
+                if isinstance(error, ProviderFailure)
+                else ProviderFailure("AI_STREAM_FAILURE", retryable=False)
+            )
+            if failure.usage is not None:
+                partial_usage = failure.usage
             if reservation is not None:
-                if parts and invocation.route is not None:
+                if (parts or partial_usage is not None) and invocation.route is not None:
                     partial = partial_usage or AIUsage(
                         input_tokens, self._estimate("".join(parts)), estimated=True
                     )
@@ -1398,11 +1411,6 @@ class ReferenceAIGateway:
                     )
                 else:
                     await self.store.release(invocation.invocation_id)
-            failure = (
-                error
-                if isinstance(error, ProviderFailure)
-                else ProviderFailure("AI_STREAM_FAILURE", retryable=False)
-            )
             response = self._failure(invocation, failure)
             if partial_usage is not None:
                 response = replace(response, usage=partial_usage)
