@@ -17,14 +17,13 @@ from aieos.adapters.ai_provider_openai import (
 from aieos.adapters.observability_default import InMemoryObservationRecorder
 from aieos.ai_gateway import (
     AIInvocationRequest,
-    ProviderAdapter,
     ProviderFailure,
     ProviderResult,
     ReferenceAIGateway,
     ReferenceGatewayStore,
     ResponseMode,
 )
-from aieos.contracts import AuthorizationContext
+from aieos.contracts import AuthorizationContext, ResultStatus
 from aieos.domain import SystemClock, UuidIdentifierFactory
 from aieos.security_support import ScopeAuthorizer
 
@@ -61,6 +60,19 @@ def _client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncCl
     )
 
 
+def _gateway(adapter: OpenAIProviderAdapter) -> ReferenceAIGateway:
+    identifiers = UuidIdentifierFactory()
+    return ReferenceAIGateway(
+        clock=SystemClock(),
+        identifiers=identifiers,
+        authorizer=ScopeAuthorizer(),
+        observations=InMemoryObservationRecorder(identifiers),
+        store=ReferenceGatewayStore(),
+        catalog=(OPENAI_MODEL_CATALOG[0].catalog,),
+        adapters={adapter.key: adapter},
+    )
+
+
 @pytest.mark.anyio
 async def test_maps_request_response_and_detailed_usage() -> None:
     seen: dict[str, object] = {}
@@ -70,6 +82,7 @@ async def test_maps_request_response_and_detailed_usage() -> None:
         return httpx.Response(
             200,
             json={
+                "status": "completed",
                 "output_text": "OK",
                 "usage": {
                     "input_tokens": 2,
@@ -99,12 +112,85 @@ async def test_maps_request_response_and_detailed_usage() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("incomplete", "AI_PROVIDER_INCOMPLETE_RESPONSE"),
+        ("failed", "AI_PROVIDER_FAILED_RESPONSE"),
+        ("cancelled", "AI_PROVIDER_CANCELLED"),
+        ("expired", "AI_PROVIDER_EXPIRED_RESPONSE"),
+        ("queued", "AI_PROVIDER_INCOMPLETE_RESPONSE"),
+        (None, "AI_PROVIDER_MALFORMED_RESPONSE"),
+        (17, "AI_PROVIDER_MALFORMED_RESPONSE"),
+    ],
+)
+async def test_non_completed_response_never_succeeds_and_preserves_usage(
+    status: object, expected: str
+) -> None:
+    body: dict[str, object] = {
+        "output_text": "partial text is not authoritative",
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+    }
+    if status is not None:
+        body["status"] = status
+    client = _client(lambda _request: httpx.Response(200, json=body))
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        await adapter.invoke(model_key="economy-text-v1", prompt="x", request=make_request())
+    assert raised.value.code == expected
+    assert raised.value.usage is not None
+    assert (raised.value.usage.input_tokens, raised.value.usage.output_tokens) == (3, 2)
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_incomplete_non_stream_terminalizes_failed_with_provider_usage() -> None:
+    client = _client(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "status": "incomplete",
+                "output_text": "partial",
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            },
+        )
+    )
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    response = await _gateway(adapter).invoke(
+        make_request(deadline=None, max_total_cost=Decimal("0.01"), allow_fallback=False)
+    )
+    assert response.result.result_status is ResultStatus.FAILED
+    assert response.content is None
+    assert response.error is not None
+    assert response.error.error_code == "AI_PROVIDER_INCOMPLETE_RESPONSE"
+    assert response.usage is not None
+    assert (response.usage.input_tokens, response.usage.output_tokens) == (3, 2)
+    await client.aclose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("body", [b"not-json", b"[]", b'"completed"'])
+async def test_malformed_non_stream_body_fails_closed(body: bytes) -> None:
+    client = _client(
+        lambda _request: httpx.Response(
+            200, content=body, headers={"content-type": "application/json"}
+        )
+    )
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure, match="AI_PROVIDER_MALFORMED_RESPONSE"):
+        await adapter.invoke(model_key="economy-text-v1", prompt="x", request=make_request())
+    await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_maps_structured_output_without_replacing_gateway_validation() -> None:
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.update(json.loads(request.content))
-        return httpx.Response(200, json={"output_text": '{"answer":"OK","model":"x"}'})
+        return httpx.Response(
+            200, json={"status": "completed", "output_text": '{"answer":"OK","model":"x"}'}
+        )
 
     client = _client(handler)
     adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
@@ -139,7 +225,7 @@ async def test_streams_incremental_neutral_events_and_terminal_usage() -> None:
             'data: {"type":"response.output_text.delta","delta":"O"}',
             'data: {"type":"response.output_text.delta","delta":"K"}',
             "data: "
-            '{"type":"response.completed","response":{"usage":'
+            '{"type":"response.completed","response":{"status":"completed","usage":'
             '{"input_tokens":2,"output_tokens":1}}}',
             "data: [DONE]",
             "",
@@ -156,6 +242,129 @@ async def test_streams_incremental_neutral_events_and_terminal_usage() -> None:
     assert [event.kind for event in events] == ["content_delta", "content_delta", "usage"]
     assert "".join(event.content or "" for event in events) == "OK"
     assert events[-1].usage is not None and events[-1].usage.output_tokens == 1
+    await client.aclose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "data: [DONE]",
+        "",
+    ],
+)
+async def test_stream_end_without_completed_event_fails_closed(tail: str) -> None:
+    data = "\n".join(('data: {"type":"response.output_text.delta","delta":"partial"}', tail))
+    client = _client(lambda _request: httpx.Response(200, text=data))
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure, match="AI_PROVIDER_INCOMPLETE_RESPONSE"):
+        _ = [
+            event
+            async for event in adapter.stream(
+                model_key="economy-text-v1", prompt="x", request=make_request()
+            )
+        ]
+    await client.aclose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("event_type", "status", "expected"),
+    [
+        ("response.incomplete", "incomplete", "AI_PROVIDER_INCOMPLETE_RESPONSE"),
+        ("response.failed", "failed", "AI_PROVIDER_FAILED_RESPONSE"),
+        ("response.cancelled", "cancelled", "AI_PROVIDER_CANCELLED"),
+    ],
+)
+async def test_explicit_stream_failure_preserves_terminal_usage(
+    event_type: str, status: str, expected: str
+) -> None:
+    data = "\n".join(
+        (
+            'data: {"type":"response.output_text.delta","delta":"partial"}',
+            "data: "
+            + json.dumps(
+                {
+                    "type": event_type,
+                    "response": {
+                        "status": status,
+                        "usage": {"input_tokens": 4, "output_tokens": 2},
+                    },
+                }
+            ),
+            "",
+        )
+    )
+    client = _client(lambda _request: httpx.Response(200, text=data))
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        _ = [
+            event
+            async for event in adapter.stream(
+                model_key="economy-text-v1", prompt="x", request=make_request()
+            )
+        ]
+    assert raised.value.code == expected
+    assert raised.value.usage is not None
+    assert (raised.value.usage.input_tokens, raised.value.usage.output_tokens) == (4, 2)
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_truncated_gateway_stream_terminalizes_once_with_partial_usage() -> None:
+    data = "\n".join(
+        (
+            'data: {"type":"response.output_text.delta","delta":"partial"}',
+            'data: {"type":"response.incomplete","response":{"status":"incomplete",'
+            '"usage":{"input_tokens":4,"output_tokens":2}}}',
+            "",
+        )
+    )
+    client = _client(lambda _request: httpx.Response(200, text=data))
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    chunks = [
+        chunk
+        async for chunk in _gateway(adapter).stream(
+            make_request(
+                deadline=None,
+                response_mode=ResponseMode.STREAM,
+                required_capabilities=frozenset({"text", "stream"}),
+                max_total_cost=Decimal("0.01"),
+            )
+        )
+    ]
+    terminals = [chunk for chunk in chunks if chunk.kind == "terminal"]
+    assert len(terminals) == 1
+    terminal = terminals[0]
+    assert terminal.terminal is not None
+    assert terminal.terminal.result.result_status is ResultStatus.FAILED
+    assert terminal.terminal.error is not None
+    assert terminal.terminal.error.error_code == "AI_PROVIDER_INCOMPLETE_RESPONSE"
+    assert terminal.usage is not None
+    assert (terminal.usage.input_tokens, terminal.usage.output_tokens) == (4, 2)
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_stream_rejects_duplicate_or_post_terminal_events() -> None:
+    completed = (
+        'data: {"type":"response.completed","response":'
+        '{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}'
+    )
+    client = _client(
+        lambda _request: httpx.Response(
+            200,
+            text="\n".join((completed, completed, "")),
+        )
+    )
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure, match="AI_PROVIDER_MALFORMED_RESPONSE"):
+        _ = [
+            event
+            async for event in adapter.stream(
+                model_key="economy-text-v1", prompt="x", request=make_request()
+            )
+        ]
     await client.aclose()
 
 
@@ -200,6 +409,29 @@ def test_catalog_keeps_provider_identity_internal_and_prices_auditable() -> None
     assert mapping.provider_model.startswith("gpt-")
     assert mapping.catalog.input_cost_per_token == Decimal("0.00000025")
     assert mapping.catalog.pricing_version == "openai-2026-08-11"
+    assert mapping.catalog.capabilities == frozenset({"text", "structured", "stream"})
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("unsupported", ["tools", "vision"])
+async def test_catalog_makes_unimplemented_capabilities_ineligible(unsupported: str) -> None:
+    client = _client(
+        lambda _request: httpx.Response(
+            200, json={"status": "completed", "output_text": "must not be called"}
+        )
+    )
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    gateway = _gateway(adapter)
+    response = await gateway.invoke(
+        make_request(
+            deadline=None,
+            required_capabilities=frozenset({"text", unsupported}),
+            max_total_cost=Decimal("0.01"),
+        )
+    )
+    assert response.result.result_status is ResultStatus.FAILED
+    assert response.route is None
+    await client.aclose()
 
 
 @pytest.mark.anyio
@@ -208,23 +440,14 @@ async def test_real_adapter_conforms_through_frozen_gateway_budget_and_accountin
         lambda _request: httpx.Response(
             200,
             json={
+                "status": "completed",
                 "output_text": "OK",
                 "usage": {"input_tokens": 2, "output_tokens": 1},
             },
         )
     )
     adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
-    provider_port: ProviderAdapter = adapter
-    identifiers = UuidIdentifierFactory()
-    gateway = ReferenceAIGateway(
-        clock=SystemClock(),
-        identifiers=identifiers,
-        authorizer=ScopeAuthorizer(),
-        observations=InMemoryObservationRecorder(identifiers),
-        store=ReferenceGatewayStore(),
-        catalog=(OPENAI_MODEL_CATALOG[0].catalog,),
-        adapters={adapter.key: provider_port},
-    )
+    gateway = _gateway(adapter)
     response = await gateway.invoke(make_request(deadline=None, max_total_cost=Decimal("0.01")))
     assert response.content == "OK"
     assert response.usage is not None and response.usage.output_tokens == 1
@@ -257,7 +480,7 @@ async def test_opaque_effect_key_uses_frozen_process_independent_boundary() -> N
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal provider_calls
         provider_calls += 1
-        return httpx.Response(200, json={"output_text": "OK"})
+        return httpx.Response(200, json={"status": "completed", "output_text": "OK"})
 
     boundary = _Boundary()
     client = _client(handler)

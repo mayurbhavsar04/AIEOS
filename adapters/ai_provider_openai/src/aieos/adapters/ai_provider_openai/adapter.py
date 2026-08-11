@@ -115,7 +115,16 @@ class OpenAIProviderAdapter:
             raise self._http_failure(error.response) from error
         except httpx.RequestError as error:
             raise ProviderFailure("AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True) from error
-        body = cast(dict[str, object], response.json())
+        try:
+            body_value = response.json()
+        except ValueError as error:
+            raise ProviderFailure("AI_PROVIDER_MALFORMED_RESPONSE", retryable=False) from error
+        if not isinstance(body_value, dict):
+            raise ProviderFailure("AI_PROVIDER_MALFORMED_RESPONSE", retryable=False)
+        body = cast(dict[str, object], body_value)
+        failure = self._terminal_failure(body)
+        if failure is not None:
+            raise failure
         content = self._output_text(body)
         if not content:
             raise ProviderFailure("AI_PROVIDER_MALFORMED_RESPONSE", retryable=False)
@@ -126,13 +135,36 @@ class OpenAIProviderAdapter:
     ) -> AsyncIterator[ProviderStreamEvent]:
         payload = self._payload(model_key, prompt, request)
         payload["stream"] = True
+        terminal_seen = False
+        latest_usage: AIUsage | None = None
         try:
             async with self._client.stream("POST", "/responses", json=payload) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
-                    if not line.startswith("data: ") or line == "data: [DONE]":
+                    if not line.startswith("data: "):
                         continue
-                    event = cast(dict[str, object], json.loads(line[6:]))
+                    if line == "data: [DONE]":
+                        if not terminal_seen:
+                            raise ProviderFailure(
+                                "AI_PROVIDER_INCOMPLETE_RESPONSE",
+                                retryable=False,
+                                usage=latest_usage,
+                            )
+                        continue
+                    if terminal_seen:
+                        raise ProviderFailure(
+                            "AI_PROVIDER_MALFORMED_RESPONSE",
+                            retryable=False,
+                            usage=latest_usage,
+                        )
+                    event_value = json.loads(line[6:])
+                    if not isinstance(event_value, dict):
+                        raise ProviderFailure(
+                            "AI_PROVIDER_MALFORMED_RESPONSE",
+                            retryable=False,
+                            usage=latest_usage,
+                        )
+                    event = cast(dict[str, object], event_value)
                     event_type = event.get("type")
                     if event_type == "response.output_text.delta":
                         delta = event.get("delta")
@@ -140,16 +172,51 @@ class OpenAIProviderAdapter:
                             yield ProviderStreamEvent("content_delta", content=delta)
                     elif event_type == "response.completed":
                         response_value = event.get("response")
+                        if not isinstance(response_value, dict):
+                            raise ProviderFailure(
+                                "AI_PROVIDER_MALFORMED_RESPONSE",
+                                retryable=False,
+                                usage=latest_usage,
+                            )
+                        response_body = cast(dict[str, object], response_value)
+                        usage = self._usage(response_body.get("usage"))
+                        latest_usage = self._latest_usage(latest_usage, usage)
+                        failure = self._terminal_failure(response_body)
+                        if failure is not None:
+                            raise ProviderFailure(
+                                failure.code,
+                                retryable=failure.retryable,
+                                usage=latest_usage,
+                            )
+                        terminal_seen = True
+                        if latest_usage is not None:
+                            yield ProviderStreamEvent("usage", usage=latest_usage)
+                    elif event_type in {
+                        "response.failed",
+                        "response.incomplete",
+                        "response.cancelled",
+                        "response.expired",
+                    }:
+                        response_value = event.get("response")
                         response_body = (
                             cast(dict[str, object], response_value)
                             if isinstance(response_value, dict)
                             else {}
                         )
                         usage = self._usage(response_body.get("usage"))
-                        if usage is not None:
-                            yield ProviderStreamEvent("usage", usage=usage)
-                    elif event_type in {"response.failed", "response.incomplete"}:
-                        raise ProviderFailure("AI_PROVIDER_STREAM_FAILED", retryable=False)
+                        latest_usage = self._latest_usage(latest_usage, usage)
+                        failure = self._status_failure(
+                            response_body.get("status")
+                            or str(event_type).removeprefix("response."),
+                            latest_usage,
+                        )
+                        raise failure
+                if not terminal_seen:
+                    raise ProviderFailure(
+                        "AI_PROVIDER_INCOMPLETE_RESPONSE",
+                        retryable=False,
+                        usage=latest_usage,
+                    )
         except asyncio.CancelledError:
             raise
         except httpx.TimeoutException as error:
@@ -157,7 +224,9 @@ class OpenAIProviderAdapter:
         except httpx.HTTPStatusError as error:
             raise self._http_failure(error.response) from error
         except (httpx.RequestError, json.JSONDecodeError) as error:
-            raise ProviderFailure("AI_PROVIDER_STREAM_FAILED", retryable=True) from error
+            raise ProviderFailure(
+                "AI_PROVIDER_STREAM_FAILED", retryable=True, usage=latest_usage
+            ) from error
 
     @staticmethod
     def _provider_model(model_key: str) -> str:
@@ -234,6 +303,38 @@ class OpenAIProviderAdapter:
             cached_tokens=OpenAIProviderAdapter._count(input_details.get("cached_tokens")),
             reasoning_tokens=OpenAIProviderAdapter._count(output_details.get("reasoning_tokens")),
         )
+
+    @staticmethod
+    def _latest_usage(current: AIUsage | None, reported: AIUsage | None) -> AIUsage | None:
+        if reported is None:
+            return current
+        if current is not None and (
+            reported.input_tokens < current.input_tokens
+            or reported.output_tokens < current.output_tokens
+        ):
+            raise ProviderFailure("AI_NON_MONOTONIC_USAGE", retryable=False, usage=current)
+        return reported
+
+    @classmethod
+    def _terminal_failure(cls, body: Mapping[str, object]) -> ProviderFailure | None:
+        status = body.get("status")
+        if status == "completed":
+            return None
+        return cls._status_failure(status, cls._usage(body.get("usage")))
+
+    @staticmethod
+    def _status_failure(status: object, usage: AIUsage | None) -> ProviderFailure:
+        codes = {
+            "incomplete": "AI_PROVIDER_INCOMPLETE_RESPONSE",
+            "in_progress": "AI_PROVIDER_INCOMPLETE_RESPONSE",
+            "queued": "AI_PROVIDER_INCOMPLETE_RESPONSE",
+            "failed": "AI_PROVIDER_FAILED_RESPONSE",
+            "cancelled": "AI_PROVIDER_CANCELLED",
+            "expired": "AI_PROVIDER_EXPIRED_RESPONSE",
+        }
+        if not isinstance(status, str) or status not in codes:
+            return ProviderFailure("AI_PROVIDER_MALFORMED_RESPONSE", retryable=False, usage=usage)
+        return ProviderFailure(codes[status], retryable=False, usage=usage)
 
     @staticmethod
     def _count(value: object) -> int:

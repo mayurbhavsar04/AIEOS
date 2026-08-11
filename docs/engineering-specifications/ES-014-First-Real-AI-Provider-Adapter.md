@@ -24,7 +24,8 @@ prompts, responses, keys, headers, and provider payloads are not logged.
 
 The internal `economy-text-v1` maps to a pinned snapshot. Its catalog records capabilities, limits,
 tiers, replaceable prices, pricing version/reference, availability, handling notes, and deprecation
-policy. Ordinary development and CI still compose mocks. Live mode requires both
+policy. Phase 3 advertises exactly text, structured output, and streaming; tools and vision remain
+ineligible until their mappings have separate conformance evidence. Ordinary development and CI still compose mocks. Live mode requires both
 `AIEOS_AI_PROVIDER=openai` and `OPENAI_API_KEY`; missing values fail before network access.
 
 ## Error mapping
@@ -38,6 +39,8 @@ policy. Ordinary development and CI still compose mocks. Live mode requires both
 | 500/502/504/network | `AI_PROVIDER_TEMPORARILY_UNAVAILABLE`; retryable advisory |
 | 503 | `AI_PROVIDER_OVERLOADED`; retryable advisory |
 | timeout / cancellation | timeout normalization / Gateway cancellation handling |
+| incomplete, failed, cancelled, expired, or malformed response | provider-neutral invalid/failure normalization with reported usage preserved |
+| EOF or `[DONE]` without one valid `response.completed` | incomplete response; never success |
 | malformed or failed stream | malformed response / stream failure |
 | unknown durable dispatch | frozen `AI_PROVIDER_EFFECT_AMBIGUOUS`; never replay blindly |
 
@@ -50,9 +53,11 @@ still owns estimates, reservations, reconciliation, fallback, repair, and termin
 adapter cannot bypass replay, cache, cheapest-capable routing, minimum context, strict bounds,
 approved escalation, bounded repair/fallback, or cumulative caps.
 
-Native JSON Schema is only a generation aid; Gateway validation stays authoritative. Text deltas
-are emitted incrementally and Gateway enforces bounds before visibility, persists usage/checkpoints,
-and owns the terminal Result. Telemetry uses abstract model/provider identity, latency, usage, cost
+Native JSON Schema is only a generation aid; Gateway validation stays authoritative. A non-stream
+response succeeds only with provider status `completed`. Text deltas are emitted incrementally, but
+stream success requires exactly one `response.completed` event whose response status is `completed`;
+`[DONE]`, EOF, or socket closure is never a substitute. Gateway enforces bounds before visibility,
+persists partial usage/checkpoints, and owns the terminal Result. Telemetry uses abstract model/provider identity, latency, usage, cost
 variance, lifecycle, normalized errors, rate-limit and attempt metadata—never sensitive content.
 
 ## Security, privacy, and durability
