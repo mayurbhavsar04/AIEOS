@@ -175,6 +175,55 @@ def durable_ai_gateway(
     return gateway, provider, store
 
 
+def durable_multi_provider_gateway(
+    database: PostgresDatabase,
+    *,
+    first: DeterministicMockProvider | None = None,
+    second: DeterministicMockProvider | None = None,
+) -> tuple[ReferenceAIGateway, DeterministicMockProvider, DeterministicMockProvider]:
+    identifiers = DeterministicIdentifiers()
+    first = first or DeterministicMockProvider("openai-responses", prefix="OpenAI")
+    second = second or DeterministicMockProvider("gemini-generate-content", prefix="Gemini")
+    boundary = PostgresProviderEffectBoundary(database)
+    first.use_effect_boundary(boundary)
+    second.use_effect_boundary(boundary)
+    gateway = ReferenceAIGateway(
+        clock=DeterministicClock(datetime(2026, 8, 12, tzinfo=UTC)),
+        identifiers=identifiers,
+        authorizer=ScopeAuthorizer(),
+        observations=InMemoryObservationRecorder(identifiers),
+        store=PostgresAIGatewayStore(database),
+        catalog=(
+            ModelCatalogEntry(
+                "openai-model-v1",
+                "openai-responses",
+                frozenset({"text"}),
+                4096,
+                512,
+                1,
+                1,
+                Decimal("0.000001"),
+                Decimal("0.000002"),
+                "openai-price-v1",
+            ),
+            ModelCatalogEntry(
+                "gemini-model-v1",
+                "gemini-generate-content",
+                frozenset({"text"}),
+                4096,
+                512,
+                1,
+                1,
+                Decimal("0.000002"),
+                Decimal("0.000003"),
+                "gemini-price-v1",
+            ),
+        ),
+        adapters={first.key: first, second.key: second},
+    )
+    return gateway, first, second
+
+
 async def test_ai_gateway_acceptance_restart_replay_and_terminal_recovery(
     database: PostgresDatabase,
 ) -> None:
@@ -188,6 +237,54 @@ async def test_ai_gateway_acceptance_restart_replay_and_terminal_recovery(
     assert replay.ai_invocation_id == response.ai_invocation_id
     assert replay.result.result_id == response.result.result_id
     assert restarted_provider.calls == 0
+
+
+async def test_multi_provider_attempt_sequence_spend_and_terminal_survive_restart(
+    database: PostgresDatabase,
+) -> None:
+    first = DeterministicMockProvider(
+        "openai-responses",
+        prefix="OpenAI",
+        behaviors=(MockProviderBehavior.TRANSIENT_FAILURE,),
+    )
+    gateway, _, second = durable_multi_provider_gateway(database, first=first)
+    response = await gateway.invoke(
+        ai_request(idempotency_key="multi-provider-durable", max_provider_attempts=2)
+    )
+    assert response.result.result_status is ResultStatus.SUCCEEDED
+    assert first.calls == 1 and second.calls == 1
+    async with database.transaction() as session:
+        attempts = list(
+            await session.scalars(
+                select(AIGatewayAttemptRow)
+                .where(AIGatewayAttemptRow.ai_invocation_id == response.ai_invocation_id)
+                .order_by(AIGatewayAttemptRow.attempt_number)
+            )
+        )
+        budget = await session.scalar(
+            select(AIGatewayBudgetRow).where(
+                AIGatewayBudgetRow.ai_invocation_id == response.ai_invocation_id
+            )
+        )
+    assert [(row.adapter_key, row.state) for row in attempts] == [
+        ("openai-responses", "failed"),
+        ("gemini-generate-content", "completed"),
+    ]
+    assert budget is not None and budget.actual_amount is not None
+    terminal_result_id = response.result.result_id
+
+    restarted, restarted_first, restarted_second = durable_multi_provider_gateway(database)
+    replay = await restarted.invoke(
+        ai_request(
+            command_id="multi-provider-redelivery",
+            idempotency_key="multi-provider-durable",
+            max_provider_attempts=2,
+        )
+    )
+    assert replay.ai_invocation_id == response.ai_invocation_id
+    assert replay.result.result_id == terminal_result_id
+    assert restarted_first.calls == 0 and restarted_second.calls == 0
+    assert replay.usage == response.usage
 
 
 async def test_ai_gateway_restart_does_not_probe_unapproved_expanded_cache(

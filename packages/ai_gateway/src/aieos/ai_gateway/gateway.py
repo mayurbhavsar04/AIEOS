@@ -914,7 +914,17 @@ class ReferenceAIGateway:
                 self._observe(
                     invocation,
                     "ai.provider.attempt",
-                    {"attempt": attempts, "model_key": candidate.model_key},
+                    {
+                        "attempt": attempts,
+                        "model_key": candidate.model_key,
+                        "adapter_key": candidate.adapter_key,
+                        "provider_health": "healthy",
+                        "prior_spend": str(spent),
+                        "remaining_budget": str(request.max_total_cost - spent),
+                        "failover_reason": (
+                            last_failure.code if attempts > 1 and last_failure is not None else ""
+                        ),
+                    },
                 )
                 adapter = self._adapters[candidate.adapter_key]
                 try:
@@ -979,6 +989,8 @@ class ReferenceAIGateway:
                             "input_tokens": usage.input_tokens,
                             "output_tokens": usage.output_tokens,
                             "cost": str(attempt_cost),
+                            "cumulative_cost": str(spent),
+                            "adapter_key": candidate.adapter_key,
                         },
                     )
                     content, repair_usage, repair_cost = await self._validate_and_repair(
@@ -1056,6 +1068,8 @@ class ReferenceAIGateway:
                             "code": failure.code,
                             "retryable": failure.retryable,
                             "cost": str(failure_cost),
+                            "cumulative_cost": str(spent),
+                            "adapter_key": candidate.adapter_key,
                         },
                     )
                     last_failure = failure
