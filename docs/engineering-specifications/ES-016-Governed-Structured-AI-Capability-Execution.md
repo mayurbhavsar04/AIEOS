@@ -1,7 +1,7 @@
 ---
 title: ES-016 — Governed Structured AI Capability Execution
-version: 0.2
-status: Draft
+version: 0.3
+status: Approved
 owner: CTO / Architect
 implementer: Engineer (Codex)
 milestone: 6 Phase 5
@@ -44,6 +44,7 @@ this work. The Phase 4 merge commit is
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 0.3 | 2026-08-13 | CTO / Architect | Approved for implementation after focused CTO re-review at `63cd3ba06fceec5e664fa85070a987876ed77a40` with Blocking 0 / Major 0 / Minor 0. |
 | 0.2 | 2026-08-13 | CTO / Architect | Defined the capability contract, ownership, sequencing, security propagation, evidence, and objective release gates after focused CTO review. |
 | 0.1 | 2026-08-13 | CTO / Architect | Initial Phase 5 governance draft. |
 

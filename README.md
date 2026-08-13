@@ -8,9 +8,9 @@ the frozen [Runtime Architecture v1.0](docs/runtime-architecture/Runtime-Archite
 
 AIEOS (AI Employee Operating System) is a platform for building reliable autonomous AI Employees. It is intended to support specialized employees across business functions such as content operations, marketing, sales, restaurant operations, and customer support.
 
-> **Project status:** Milestone 6 Phase 5 governance is Draft. Milestone 6 Phases 1–4 are frozen
-> through `multi-provider-routing-v1.0`; the next bounded capability-integration specification is
-> under review. Business workflows have not started.
+> **Project status:** Milestone 6 Phase 5 governance is Approved. Milestone 6 Phases 1–4 are frozen
+> through `multi-provider-routing-v1.0`; the bounded capability-integration specification is ready
+> for implementation. Business workflows have not started.
 
 ## The problem
 
@@ -49,7 +49,7 @@ This engineering repository will serve as the source of truth for:
 | Milestone 4 | APIs and data design | Planned |
 | Milestone 5 | Delivery roadmap, runbooks, and implementation | Planned |
 | Milestone 6, Phases 1–4 | AI Gateway architecture, reference runtime, OpenAI adapter, and multi-provider routing/failover | Frozen |
-| Milestone 6, Phase 5 | Governed structured AI capability execution | Draft governance |
+| Milestone 6, Phase 5 | Governed structured AI capability execution | Approved governance |
 
 The sequence may change as internal operation produces evidence. Reliability and measurable outcomes take priority over completing a predetermined feature list.
 

@@ -1,6 +1,6 @@
 # TDR-018 — Prompt, Context, and Versioning
 
-- **Status:** In Review
+- **Status:** Accepted
 - **Date:** 2026-08-03
 
 ## Context and options
