@@ -1,9 +1,9 @@
 ---
 title: Engineering Specifications
-version: 1.1
+version: 1.3
 status: Approved
 owner: Founding Team
-last_updated: 2026-07-21
+last_updated: 2026-08-13
 ---
 
 # Engineering Specifications
@@ -217,6 +217,8 @@ unfrozen Phase 4 deliverable.
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.3 | 2026-08-13 | CTO / Architect | Recorded approval of ES-016's first-release rollback clarification. |
+| 1.2 | 2026-08-13 | CTO / Architect | Updated ES-016 status to In Review for its first-release rollback clarification. |
 | 1.1 | 2026-07-21 | Founding Team | Added Domain v1.0 freeze governance following Milestone 3C completion. |
 | 1.0 | 2026-07-20 | Founding Team | Initial ES process, including mandatory traceability and specification version history. |
 
