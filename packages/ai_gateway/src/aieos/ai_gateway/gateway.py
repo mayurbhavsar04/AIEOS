@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -174,9 +175,27 @@ class ModelCatalogEntry:
     available: bool = True
     healthy: bool = True
     deprecated: bool = False
+    cached_input_cost_per_token: Decimal | None = None
+    reasoning_cost_per_token: Decimal | None = None
 
-    def estimate_cost(self, input_tokens: int, output_tokens: int) -> Decimal:
-        return input_tokens * self.input_cost_per_token + output_tokens * self.output_cost_per_token
+    def estimate_cost(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        *,
+        cached_tokens: int = 0,
+        reasoning_tokens: int = 0,
+    ) -> Decimal:
+        cached = min(input_tokens, max(0, cached_tokens))
+        uncached = input_tokens - cached
+        cached_rate = self.cached_input_cost_per_token or self.input_cost_per_token
+        reasoning_rate = self.reasoning_cost_per_token or self.output_cost_per_token
+        return (
+            uncached * self.input_cost_per_token
+            + cached * cached_rate
+            + output_tokens * self.output_cost_per_token
+            + reasoning_tokens * reasoning_rate
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +279,12 @@ class GatewayInvocation:
     stream_sequence: int = 0
     stream_content: tuple[str, ...] = ()
     stream_usage: AIUsage | None = None
+    provider_sequence: tuple[RouteDecision, ...] = ()
+    next_provider_attempt: int = 1
+    cumulative_usage: AIUsage = AIUsage(0, 0)
+    cumulative_cost: Decimal = Decimal("0")
+    last_provider_failure_code: str | None = None
+    last_provider_failure_retryable: bool = False
     stream_terminal_emitted: bool = False
 
 
@@ -678,6 +703,7 @@ class ReferenceAIGateway:
         store: ReferenceGatewayStore | None = None,
         execution_lease: timedelta = timedelta(seconds=30),
         heartbeat_interval: float = 10.0,
+        health_cooldown: timedelta = timedelta(seconds=30),
     ) -> None:
         self._clock = clock
         self._identifiers = identifiers
@@ -690,6 +716,10 @@ class ReferenceAIGateway:
         self.lifecycle: dict[str, list[InvocationState]] = {}
         self._execution_lease = execution_lease
         self._heartbeat_interval = heartbeat_interval
+        self._health_cooldown = health_cooldown
+        self._health_lock = threading.Lock()
+        self._cooldowns: dict[str, datetime] = {}
+        self._degraded: set[str] = set()
 
     async def _heartbeat(
         self, invocation_id: str, owner: str, generation: int, lost: asyncio.Event
@@ -816,7 +846,13 @@ class ReferenceAIGateway:
                 "ai.context.prepared",
                 {"input_tokens": tokens, "context_digest": context_digest, "stage": 0},
             )
-            route = self._route(request, tokens)
+            route = (
+                invocation.provider_sequence[
+                    min(invocation.next_provider_attempt - 1, len(invocation.provider_sequence) - 1)
+                ]
+                if invocation.provider_sequence
+                else self._route(request, tokens)
+            )
             cache_key = self._cache_key(request, context_digest, route)
             invocation.route = route
             self._observe(
@@ -849,18 +885,34 @@ class ReferenceAIGateway:
                 },
             )
             await self.store.checkpoint(invocation)
-            candidates = [route]
-            if request.allow_fallback:
-                candidates.extend(
-                    candidate
-                    for candidate in self._eligible_routes(request, tokens)
-                    if candidate.model_key != route.model_key
+            if invocation.provider_sequence:
+                candidates = list(invocation.provider_sequence)
+            else:
+                candidates = [route]
+                if request.allow_fallback:
+                    candidates.extend(
+                        candidate
+                        for candidate in self._eligible_routes(request, tokens)
+                        if candidate.model_key != route.model_key
+                    )
+                invocation.provider_sequence = tuple(candidates[: request.max_provider_attempts])
+                await self.store.checkpoint(invocation)
+            last_failure = (
+                ProviderFailure(
+                    invocation.last_provider_failure_code,
+                    retryable=invocation.last_provider_failure_retryable,
                 )
-            last_failure: ProviderFailure | None = None
-            spent = Decimal("0")
-            total_input = total_output = 0
+                if invocation.last_provider_failure_code is not None
+                else None
+            )
+            spent = invocation.cumulative_cost
+            total_input = invocation.cumulative_usage.input_tokens
+            total_output = invocation.cumulative_usage.output_tokens
+            total_cached = invocation.cumulative_usage.cached_tokens
+            total_reasoning = invocation.cumulative_usage.reasoning_tokens
             for attempts, candidate in enumerate(
-                candidates[: request.max_provider_attempts], start=1
+                candidates[invocation.next_provider_attempt - 1 : request.max_provider_attempts],
+                start=invocation.next_provider_attempt,
             ):
                 if candidate.estimated_cost > request.max_total_cost - spent:
                     last_failure = ProviderFailure("AI_FALLBACK_BUDGET_EXHAUSTED", retryable=False)
@@ -914,7 +966,17 @@ class ReferenceAIGateway:
                 self._observe(
                     invocation,
                     "ai.provider.attempt",
-                    {"attempt": attempts, "model_key": candidate.model_key},
+                    {
+                        "attempt": attempts,
+                        "model_key": candidate.model_key,
+                        "adapter_key": candidate.adapter_key,
+                        "provider_health": self._health_state(candidate.model_key),
+                        "prior_spend": str(spent),
+                        "remaining_budget": str(request.max_total_cost - spent),
+                        "failover_reason": (
+                            last_failure.code if attempts > 1 and last_failure is not None else ""
+                        ),
+                    },
                 )
                 adapter = self._adapters[candidate.adapter_key]
                 try:
@@ -939,7 +1001,7 @@ class ReferenceAIGateway:
                                 )
                             except TimeoutError:
                                 raise ProviderFailure(
-                                    "AI_PROVIDER_TIMEOUT", retryable=True
+                                    "AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False
                                 ) from None
                         await self._fence(invocation_id, owner, generation, ownership_lost)
                         await self.store.record_provider_effect(
@@ -953,12 +1015,12 @@ class ReferenceAIGateway:
                     usage = provider_result.usage or AIUsage(
                         tokens, request.max_output_tokens, estimated=True
                     )
-                    attempt_cost = self._model(candidate.model_key).estimate_cost(
-                        usage.input_tokens, usage.output_tokens
-                    )
+                    attempt_cost = self._usage_cost(candidate.model_key, usage)
                     spent += attempt_cost
                     total_input += usage.input_tokens
                     total_output += usage.output_tokens
+                    total_cached += usage.cached_tokens
+                    total_reasoning += usage.reasoning_tokens
                     await self.store.record_attempt(
                         invocation_id,
                         attempt_number=attempts,
@@ -979,6 +1041,8 @@ class ReferenceAIGateway:
                             "input_tokens": usage.input_tokens,
                             "output_tokens": usage.output_tokens,
                             "cost": str(attempt_cost),
+                            "cumulative_cost": str(spent),
+                            "adapter_key": candidate.adapter_key,
                         },
                     )
                     content, repair_usage, repair_cost = await self._validate_and_repair(
@@ -996,16 +1060,37 @@ class ReferenceAIGateway:
                     spent += repair_cost
                     total_input += repair_usage.input_tokens
                     total_output += repair_usage.output_tokens
+                    total_cached += repair_usage.cached_tokens
+                    total_reasoning += repair_usage.reasoning_tokens
+                    self._record_health_success(candidate.model_key)
                     if provider_result.confidence < Decimal("0.5"):
                         last_failure = ProviderFailure("AI_LOW_CONFIDENCE", retryable=True)
+                        invocation.cumulative_cost = spent
+                        invocation.cumulative_usage = AIUsage(
+                            total_input,
+                            total_output,
+                            cached_tokens=total_cached,
+                            reasoning_tokens=total_reasoning,
+                        )
+                        invocation.next_provider_attempt = attempts + 1
+                        invocation.last_provider_failure_code = last_failure.code
+                        invocation.last_provider_failure_retryable = True
                         prompt, tokens, context_digest = self._assemble(request, stage=1)
                         self._observe(
                             invocation,
                             "ai.context.escalated",
                             {"stage": 1, "input_tokens": tokens, "signal": "low_confidence"},
                         )
+                        await self.store.checkpoint(invocation)
                         continue
-                    cumulative_usage = AIUsage(total_input, total_output)
+                    cumulative_usage = AIUsage(
+                        total_input,
+                        total_output,
+                        cached_tokens=total_cached,
+                        reasoning_tokens=total_reasoning,
+                    )
+                    invocation.cumulative_cost = spent
+                    invocation.cumulative_usage = cumulative_usage
                     await self._fence(invocation_id, owner, generation, ownership_lost)
                     await self.store.reconcile(
                         invocation_id,
@@ -1034,12 +1119,12 @@ class ReferenceAIGateway:
                 except ProviderFailure as failure:
                     failure_cost = Decimal("0")
                     if failure.usage is not None:
-                        failure_cost = self._model(candidate.model_key).estimate_cost(
-                            failure.usage.input_tokens, failure.usage.output_tokens
-                        )
+                        failure_cost = self._usage_cost(candidate.model_key, failure.usage)
                         spent += failure_cost
                         total_input += failure.usage.input_tokens
                         total_output += failure.usage.output_tokens
+                        total_cached += failure.usage.cached_tokens
+                        total_reasoning += failure.usage.reasoning_tokens
                     await self.store.record_attempt(
                         invocation_id,
                         attempt_number=attempts,
@@ -1056,16 +1141,30 @@ class ReferenceAIGateway:
                             "code": failure.code,
                             "retryable": failure.retryable,
                             "cost": str(failure_cost),
+                            "cumulative_cost": str(spent),
+                            "adapter_key": candidate.adapter_key,
                         },
                     )
                     last_failure = failure
+                    invocation.cumulative_cost = spent
+                    invocation.cumulative_usage = AIUsage(
+                        total_input,
+                        total_output,
+                        cached_tokens=total_cached,
+                        reasoning_tokens=total_reasoning,
+                    )
+                    invocation.next_provider_attempt = attempts + 1
+                    invocation.last_provider_failure_code = failure.code
+                    invocation.last_provider_failure_retryable = failure.retryable
+                    self._record_health_failure(candidate.model_key, failure)
+                    await self.store.checkpoint(invocation)
                     if not failure.retryable:
                         break
             if spent > 0:
                 await self.store.reconcile(
                     invocation_id,
                     spent,
-                    AIUsage(total_input, total_output),
+                    invocation.cumulative_usage,
                     owner=owner,
                     generation=generation,
                 )
@@ -1077,7 +1176,7 @@ class ReferenceAIGateway:
             if total_input > 0 or total_output > 0:
                 response = replace(
                     response,
-                    usage=AIUsage(input_tokens=total_input, output_tokens=total_output),
+                    usage=invocation.cumulative_usage,
                 )
                 invocation.terminal = response
             await self.store.checkpoint(invocation)
@@ -1189,7 +1288,7 @@ class ReferenceAIGateway:
             if invocation.stream_started:
                 partial_usage = invocation.stream_usage
                 parts = list(invocation.stream_content)
-                raise ProviderFailure("AI_STREAM_RECOVERY_REQUIRED", retryable=False)
+                raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False)
             self._transition(invocation, InvocationState.POLICY_VALIDATED)
             prompt, tokens, _ = self._assemble(invocation.request)
             input_tokens = tokens
@@ -1269,9 +1368,7 @@ class ReferenceAIGateway:
                             usage = reported
                             partial_usage = usage
                             invocation.stream_usage = usage
-                            partial_cost = self._model(route.model_key).estimate_cost(
-                                usage.input_tokens, usage.output_tokens
-                            )
+                            partial_cost = self._usage_cost(route.model_key, usage)
                             await self.store.record_usage(
                                 invocation.invocation_id,
                                 usage=usage,
@@ -1304,14 +1401,14 @@ class ReferenceAIGateway:
                                 },
                             )
             except TimeoutError:
-                raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=False) from None
+                # The stream is durably marked started before entering the deadline.
+                # Its provider effect may therefore have occurred.
+                raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False) from None
             content = "".join(parts)
             if self._estimate(content) > invocation.request.max_output_tokens:
                 raise ProviderFailure("AI_OUTPUT_LIMIT_EXCEEDED", retryable=False)
             usage = usage or AIUsage(tokens, self._estimate(content), estimated=True)
-            actual = self._model(route.model_key).estimate_cost(
-                usage.input_tokens, usage.output_tokens
-            )
+            actual = self._usage_cost(route.model_key, usage)
             if actual > invocation.request.max_total_cost:
                 raise ProviderFailure("AI_BUDGET_OVERRUN", retryable=False)
             await self.store.record_attempt(
@@ -1337,9 +1434,7 @@ class ReferenceAIGateway:
                         input_tokens, self._estimate("".join(parts)), estimated=True
                     )
                     partial_usage = partial
-                    cost = self._model(invocation.route.model_key).estimate_cost(
-                        partial.input_tokens, partial.output_tokens
-                    )
+                    cost = self._usage_cost(invocation.route.model_key, partial)
                     await self.store.record_attempt(
                         invocation.invocation_id,
                         attempt_number=1,
@@ -1391,9 +1486,7 @@ class ReferenceAIGateway:
                         input_tokens, self._estimate("".join(parts)), estimated=True
                     )
                     partial_usage = partial
-                    cost = self._model(invocation.route.model_key).estimate_cost(
-                        partial.input_tokens, partial.output_tokens
-                    )
+                    cost = self._usage_cost(invocation.route.model_key, partial)
                     await self.store.record_attempt(
                         invocation.invocation_id,
                         attempt_number=1,
@@ -1543,10 +1636,13 @@ class ReferenceAIGateway:
         eligible_entries: list[tuple[ModelCatalogEntry, Decimal]] = []
         for entry in self._catalog:
             reason = None
+            health_state = self._health_state(entry.model_key)
             if entry.deprecated or not entry.healthy:
                 reason = "unavailable"
             elif not entry.available:
                 reason = "availability"
+            elif health_state in {"rate_limited", "cooldown"}:
+                reason = health_state
             elif not request.required_capabilities <= entry.capabilities:
                 reason = "capability"
             elif request.quality_tier > entry.quality_tier:
@@ -1613,6 +1709,41 @@ class ReferenceAIGateway:
 
     def _model(self, key: str) -> ModelCatalogEntry:
         return next(entry for entry in self._catalog if entry.model_key == key)
+
+    def _usage_cost(self, model_key: str, usage: AIUsage) -> Decimal:
+        return self._model(model_key).estimate_cost(
+            usage.input_tokens,
+            usage.output_tokens,
+            cached_tokens=usage.cached_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+        )
+
+    def _health_state(self, model_key: str) -> str:
+        now = self._clock.now()
+        with self._health_lock:
+            cooldown = self._cooldowns.get(model_key)
+            if cooldown is not None:
+                if cooldown > now:
+                    return "cooldown"
+                self._cooldowns.pop(model_key, None)
+            return "degraded" if model_key in self._degraded else "healthy"
+
+    def _record_health_failure(self, model_key: str, failure: ProviderFailure) -> None:
+        if failure.code not in {
+            "AI_PROVIDER_RATE_LIMITED",
+            "AI_PROVIDER_QUOTA_EXHAUSTED",
+            "AI_PROVIDER_OVERLOADED",
+            "AI_PROVIDER_TRANSIENT_FAILURE",
+        }:
+            return
+        with self._health_lock:
+            self._degraded.add(model_key)
+            self._cooldowns[model_key] = self._clock.now() + self._health_cooldown
+
+    def _record_health_success(self, model_key: str) -> None:
+        with self._health_lock:
+            self._degraded.discard(model_key)
+            self._cooldowns.pop(model_key, None)
 
     @staticmethod
     def _cache_key(request: AIInvocationRequest, context_digest: str, route: RouteDecision) -> str:
@@ -1752,9 +1883,7 @@ class ReferenceAIGateway:
                 usage = repaired.usage or AIUsage(
                     self._estimate(repair_prompt), request.max_output_tokens, estimated=True
                 )
-                cost = self._model(candidate.model_key).estimate_cost(
-                    usage.input_tokens, usage.output_tokens
-                )
+                cost = self._usage_cost(candidate.model_key, usage)
                 if cost > remaining_cost - repair_cost:
                     raise ProviderFailure(
                         "AI_REPAIR_BUDGET_EXHAUSTED", retryable=False, usage=usage

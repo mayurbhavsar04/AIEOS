@@ -5,6 +5,7 @@ requires-python = "==3.13.*"
 [manifest]
 members = [
     "aieos-adapter-ai-mock",
+    "aieos-adapter-ai-provider-gemini",
     "aieos-adapter-ai-provider-openai",
     "aieos-adapter-command-dispatch-in-process",
     "aieos-adapter-event-bus-in-process",
@@ -57,6 +58,21 @@ requires-dist = [
     { name = "aieos-domain", editable = "packages/domain" },
     { name = "aieos-result-error-support", editable = "packages/result_error_support" },
     { name = "aieos-security-support", editable = "packages/security_support" },
+]
+
+[[package]]
+name = "aieos-adapter-ai-provider-gemini"
+version = "0.0.0"
+source = { editable = "adapters/ai_provider_gemini" }
+dependencies = [
+    { name = "aieos-ai-gateway" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aieos-ai-gateway", editable = "packages/ai_gateway" },
+    { name = "httpx", specifier = "==0.28.1" },
 ]
 
 [[package]]

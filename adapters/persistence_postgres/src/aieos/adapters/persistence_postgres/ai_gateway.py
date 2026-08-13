@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -82,6 +83,18 @@ class PostgresProviderEffectBoundary:
                     raise ValueError("provider effect key payload conflict")
                 if existing.state == "completed" and existing.result_payload is not None:
                     return _PROVIDER_RESULT.validate_json(existing.result_payload)
+                if existing.state == "failed" and existing.result_payload is not None:
+                    failure = json.loads(existing.result_payload)
+                    usage_payload = failure.get("usage")
+                    raise ProviderFailure(
+                        str(failure["code"]),
+                        retryable=bool(failure["retryable"]),
+                        usage=(
+                            _USAGE.validate_python(usage_payload)
+                            if usage_payload is not None
+                            else None
+                        ),
+                    )
                 if existing.state in {"dispatching", "ambiguous"}:
                     raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False)
             else:
@@ -143,7 +156,37 @@ class PostgresProviderEffectBoundary:
                 ):
                     return _PROVIDER_RESULT.validate_json(current.result_payload)
                 raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False)
-        result = await operation()
+        try:
+            result = await operation()
+        except ProviderFailure as failure:
+            failure_payload = json.dumps(
+                {
+                    "code": failure.code,
+                    "retryable": failure.retryable,
+                    "usage": (
+                        _USAGE.dump_python(failure.usage, mode="json")
+                        if failure.usage is not None
+                        else None
+                    ),
+                },
+                sort_keys=True,
+            )
+            async with self._database.transaction() as session:
+                await session.execute(
+                    update(AIGatewayProviderEffectRow)
+                    .where(
+                        AIGatewayProviderEffectRow.tenant_id == request.tenant_id,
+                        AIGatewayProviderEffectRow.workspace_id == request.workspace_id,
+                        AIGatewayProviderEffectRow.effect_key == effect_key,
+                        AIGatewayProviderEffectRow.state == "dispatching",
+                    )
+                    .values(
+                        state="failed",
+                        result_payload=failure_payload,
+                        completed_at=datetime.now(UTC),
+                    )
+                )
+            raise
         async with self._database.transaction() as session:
             await session.execute(
                 update(AIGatewayProviderEffectRow)
