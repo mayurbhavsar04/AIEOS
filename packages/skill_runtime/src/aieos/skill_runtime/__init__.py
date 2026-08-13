@@ -15,16 +15,25 @@ from aieos.skill_runtime.runtime import (
     SkillRuntime,
 )
 from aieos.skill_runtime.structured_task_kind import (
+    STRUCTURED_TASK_KIND_PACKAGE,
+    STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE,
     CapabilityExecutionEvidence,
+    CapabilityPolicyContext,
+    EvaluationResult,
     StructuredTaskKindClassification,
     StructuredTaskKindInput,
     StructuredTaskKindResult,
     TaskKind,
+    evaluate_predictions,
     exact_accuracy,
 )
 
 __all__ = (
+    "STRUCTURED_TASK_KIND_PACKAGE",
+    "STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE",
     "CapabilityExecutionEvidence",
+    "CapabilityPolicyContext",
+    "EvaluationResult",
     "ExecutionAttemptRunner",
     "ExecutionRecord",
     "ExecutionState",
@@ -39,5 +48,6 @@ __all__ = (
     "StructuredTaskKindInput",
     "StructuredTaskKindResult",
     "TaskKind",
+    "evaluate_predictions",
     "exact_accuracy",
 )

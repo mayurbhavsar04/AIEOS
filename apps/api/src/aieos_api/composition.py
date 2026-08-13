@@ -27,9 +27,17 @@ from aieos.adapters.persistence_postgres import (
     checkpoint,
     scoped_idempotency_lock_key,
 )
-from aieos.ai_gateway import ModelCatalogEntry, ReferenceAIGateway, ReferenceGatewayStore
+from aieos.ai_gateway import (
+    AIGateway,
+    AIInvocationRequest,
+    AIInvocationResponse,
+    ModelCatalogEntry,
+    PromptPackageCatalog,
+    ReferenceAIGateway,
+    ReferenceGatewayStore,
+)
 from aieos.capability_registry import CapabilityImplementation, CapabilityRegistry
-from aieos.contracts import AuthorizationContext, ResultEnvelope
+from aieos.contracts import AuthorizationContext, DataClassification, ResultEnvelope
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.domain import (
     Clock,
@@ -45,7 +53,14 @@ from aieos.memory_service import MemoryService
 from aieos.result_error_support import OutcomeFactory
 from aieos.security_support import ScopeAuthorizer
 from aieos.skill_registry import SkillDefinition, SkillRegistry
-from aieos.skill_runtime import InMemoryExecutionRepository, SkillRuntime
+from aieos.skill_runtime import (
+    STRUCTURED_TASK_KIND_PACKAGE,
+    STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE,
+    CapabilityPolicyContext,
+    InMemoryExecutionRepository,
+    SkillRuntime,
+    StructuredTaskKindClassification,
+)
 from aieos.workflow_engine import (
     InMemoryWorkflowRepository,
     WorkflowClient,
@@ -121,6 +136,27 @@ class DispatchingWorkflowClient(WorkflowClient):
         return self._workflow_engine.outcome(workflow_id)
 
 
+class CapabilityGatewayRouter:
+    """Select a composed Gateway implementation by governed capability identity."""
+
+    def __init__(self, text_gateway: MockAIGateway, structured_gateway: AIGateway) -> None:
+        self._text_gateway = text_gateway
+        self._structured_gateway = structured_gateway
+
+    @property
+    def invocations(self) -> list[str]:
+        """Preserve reference-host inspection of the existing text mock."""
+        return self._text_gateway.invocations
+
+    async def invoke(self, request: AIInvocationRequest) -> AIInvocationResponse:
+        gateway = (
+            self._structured_gateway
+            if request.capability_id == "StructuredTaskKindClassification"
+            else self._text_gateway
+        )
+        return await gateway.invoke(request)
+
+
 @dataclass(slots=True)
 class ReferenceRuntime:
     """Composition-owned facade for HelloAIEOSWorkflow."""
@@ -134,7 +170,7 @@ class ReferenceRuntime:
     outbox: EventOutbox
     memory_service: MemoryService
     memory_repository: InMemoryMemoryRepository | PostgresMemoryRepository
-    ai_gateway: MockAIGateway
+    ai_gateway: CapabilityGatewayRouter
     reference_ai_gateway: ReferenceAIGateway
     observations: InMemoryObservationRecorder
     workflow_repository: InMemoryWorkflowRepository
@@ -343,6 +379,9 @@ def compose(
         failures_before_success=resolved.mock_ai_failures_before_success,
         delay_seconds=resolved.mock_ai_delay_seconds,
     )
+    prompt_packages = PromptPackageCatalog(
+        (STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE, STRUCTURED_TASK_KIND_PACKAGE)
+    )
     reference_ai_gateway = ReferenceAIGateway(
         clock=resolved_clock,
         identifiers=resolved_identifiers,
@@ -379,7 +418,9 @@ def compose(
             "mock-economy": DeterministicMockProvider("mock-economy", prefix="Economy"),
             "mock-quality": DeterministicMockProvider("mock-quality", prefix="Quality"),
         },
+        prompt_packages=prompt_packages,
     )
+    routed_ai_gateway = CapabilityGatewayRouter(ai_gateway, reference_ai_gateway)
     capabilities = CapabilityRegistry(
         (
             CapabilityImplementation(
@@ -387,6 +428,15 @@ def compose(
                 capability_contract_version_id="text-generation-v1",
                 implementation_reference="hello-aieos-local",
                 boundary="AI Gateway",
+            ),
+            CapabilityImplementation(
+                capability_id="StructuredTaskKindClassification",
+                capability_contract_version_id="1",
+                implementation_reference="structured-task-kind-local",
+                boundary="AI Gateway",
+                prompt_package_ref="structured-task-kind",
+                prompt_package_version_ref="v1",
+                output_schema_ref="structured-task-kind-schema-v1",
             ),
         )
     )
@@ -399,14 +449,35 @@ def compose(
                 capability_contract_version_id="text-generation-v1",
                 implementation_reference="hello-aieos-local",
             ),
+            SkillDefinition(
+                skill_id="structured-task-kind-skill",
+                skill_version_id="structured-task-kind-skill-v1",
+                capability_id="StructuredTaskKindClassification",
+                capability_contract_version_id="1",
+                implementation_reference="structured-task-kind-local",
+            ),
         )
     )
     skill_runtime = SkillRuntime(
         repository=execution_repository,
         skills=skills,
-        skill_implementations={"hello-aieos-local": HelloAIEOSSkill()},
+        skill_implementations={
+            "hello-aieos-local": HelloAIEOSSkill(),
+            "structured-task-kind-local": StructuredTaskKindClassification(
+                prompt_packages=prompt_packages,
+                policy_context=CapabilityPolicyContext(
+                    data_classification=DataClassification.INTERNAL,
+                    safety_policy_ref="reference-safety-v1",
+                    cache_policy_ref="no-store",
+                    budget_policy_ref="reference-budget-v1",
+                    residency="any",
+                    required_data_handling=frozenset(),
+                    minimum_security_tier=1,
+                ),
+            ),
+        },
         capabilities=capabilities,
-        ai_gateway=ai_gateway,
+        ai_gateway=routed_ai_gateway,
         memory_service=memory_service,
         outbox=outbox,
         authorizer=authorizer,
@@ -455,7 +526,7 @@ def compose(
         outbox=outbox,
         memory_service=memory_service,
         memory_repository=memory_repository,
-        ai_gateway=ai_gateway,
+        ai_gateway=routed_ai_gateway,
         reference_ai_gateway=reference_ai_gateway,
         observations=observations,
         workflow_repository=workflow_repository,

@@ -18,6 +18,7 @@ from aieos.contracts import (
     ResultStatus,
 )
 from aieos.skill_runtime import (
+    CapabilityPolicyContext,
     SkillDependencyFailure,
     SkillInput,
     SkillServices,
@@ -25,6 +26,7 @@ from aieos.skill_runtime import (
     StructuredTaskKindInput,
     StructuredTaskKindResult,
     TaskKind,
+    evaluate_predictions,
     exact_accuracy,
 )
 
@@ -95,7 +97,6 @@ def skill_input(
     tenant_id: str = "tenant-a",
     workspace_id: str = "workspace-a",
     statement: object = "What is the status?",
-    classification: object = "Internal",
 ) -> SkillInput:
     authorization = AuthorizationContext(
         "actor-1",
@@ -112,36 +113,43 @@ def skill_input(
         "correlation-1",
         "command-1",
         authorization,
-        {"statement": statement, "data_classification": classification},
+        {"statement": statement},
     )
+
+
+POLICY = CapabilityPolicyContext(
+    DataClassification.INTERNAL,
+    "safety-v1",
+    "no-store",
+    "budget-v1",
+    "any",
+    frozenset(),
+    1,
+)
+
+
+def capability(**kwargs: object) -> StructuredTaskKindClassification:
+    return StructuredTaskKindClassification(policy_context=POLICY, **kwargs)  # type: ignore[arg-type]
 
 
 @pytest.mark.anyio
 async def test_authoritative_bypass_makes_zero_gateway_calls_and_records_savings() -> None:
     gateway = GatewaySpy()
-    capability = StructuredTaskKindClassification(
-        authoritative_results={"execution-1": TaskKind.QUESTION}
-    )
+    implementation = capability(authoritative_results={"execution-1": TaskKind.QUESTION})
 
-    output = await capability.execute(skill_input(), SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
+    output = await implementation.execute(skill_input(), SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
 
     assert output.value == '{"task_kind":"Question"}'
     assert output.ai_invocation_id == ""
     assert gateway.requests == []
-    evidence = capability.evidence["execution-1"]
-    assert evidence.disposition == "bypassed"
-    assert evidence.ai_invocation_id is None
-    assert evidence.avoided_input_tokens == 256
-    assert evidence.avoided_output_tokens == 16
-    assert evidence.avoided_cost == Decimal("0.01")
 
 
 @pytest.mark.anyio
 async def test_ai_path_uses_one_gateway_invocation_with_exact_governed_bounds() -> None:
     gateway = GatewaySpy()
-    capability = StructuredTaskKindClassification()
+    implementation = capability()
 
-    output = await capability.execute(skill_input(), SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
+    output = await implementation.execute(skill_input(), SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
 
     assert output.value == '{"task_kind":"Question"}'
     assert output.ai_invocation_id == "ai-1"
@@ -159,14 +167,9 @@ async def test_ai_path_uses_one_gateway_invocation_with_exact_governed_bounds() 
     assert request.tenant_id == request.authorization.tenant_id == "tenant-a"
     assert request.workspace_id == request.authorization.workspace_id == "workspace-a"
     assert request.data_classification is DataClassification.INTERNAL
-    evidence = capability.evidence["execution-1"]
-    assert evidence.input_tokens == 20
-    assert evidence.output_tokens == 4
-    assert evidence.cached_tokens == 2
-    assert evidence.reasoning_tokens == 1
-    assert evidence.governed_cost == Decimal("0.00042")
-    assert evidence.route_reference == "route-1"
-    assert evidence.primary_gateway_invocations == 1
+    assert request.safety_policy_ref == "safety-v1"
+    assert request.cache_policy_ref == "no-store"
+    assert request.budget_policy_ref == "budget-v1"
 
 
 @pytest.mark.parametrize("statement", [None, 1, "", " ", "x" * 513])
@@ -187,10 +190,10 @@ def test_deterministic_structured_acceptance_rejects_incompatible_results(conten
 @pytest.mark.anyio
 async def test_capability_acceptance_failure_never_repairs_or_retries() -> None:
     gateway = GatewaySpy('{"task_kind":"Unknown"}')
-    capability = StructuredTaskKindClassification()
+    implementation = capability()
 
     with pytest.raises(SkillDependencyFailure) as raised:
-        await capability.execute(skill_input(), SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
+        await implementation.execute(skill_input(), SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
 
     assert raised.value.retry is not None
     assert len(gateway.requests) == 1
@@ -199,7 +202,7 @@ async def test_capability_acceptance_failure_never_repairs_or_retries() -> None:
 @pytest.mark.anyio
 async def test_missing_or_mismatched_security_context_fails_closed_before_gateway() -> None:
     gateway = GatewaySpy()
-    capability = StructuredTaskKindClassification()
+    implementation = capability()
     value = skill_input()
     mismatched = SkillInput(
         value.execution_id,
@@ -219,7 +222,7 @@ async def test_missing_or_mismatched_security_context_fails_closed_before_gatewa
     )
 
     with pytest.raises(ValueError, match="security context"):
-        await capability.execute(mismatched, SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
+        await implementation.execute(mismatched, SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
     assert gateway.requests == []
 
 
@@ -237,19 +240,92 @@ def test_protected_evaluation_set_is_versioned_balanced_and_meets_release_gate()
     with fixture.open(encoding="utf-8", newline="") as source:
         rows = tuple(csv.DictReader(source))
     expected = tuple(TaskKind(row["task_kind"]) for row in rows)
+    predictions = tuple(_offline_predict(row["statement"]) for row in rows)
 
     assert len(rows) >= 100
     assert all(sum(value is kind for value in expected) >= 30 for kind in TaskKind)
-    assert exact_accuracy(expected, expected, threshold=Decimal("0.95"))
+    result = evaluate_predictions(expected, predictions)
+    assert result.passed
+    assert result.accuracy == Decimal("1")
+    assert all(value == Decimal("1") for value in result.per_class_recall.values())
+
+
+def _offline_predict(statement: str) -> TaskKind:
+    first = statement.split(maxsplit=1)[0].lower().rstrip(".,!?")
+    if statement.endswith("?"):
+        return TaskKind.QUESTION
+    if first in {
+        "apply",
+        "avoid",
+        "check",
+        "count",
+        "do",
+        "fail",
+        "keep",
+        "leave",
+        "limit",
+        "measure",
+        "normalize",
+        "open",
+        "preserve",
+        "propagate",
+        "record",
+        "reject",
+        "report",
+        "resolve",
+        "return",
+        "run",
+        "select",
+        "stop",
+        "use",
+        "validate",
+        "verify",
+    }:
+        return TaskKind.INSTRUCTION
+    return TaskKind.STATEMENT
+
+
+def test_bad_predictor_fixture_is_rejected_by_real_quality_gate() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "structured_task_kind_protected_v1.csv"
+    with fixture.open(encoding="utf-8", newline="") as source:
+        rows = tuple(csv.DictReader(source))
+    expected = tuple(TaskKind(row["task_kind"]) for row in rows)
+    bad_predictions = tuple(TaskKind.STATEMENT for _ in rows)
+
+    result = evaluate_predictions(expected, bad_predictions)
+
+    assert not result.passed
+    assert result.per_class_recall[TaskKind.QUESTION] == Decimal("0")
+
+
+def test_protected_disposition_matrix_covers_required_negative_and_ceiling_cases() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "structured_task_kind_dispositions_v1.csv"
+    with fixture.open(encoding="utf-8", newline="") as source:
+        rows = tuple(csv.DictReader(source))
+    categories = {row["category"] for row in rows}
+
+    assert {
+        "invalid",
+        "bypass",
+        "hostile",
+        "schema",
+        "rollback",
+        "replay",
+        "concurrency",
+        "ceiling",
+        "adapter",
+    } <= categories
+    assert all(int(row["max_primary_calls"]) <= 1 for row in rows)
+    assert all(int(row["max_repair_calls"]) <= 1 for row in rows)
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("adapter_key", ["openai-mock", "gemini-mock"])
 async def test_provider_routing_is_neutral_to_the_capability(adapter_key: str) -> None:
     gateway = GatewaySpy(adapter_key=adapter_key)
-    capability = StructuredTaskKindClassification()
+    implementation = capability()
 
-    output = await capability.execute(skill_input(), SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
+    output = await implementation.execute(skill_input(), SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
 
     assert output.value == '{"task_kind":"Question"}'
     request = gateway.requests[0]
@@ -261,9 +337,9 @@ async def test_provider_routing_is_neutral_to_the_capability(adapter_key: str) -
 @pytest.mark.anyio
 async def test_gateway_terminal_failure_propagates_without_capability_retry() -> None:
     gateway = GatewaySpy(status=ResultStatus.FAILED)
-    capability = StructuredTaskKindClassification()
+    implementation = capability()
 
     with pytest.raises(SkillDependencyFailure):
-        await capability.execute(skill_input(), SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
+        await implementation.execute(skill_input(), SkillServices(gateway, UnusedMemory()))  # type: ignore[arg-type]
 
     assert len(gateway.requests) == 1

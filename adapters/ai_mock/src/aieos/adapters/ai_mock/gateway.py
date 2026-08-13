@@ -216,6 +216,29 @@ class DeterministicMockProvider:
             raise ProviderFailure("AI_PROVIDER_CANCELLED", retryable=False)
         if behavior is MockProviderBehavior.MALFORMED:
             content = "not-json"
+        elif request.output_schema_ref == "structured-task-kind-schema-v1":
+            normalized = request.prompt.strip()
+            first = normalized.split(maxsplit=1)[0].lower().rstrip(".,!?")
+            if normalized.endswith("?"):
+                kind = "Question"
+            elif first in {
+                "add",
+                "build",
+                "check",
+                "create",
+                "delete",
+                "list",
+                "open",
+                "remove",
+                "run",
+                "send",
+                "update",
+                "write",
+            }:
+                kind = "Instruction"
+            else:
+                kind = "Statement"
+            content = json.dumps({"task_kind": kind})
         elif request.output_schema_ref == "analysis-v1":
             content = json.dumps(
                 {"result": {"summary": request.prompt.strip(), "items": [model_key]}}

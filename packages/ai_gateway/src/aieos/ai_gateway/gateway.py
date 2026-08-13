@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import Protocol, cast
 from uuid import uuid4
 
+from aieos.ai_gateway.prompt_pipeline import PromptPackageCatalog
 from aieos.contracts import (
     AuthorizationContext,
     DataClassification,
@@ -704,6 +705,7 @@ class ReferenceAIGateway:
         execution_lease: timedelta = timedelta(seconds=30),
         heartbeat_interval: float = 10.0,
         health_cooldown: timedelta = timedelta(seconds=30),
+        prompt_packages: PromptPackageCatalog | None = None,
     ) -> None:
         self._clock = clock
         self._identifiers = identifiers
@@ -720,6 +722,7 @@ class ReferenceAIGateway:
         self._health_lock = threading.Lock()
         self._cooldowns: dict[str, datetime] = {}
         self._degraded: set[str] = set()
+        self._prompt_packages = prompt_packages
 
     async def _heartbeat(
         self, invocation_id: str, owner: str, generation: int, lost: asyncio.Event
@@ -1551,6 +1554,24 @@ class ReferenceAIGateway:
             raise ValueError("coarse budget feasibility failed")
 
     def _assemble(self, request: AIInvocationRequest, *, stage: int = 0) -> tuple[str, int, str]:
+        if (
+            self._prompt_packages is not None
+            and request.prompt_template_ref == "structured-task-kind"
+        ):
+            if stage != 0 or request.context_items:
+                raise ValueError("governed Stage 1 package forbids history or context")
+            assembled = self._prompt_packages.assemble(
+                request.prompt_template_ref,
+                request.prompt_template_version_ref,
+                {"statement": request.prompt},
+            )
+            if assembled.output_schema_reference != request.output_schema_ref:
+                raise ValueError("governed schema reference does not match the prompt package")
+            content = assembled.content
+            tokens = self._estimate(content)
+            if tokens > request.max_input_tokens:
+                raise ValueError("assembled governed prompt exceeds its input ceiling")
+            return content, tokens, assembled.package_identity
         unique: dict[tuple[str, str], ContextItem] = {}
         for item in sorted(
             request.context_items,
@@ -1941,6 +1962,13 @@ class ReferenceAIGateway:
             items = cast(list[object], raw_items)
             if not all(isinstance(item, str) for item in items):
                 raise ValueError("structured items must be strings")
+        elif request.output_schema_ref == "structured-task-kind-schema-v1":
+            if set(value) != {"task_kind"} or value.get("task_kind") not in {
+                "Question",
+                "Instruction",
+                "Statement",
+            }:
+                raise ValueError("structured task-kind output is invalid")
         else:
             raise ValueError("structured output schema is unresolved")
         return json.dumps(value, sort_keys=True)

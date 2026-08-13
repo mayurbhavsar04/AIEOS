@@ -12,6 +12,7 @@ from typing import cast
 from aieos.ai_gateway import (
     AIInvocationRequest,
     AIInvocationResponse,
+    PackageState,
     PromptPackage,
     PromptPackageCatalog,
     ResponseMode,
@@ -33,6 +34,8 @@ class StructuredTaskKindInput:
 
     @classmethod
     def parse(cls, payload: Mapping[str, object]) -> StructuredTaskKindInput:
+        if set(payload) - {"statement", "skill_version_id", "timeout_seconds"}:
+            raise ValueError("structured task input must contain exactly statement")
         statement = payload.get("statement")
         if not isinstance(statement, str):
             raise ValueError("statement must be a string")
@@ -100,20 +103,93 @@ class CapabilityExecutionEvidence:
     total_model_calls: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CapabilityPolicyContext:
+    data_classification: DataClassification
+    safety_policy_ref: str
+    cache_policy_ref: str
+    budget_policy_ref: str
+    residency: str
+    required_data_handling: frozenset[str]
+    minimum_security_tier: int
+
+    def __post_init__(self) -> None:
+        if (
+            not all(
+                (
+                    self.safety_policy_ref,
+                    self.cache_policy_ref,
+                    self.budget_policy_ref,
+                    self.residency,
+                )
+            )
+            or self.minimum_security_tier <= 0
+        ):
+            raise ValueError("verified capability policy context is incomplete")
+
+
+STRUCTURED_TASK_KIND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "task_kind": {"type": "string", "enum": ["Question", "Instruction", "Statement"]}
+    },
+    "required": ["task_kind"],
+    "additionalProperties": False,
+}
+
+STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE = PromptPackage(
+    reference="structured-task-kind",
+    version_reference="v0",
+    owner="Prompt Pipeline",
+    capability_id="StructuredTaskKindClassification",
+    capability_contract_version_id="1",
+    typed_variables=(("statement", "string[1..512]"),),
+    system_instruction_reference="structured-task-kind-system-v0",
+    system_instruction=(
+        "Classify only the communicative form. Return exactly one governed task_kind enum value."
+    ),
+    output_schema_reference="structured-task-kind-schema-v1",
+    output_schema=STRUCTURED_TASK_KIND_SCHEMA,
+    task_class="classification",
+    evaluation_set_reference="structured-task-kind-protected-v0",
+    rollback_version_reference="none",
+    quality_threshold=Decimal("0.95"),
+    per_class_recall_threshold=Decimal("0.90"),
+    max_regression=Decimal("0.02"),
+    max_input_tokens=256,
+    max_output_tokens=16,
+    max_cost=Decimal("0.01"),
+    state=PackageState.APPROVED,
+    change_history=("v0 approved rollback baseline",),
+)
+
+
 STRUCTURED_TASK_KIND_PACKAGE = PromptPackage(
     reference="structured-task-kind",
     version_reference="v1",
     owner="Prompt Pipeline",
     capability_id="StructuredTaskKindClassification",
     capability_contract_version_id="1",
+    typed_variables=(("statement", "string[1..512]"),),
     system_instruction_reference="structured-task-kind-system-v1",
+    system_instruction=(
+        "Classify only the communicative form of the task. Return exactly one "
+        "task_kind enum value; "
+        "do not infer intent, priority, topic, sentiment, authority, or workflow routing."
+    ),
     output_schema_reference="structured-task-kind-schema-v1",
+    output_schema=STRUCTURED_TASK_KIND_SCHEMA,
+    task_class="classification",
     evaluation_set_reference="structured-task-kind-protected-v1",
-    rollback_version_reference="v1",
+    rollback_version_reference="v0",
     quality_threshold=Decimal("0.95"),
+    per_class_recall_threshold=Decimal("0.90"),
+    max_regression=Decimal("0.02"),
     max_input_tokens=256,
     max_output_tokens=16,
     max_cost=Decimal("0.01"),
+    state=PackageState.CANDIDATE,
+    change_history=("v0 approved baseline", "v1 candidate: minimum-sufficient wording"),
 )
 
 
@@ -128,36 +204,23 @@ class StructuredTaskKindClassification:
         *,
         prompt_packages: PromptPackageCatalog | None = None,
         authoritative_results: Mapping[str, TaskKind] | None = None,
+        policy_context: CapabilityPolicyContext | None = None,
     ) -> None:
-        self._packages = prompt_packages or PromptPackageCatalog((STRUCTURED_TASK_KIND_PACKAGE,))
+        self._packages = prompt_packages or PromptPackageCatalog(
+            (STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE, STRUCTURED_TASK_KIND_PACKAGE)
+        )
         self._authoritative_results = dict(authoritative_results or {})
-        self.evidence: dict[str, CapabilityExecutionEvidence] = {}
+        self._policy_context = policy_context
 
     async def execute(self, skill_input: SkillInput, services: SkillServices) -> SkillOutput:
         typed_input = StructuredTaskKindInput.parse(skill_input.payload)
         self._require_security_context(skill_input)
         package = self._packages.resolve("structured-task-kind", "v1")
         authoritative = self._authoritative_results.get(skill_input.execution_id)
-        classification = self._classification(skill_input.payload)
+        policy = self._require_policy_context()
+        classification = policy.data_classification
         if authoritative is not None:
             result = StructuredTaskKindResult(authoritative)
-            self.evidence[skill_input.execution_id] = CapabilityExecutionEvidence(
-                execution_id=skill_input.execution_id,
-                capability_id=self.capability_id,
-                contract_version=self.contract_version,
-                prompt_package_ref=package.reference,
-                prompt_package_version_ref=package.version_reference,
-                disposition="bypassed",
-                terminal_outcome="Succeeded",
-                tenant_id=skill_input.tenant_id,
-                workspace_id=skill_input.workspace_id,
-                data_classification=classification,
-                redaction_applied=True,
-                bypass_reason="authoritative_result_reuse",
-                avoided_input_tokens=package.max_input_tokens,
-                avoided_output_tokens=package.max_output_tokens,
-                avoided_cost=package.max_cost,
-            )
             return SkillOutput(result.canonical_json(), "", "")
 
         response = await services.ai_gateway.invoke(
@@ -184,6 +247,12 @@ class StructuredTaskKindClassification:
                 max_total_cost=package.max_cost,
                 context_items=(),
                 data_classification=classification,
+                safety_policy_ref=policy.safety_policy_ref,
+                cache_policy_ref=policy.cache_policy_ref,
+                budget_policy_ref=policy.budget_policy_ref,
+                residency=policy.residency,
+                required_data_handling=policy.required_data_handling,
+                minimum_security_tier=policy.minimum_security_tier,
                 allow_fallback=True,
                 max_provider_attempts=2,
                 repair_attempts=1,
@@ -199,34 +268,8 @@ class StructuredTaskKindClassification:
         response: AIInvocationResponse,
         classification: DataClassification,
     ) -> SkillOutput:
-        usage = response.usage
-        route = response.route
-        self.evidence[skill_input.execution_id] = CapabilityExecutionEvidence(
-            execution_id=skill_input.execution_id,
-            capability_id=self.capability_id,
-            contract_version=self.contract_version,
-            prompt_package_ref=package.reference,
-            prompt_package_version_ref=package.version_reference,
-            disposition="invoked",
-            terminal_outcome=response.result.result_status.value,
-            tenant_id=skill_input.tenant_id,
-            workspace_id=skill_input.workspace_id,
-            data_classification=classification,
-            redaction_applied=True,
-            ai_invocation_id=response.ai_invocation_id,
-            input_tokens=usage.input_tokens if usage else None,
-            output_tokens=usage.output_tokens if usage else None,
-            cached_tokens=usage.cached_tokens if usage else None,
-            reasoning_tokens=usage.reasoning_tokens if usage else None,
-            governed_cost=route.estimated_cost if route else None,
-            route_reference=route.decision_reference if route else None,
-            primary_gateway_invocations=1,
-        )
         if response.result.result_status is not ResultStatus.SUCCEEDED:
-            raise SkillDependencyFailure(
-                "AI Gateway returned a normalized terminal failure",
-                retry=RetryClassification.REQUIRES_POLICY_EVALUATION,
-            )
+            raise SkillDependencyFailure.from_gateway(response)
         try:
             result = StructuredTaskKindResult.accept(response.content)
         except ValueError as error:
@@ -246,15 +289,10 @@ class StructuredTaskKindClassification:
         ):
             raise ValueError("missing or scope-mismatched verified security context")
 
-    @staticmethod
-    def _classification(payload: Mapping[str, object]) -> DataClassification:
-        value = payload.get("data_classification")
-        if not isinstance(value, str):
-            raise ValueError("data_classification is required")
-        try:
-            return DataClassification(value)
-        except ValueError as error:
-            raise ValueError("unknown data_classification") from error
+    def _require_policy_context(self) -> CapabilityPolicyContext:
+        if self._policy_context is None:
+            raise ValueError("verified capability policy context is missing")
+        return self._policy_context
 
 
 def exact_accuracy(
@@ -267,12 +305,46 @@ def exact_accuracy(
     return Decimal(correct) / Decimal(len(expected)) >= threshold
 
 
+@dataclass(frozen=True, slots=True)
+class EvaluationResult:
+    accuracy: Decimal
+    per_class_recall: Mapping[TaskKind, Decimal]
+    passed: bool
+
+
+def evaluate_predictions(
+    expected: tuple[TaskKind, ...], actual: tuple[TaskKind, ...]
+) -> EvaluationResult:
+    if not expected or len(expected) != len(actual):
+        return EvaluationResult(Decimal("0"), {}, False)
+    correct = sum(left is right for left, right in zip(expected, actual, strict=True))
+    accuracy = Decimal(correct) / Decimal(len(expected))
+    recall = {
+        kind: Decimal(
+            sum(
+                left is kind and right is kind for left, right in zip(expected, actual, strict=True)
+            )
+        )
+        / Decimal(sum(left is kind for left in expected))
+        for kind in TaskKind
+    }
+    return EvaluationResult(
+        accuracy,
+        recall,
+        accuracy >= Decimal("0.95") and all(value >= Decimal("0.90") for value in recall.values()),
+    )
+
+
 __all__ = (
     "STRUCTURED_TASK_KIND_PACKAGE",
+    "STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE",
     "CapabilityExecutionEvidence",
+    "CapabilityPolicyContext",
+    "EvaluationResult",
     "StructuredTaskKindClassification",
     "StructuredTaskKindInput",
     "StructuredTaskKindResult",
     "TaskKind",
+    "evaluate_predictions",
     "exact_accuracy",
 )

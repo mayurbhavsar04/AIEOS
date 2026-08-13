@@ -115,10 +115,24 @@ class SkillDependencyFailure(RuntimeError):
         *,
         category: ErrorCategory = ErrorCategory.DEPENDENCY_FAILURE,
         retry: RetryClassification = RetryClassification.REQUIRES_POLICY_EVALUATION,
+        error_code: str = "SKILL_DEPENDENCY_FAILURE",
     ) -> None:
         super().__init__(message)
         self.category = category
         self.retry = retry
+        self.error_code = error_code
+
+    @classmethod
+    def from_gateway(cls, response: object) -> SkillDependencyFailure:
+        error = getattr(response, "error", None)
+        if error is None:
+            return cls("AI Gateway returned a normalized terminal failure")
+        return cls(
+            error.message,
+            category=error.error_category,
+            retry=error.retry_classification,
+            error_code=error.error_code,
+        )
 
 
 class SkillRuntime:
@@ -287,7 +301,7 @@ class SkillRuntime:
                 correlation_id=command.correlation_id,
                 causation_id=command.command_id,
                 command_id=command.command_id,
-                error_code="SKILL_DEPENDENCY_FAILURE",
+                error_code=failure.error_code,
                 category=failure.category,
                 severity=ErrorSeverity.WARNING,
                 retry=failure.retry,
