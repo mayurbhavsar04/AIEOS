@@ -11,6 +11,9 @@ class CapabilityImplementation:
     capability_contract_version_id: str
     implementation_reference: str
     boundary: str
+    prompt_package_ref: str | None = None
+    prompt_package_version_ref: str | None = None
+    output_schema_ref: str | None = None
 
 
 class CapabilityRegistry:

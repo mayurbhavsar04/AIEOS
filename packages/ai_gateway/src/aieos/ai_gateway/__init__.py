@@ -20,6 +20,7 @@ from aieos.ai_gateway.gateway import (
     RouteDecision,
     StreamChunk,
 )
+from aieos.ai_gateway.prompt_pipeline import PromptPackage, PromptPackageCatalog
 
 __all__ = (
     "AIGateway",
@@ -30,6 +31,8 @@ __all__ = (
     "ContextItem",
     "InvocationState",
     "ModelCatalogEntry",
+    "PromptPackage",
+    "PromptPackageCatalog",
     "ProviderAdapter",
     "ProviderEffectBoundary",
     "ProviderFailure",
