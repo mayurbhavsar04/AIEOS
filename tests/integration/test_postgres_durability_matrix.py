@@ -842,6 +842,8 @@ async def test_ai_gateway_stream_crash_after_durable_chunk_recovers_once(
     assert len(terminals) == 1
     assert terminals[0].terminal is not None
     assert terminals[0].terminal.result.result_status is ResultStatus.FAILED
+    assert terminals[0].terminal.error is not None
+    assert terminals[0].terminal.error.error_code == "AI_PROVIDER_EFFECT_AMBIGUOUS"
     assert restarted_provider.calls == 0
 
 

@@ -176,9 +176,14 @@ class GeminiProviderAdapter:
                 )
         except asyncio.CancelledError:
             raise
-        except httpx.TimeoutException as error:
+        except (httpx.ConnectTimeout, httpx.PoolTimeout) as error:
             raise ProviderFailure(
                 "AI_PROVIDER_TIMEOUT", retryable=True, usage=latest_usage
+            ) from error
+        except httpx.TimeoutException as error:
+            # Read/write timeouts can occur after request bytes reached Gemini.
+            raise ProviderFailure(
+                "AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False, usage=latest_usage
             ) from error
         except httpx.RequestError as error:
             # A streaming dispatch may have reached the provider; another call is unsafe.

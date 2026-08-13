@@ -245,6 +245,51 @@ async def test_pre_dispatch_connect_timeout_remains_retryable() -> None:
     await client.aclose()
 
 
+@pytest.mark.anyio
+async def test_stream_pre_dispatch_connect_timeout_remains_retryable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("not dispatched", request=request)
+
+    client = httpx.AsyncClient(
+        base_url="https://example.test/v1beta", transport=httpx.MockTransport(handler)
+    )
+    adapter = GeminiProviderAdapter(GeminiProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        _ = [
+            item
+            async for item in adapter.stream(
+                model_key="economy-text-gemini-v1", prompt="stream", request=make_request()
+            )
+        ]
+    assert raised.value.code == "AI_PROVIDER_TIMEOUT"
+    assert raised.value.retryable is True
+    await client.aclose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("timeout_type", [httpx.ReadTimeout, httpx.WriteTimeout])
+async def test_stream_post_dispatch_timeout_is_ambiguity_safe(
+    timeout_type: type[httpx.TimeoutException],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise timeout_type("provider effect unknown", request=request)
+
+    client = httpx.AsyncClient(
+        base_url="https://example.test/v1beta", transport=httpx.MockTransport(handler)
+    )
+    adapter = GeminiProviderAdapter(GeminiProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        _ = [
+            item
+            async for item in adapter.stream(
+                model_key="economy-text-gemini-v1", prompt="stream", request=make_request()
+            )
+        ]
+    assert raised.value.code == "AI_PROVIDER_EFFECT_AMBIGUOUS"
+    assert raised.value.retryable is False
+    await client.aclose()
+
+
 def test_gemini_cost_includes_thoughts_and_cached_discount() -> None:
     catalog = GEMINI_MODEL_CATALOG[0].catalog
     cost = catalog.estimate_cost(10, 2, cached_tokens=4, reasoning_tokens=3)

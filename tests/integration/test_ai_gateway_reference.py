@@ -367,6 +367,32 @@ async def test_output_limit_and_midstream_failure_are_normalized() -> None:
 
 
 @pytest.mark.anyio
+async def test_streaming_gateway_deadline_is_ambiguity_safe_and_terminal_once() -> None:
+    class SlowStreamProvider(DeterministicMockProvider):
+        async def stream(self, **values: object):  # type: ignore[no-untyped-def,override]
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            if False:
+                yield values
+
+    gateway, _, second = _gateway()
+    first = SlowStreamProvider("mock-economy", prefix="Slow")
+    gateway._adapters["mock-economy"] = first  # type: ignore[attr-defined]
+    chunks = [
+        chunk
+        async for chunk in gateway.stream(
+            _request(deadline=datetime(2026, 8, 3, 0, 0, 0, 1000, tzinfo=UTC))
+        )
+    ]
+    terminals = [chunk for chunk in chunks if chunk.kind == "terminal"]
+    assert len(terminals) == 1
+    assert terminals[0].terminal is not None
+    assert terminals[0].terminal.error is not None
+    assert terminals[0].terminal.error.error_code == "AI_PROVIDER_EFFECT_AMBIGUOUS"
+    assert first.calls == 1 and second.calls == 0
+
+
+@pytest.mark.anyio
 async def test_failed_fallback_attempt_is_accounted_and_context_escalates_only_on_signal() -> None:
     gateway, economy, quality = _gateway(economy_behaviors=(MockProviderBehavior.LOW_CONFIDENCE,))
     context = (

@@ -1288,7 +1288,7 @@ class ReferenceAIGateway:
             if invocation.stream_started:
                 partial_usage = invocation.stream_usage
                 parts = list(invocation.stream_content)
-                raise ProviderFailure("AI_STREAM_RECOVERY_REQUIRED", retryable=False)
+                raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False)
             self._transition(invocation, InvocationState.POLICY_VALIDATED)
             prompt, tokens, _ = self._assemble(invocation.request)
             input_tokens = tokens
@@ -1401,7 +1401,9 @@ class ReferenceAIGateway:
                                 },
                             )
             except TimeoutError:
-                raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=False) from None
+                # The stream is durably marked started before entering the deadline.
+                # Its provider effect may therefore have occurred.
+                raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False) from None
             content = "".join(parts)
             if self._estimate(content) > invocation.request.max_output_tokens:
                 raise ProviderFailure("AI_OUTPUT_LIMIT_EXCEEDED", retryable=False)

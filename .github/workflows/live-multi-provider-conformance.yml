@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       target_ref:
-        description: Branch, tag, or commit SHA containing the provider adapters to validate
+        description: Immutable 40-character commit SHA containing the provider adapters to validate
         required: true
         type: string
 
