@@ -39,7 +39,12 @@ def _evidence(value: str) -> None:
 
 def _usage(label: str, usage: AIUsage) -> None:
     model = GEMINI_MODEL_CATALOG[0]
-    cost = model.catalog.estimate_cost(usage.input_tokens, usage.output_tokens)
+    cost = model.catalog.estimate_cost(
+        usage.input_tokens,
+        usage.output_tokens,
+        cached_tokens=usage.cached_tokens,
+        reasoning_tokens=usage.reasoning_tokens,
+    )
     _evidence(
         f"{label}: input_tokens={usage.input_tokens}, output_tokens={usage.output_tokens}, "
         f"reasoning_tokens={usage.reasoning_tokens}, cached_tokens={usage.cached_tokens}, "

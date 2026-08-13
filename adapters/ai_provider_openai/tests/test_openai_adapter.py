@@ -694,3 +694,31 @@ async def test_cancellation_remains_cancellation() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_post_dispatch_read_timeout_is_ambiguity_safe() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("response outcome unknown", request=request)
+
+    client = _client(handler)
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        await adapter.invoke(model_key="economy-text-v1", prompt="x", request=make_request())
+    assert raised.value.code == "AI_PROVIDER_EFFECT_AMBIGUOUS"
+    assert raised.value.retryable is False
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_pre_dispatch_connect_timeout_remains_retryable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("not dispatched", request=request)
+
+    client = _client(handler)
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        await adapter.invoke(model_key="economy-text-v1", prompt="x", request=make_request())
+    assert raised.value.code == "AI_PROVIDER_TIMEOUT"
+    assert raised.value.retryable is True
+    await client.aclose()

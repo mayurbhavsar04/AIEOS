@@ -52,6 +52,11 @@ checked before a paid dispatch. Each attempt's actual or estimated usage is reco
 subtracted from remaining capacity, repair spend shares the same budget, and switching providers
 never resets token or cost totals. Budget exhaustion stops before another dispatch.
 
+Replaceable pricing metadata distinguishes ordinary input, cached input, visible output, and
+reasoning/thought tokens. Gemini thought tokens use its governed output rate; cached input uses its
+cataloged cache rate. Success, failure, streaming, repair, and terminal reconciliation all use the
+same usage-aware calculation.
+
 Provider retry classification is advisory to the Gateway attempt policy. The Workflow Engine stays
 the sole owner of workflow retry. Permanent policy/capability failures do not fall through unless an
 explicit policy semantics makes them provider-local and safe; current Phase 4 behavior fails closed.
@@ -62,11 +67,18 @@ Neither selected API documents a compatible process-independent generation dedup
 persists its opaque effect reservation before dispatch and replays completed evidence, but an unknown
 provider dispatch outcome is `AI_PROVIDER_EFFECT_AMBIGUOUS`. It is non-retryable inside the Gateway
 and blocks cross-provider failover because another call could duplicate a billable/business effect.
+This includes response/read timeouts and a Gateway deadline after dispatch may have begun. Only a
+provable pre-dispatch connection or pool-acquisition failure remains eligible for bounded failover.
 
 Durable PostgreSQL attempt rows retain model/adapter order, state, effect reference, per-attempt
 usage/cost, and completed provider results. Invocation checkpoints retain the latest route and
 cumulative reconciliation. Crash recovery cannot create a second terminal Result; terminal intent
 and ambiguity remain fail-closed and immutable across restart.
+
+Confirmed provider failures are recorded separately from unknown dispatches. Recovery replays a
+confirmed failure without another external call, restores the ordered provider sequence, attempt
+cursor, cumulative usage/cost, and failover reason, and reuses a completed later-provider effect if
+a worker died before accounting or terminalization.
 
 ## Observability and security
 
@@ -81,9 +93,15 @@ and approved-project ZDR are separate hard data-handling flags. Free-tier handli
 for internal workloads. Tenant/workspace scope remains enforced at admission, cache, reservation,
 usage, attempt, and terminal persistence boundaries.
 
+Runtime rate-limit, quota, overload, and transient signals place a model into a lock-protected
+Gateway-local cooldown before later routing. Catalog state remains the durable cross-worker health
+authority. The local cooldown is advisory operational state, not a new canonical platform component;
+deployments must distribute catalog health before relying on it across workers.
+
 ## Governed live validation
 
-`live-multi-provider-conformance.yml` is manual, protected, exact-ref, environment-secret scoped,
+`live-multi-provider-conformance.yml` is manual, protected, full-commit-SHA-only,
+environment-secret scoped,
 five-minute bounded, and performs no uncontrolled retry. It runs tiny Gemini text, structured, and
 real streaming checks with usage/cost summaries. A second job injects a deterministic non-billable
 OpenAI transient before dispatch, then calls Gemini live, proving one invocation ID, A→B evidence,

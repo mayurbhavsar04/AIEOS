@@ -111,8 +111,10 @@ class GeminiProviderAdapter:
         try:
             response = await self._client.post(self._path(model_key, stream=False), json=payload)
             response.raise_for_status()
-        except httpx.TimeoutException as error:
+        except (httpx.ConnectTimeout, httpx.PoolTimeout) as error:
             raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=True) from error
+        except httpx.TimeoutException as error:
+            raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False) from error
         except httpx.HTTPStatusError as error:
             raise self._http_failure(error.response) from error
         except httpx.RequestError as error:

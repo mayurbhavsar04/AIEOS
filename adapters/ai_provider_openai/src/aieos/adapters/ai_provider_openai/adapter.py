@@ -117,12 +117,14 @@ class OpenAIProviderAdapter:
                 "/responses", json=self._payload(model_key, prompt, request)
             )
             response.raise_for_status()
-        except httpx.TimeoutException as error:
+        except (httpx.ConnectTimeout, httpx.PoolTimeout) as error:
             raise ProviderFailure("AI_PROVIDER_TIMEOUT", retryable=True) from error
+        except httpx.TimeoutException as error:
+            raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False) from error
         except httpx.HTTPStatusError as error:
             raise self._http_failure(error.response) from error
         except httpx.RequestError as error:
-            raise ProviderFailure("AI_PROVIDER_TEMPORARILY_UNAVAILABLE", retryable=True) from error
+            raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False) from error
         try:
             body_value = response.json()
         except ValueError as error:

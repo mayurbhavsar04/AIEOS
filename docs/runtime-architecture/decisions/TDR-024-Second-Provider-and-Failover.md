@@ -50,6 +50,10 @@ provider is called. Provider attempts stay internal, share one `AIInvocationId`,
 cumulative budget, are bounded by `max_provider_attempts`, and never transfer workflow retry
 ownership away from the Workflow Engine.
 
+Response/read timeouts and Gateway deadlines after dispatch may have begun are ambiguous. Only a
+provable pre-dispatch connection or pool-acquisition failure remains eligible for bounded failover.
+Confirmed failures and the ordered attempt cursor are durably replayable across worker recovery.
+
 ## Health, privacy, and operational limits
 
 Health is Gateway-owned catalog state, not a new component. `healthy`, `available`, and
@@ -57,6 +61,13 @@ Health is Gateway-owned catalog state, not a new component. `healthy`, `availabl
 cooldown/rate-limit exclusion, model removal, and deprecation. A degraded but allowed model can be
 given a higher latency/cost tier through replaceable catalog configuration; unavailable/cooldown
 models are excluded before price ranking.
+
+Runtime rate-limit, quota, overload, and transient observations enter a lock-protected Gateway-local
+cooldown. Catalog configuration remains the durable cross-worker authority; local cooldown is an
+advisory optimization and is not claimed as global health coordination.
+
+Gemini pricing records distinct standard-input, cached-input, visible-output, and thought-token
+rates. Thought tokens are billed at the output rate and included in cumulative budget reconciliation.
 
 The Developer API catalog advertises only global/`any` residency. Requests requiring a named
 region cannot use it. A future Vertex AI transport may add verified regional entries behind the

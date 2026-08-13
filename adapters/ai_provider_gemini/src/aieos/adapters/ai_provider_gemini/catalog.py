@@ -34,6 +34,8 @@ GEMINI_MODEL_CATALOG = (
             residencies=frozenset({"any"}),
             data_handling=frozenset({"internal", "paid-no-training", "zdr-eligible"}),
             security_tier=2,
+            cached_input_cost_per_token=Decimal("0.00000003"),
+            reasoning_cost_per_token=Decimal("0.00000250"),
         ),
         pricing_reference="https://ai.google.dev/gemini-api/docs/pricing",
         data_handling=(

@@ -39,6 +39,27 @@ class AmbiguousProvider(DeterministicMockProvider):
         raise ProviderFailure("AI_PROVIDER_EFFECT_AMBIGUOUS", retryable=False)
 
 
+class DeadlineProvider(DeterministicMockProvider):
+    async def invoke(self, **kwargs: object) -> ProviderResult:
+        import asyncio
+
+        self.calls += 1
+        await asyncio.sleep(0.05)
+        return ProviderResult("late", AIUsage(1, 1))
+
+
+class ReasoningProvider(DeterministicMockProvider):
+    async def invoke(self, **kwargs: object) -> ProviderResult:
+        self.calls += 1
+        return ProviderResult("reasoned", AIUsage(10, 2, cached_tokens=4, reasoning_tokens=20))
+
+
+class RateLimitedProvider(DeterministicMockProvider):
+    async def invoke(self, **kwargs: object) -> ProviderResult:
+        self.calls += 1
+        raise ProviderFailure("AI_PROVIDER_RATE_LIMITED", retryable=True)
+
+
 def request(**changes: object) -> AIInvocationRequest:
     values: dict[str, object] = {
         "execution_id": "execution-1",
@@ -216,3 +237,40 @@ async def test_max_attempts_prevents_provider_loop() -> None:
     assert result.result.result_status is ResultStatus.FAILED
     assert openai.calls == 1 and gemini.calls == 1
     assert len(runtime.store.attempts[result.ai_invocation_id]) == 2
+
+
+@pytest.mark.anyio
+async def test_gateway_deadline_after_dispatch_blocks_cross_provider_failover() -> None:
+    first = DeadlineProvider("openai-responses", prefix="OpenAI")
+    runtime, _, gemini = gateway(openai=first)
+    result = await runtime.invoke(
+        request(deadline=datetime(2026, 8, 12, 0, 0, 0, 1000, tzinfo=UTC))
+    )
+    assert result.result.result_status is ResultStatus.FAILED
+    assert result.error is not None
+    assert result.error.error_code == "AI_PROVIDER_EFFECT_AMBIGUOUS"
+    assert first.calls == 1 and gemini.calls == 0
+
+
+@pytest.mark.anyio
+async def test_reasoning_tokens_consume_fallback_budget() -> None:
+    first = ReasoningProvider("openai-responses", prefix="OpenAI")
+    runtime, _, _ = gateway(openai=first, openai_cost="0.000002", gemini_cost="0.000003")
+    result = await runtime.invoke(request(max_total_cost=Decimal("0.001")))
+    assert result.result.result_status is ResultStatus.SUCCEEDED
+    reservation = runtime.store.reservations[result.ai_invocation_id]
+    assert reservation.actual == Decimal("0.000064")
+    assert result.usage is not None and result.usage.reasoning_tokens == 20
+
+
+@pytest.mark.anyio
+async def test_rate_limited_model_enters_thread_safe_cooldown() -> None:
+    openai = RateLimitedProvider("openai-responses", prefix="OpenAI")
+    runtime, _, gemini = gateway(openai=openai)
+    first = await runtime.invoke(request(idempotency_key="cooldown-1", command_id="cooldown-1"))
+    assert first.result.result_status is ResultStatus.SUCCEEDED
+    second = await runtime.invoke(request(idempotency_key="cooldown-2", command_id="cooldown-2"))
+    assert second.result.result_status is ResultStatus.SUCCEEDED
+    assert openai.calls == 1
+    assert gemini.calls == 2
+    assert second.route is not None and second.route.adapter_key == "gemini-generate-content"

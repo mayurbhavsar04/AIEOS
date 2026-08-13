@@ -25,10 +25,18 @@ jobs:
       AIEOS_RUN_LIVE_PROVIDER_TESTS: "1"
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     steps:
+      - name: Require immutable target SHA
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: test "$(printf '%s' "$TARGET_REF" | sed -E 's/^[0-9a-f]{40}$//')" = ""
       - name: Check out exact target ref
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.target_ref }}
+      - name: Verify exact target SHA
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: test "$(git rev-parse HEAD)" = "$TARGET_REF"
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -54,10 +62,18 @@ jobs:
       AIEOS_RUN_LIVE_PROVIDER_TESTS: "1"
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     steps:
+      - name: Require immutable target SHA
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: test "$(printf '%s' "$TARGET_REF" | sed -E 's/^[0-9a-f]{40}$//')" = ""
       - name: Check out exact target ref
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.target_ref }}
+      - name: Verify exact target SHA
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: test "$(git rev-parse HEAD)" = "$TARGET_REF"
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:

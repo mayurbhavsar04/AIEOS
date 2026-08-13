@@ -180,6 +180,7 @@ def durable_multi_provider_gateway(
     *,
     first: DeterministicMockProvider | None = None,
     second: DeterministicMockProvider | None = None,
+    store: PostgresAIGatewayStore | None = None,
 ) -> tuple[ReferenceAIGateway, DeterministicMockProvider, DeterministicMockProvider]:
     identifiers = DeterministicIdentifiers()
     first = first or DeterministicMockProvider("openai-responses", prefix="OpenAI")
@@ -192,7 +193,7 @@ def durable_multi_provider_gateway(
         identifiers=identifiers,
         authorizer=ScopeAuthorizer(),
         observations=InMemoryObservationRecorder(identifiers),
-        store=PostgresAIGatewayStore(database),
+        store=store or PostgresAIGatewayStore(database),
         catalog=(
             ModelCatalogEntry(
                 "openai-model-v1",
@@ -285,6 +286,89 @@ async def test_multi_provider_attempt_sequence_spend_and_terminal_survive_restar
     assert replay.result.result_id == terminal_result_id
     assert restarted_first.calls == 0 and restarted_second.calls == 0
     assert replay.usage == response.usage
+
+
+async def test_multi_provider_confirmed_failure_resumes_after_checkpoint_crash(
+    database: PostgresDatabase,
+) -> None:
+    class InjectedCrash(BaseException):
+        pass
+
+    class CrashAfterFailureCheckpoint(PostgresAIGatewayStore):
+        crashed = False
+
+        async def checkpoint(self, invocation: Any) -> None:
+            if invocation.next_provider_attempt == 2 and not self.crashed:
+                self.crashed = True
+                raise InjectedCrash
+            await super().checkpoint(invocation)
+
+    first = DeterministicMockProvider(
+        "openai-responses",
+        prefix="OpenAI",
+        behaviors=(MockProviderBehavior.TRANSIENT_FAILURE,),
+    )
+    gateway, _, _ = durable_multi_provider_gateway(
+        database,
+        first=first,
+        store=CrashAfterFailureCheckpoint(database),
+    )
+    request = ai_request(
+        idempotency_key="multi-provider-failure-checkpoint", max_provider_attempts=2
+    )
+    with pytest.raises(InjectedCrash):
+        await gateway.invoke(request)
+
+    restarted, restarted_first, restarted_second = durable_multi_provider_gateway(database)
+    recovered = await restarted.invoke(replace(request, command_id="failure-checkpoint-replay"))
+    assert recovered.result.result_status is ResultStatus.SUCCEEDED
+    assert first.calls == 1
+    assert restarted_first.calls == 0 and restarted_second.calls == 1
+    assert recovered.usage is not None and recovered.usage.input_tokens > 0
+
+
+async def test_multi_provider_completed_second_effect_replays_after_accounting_crash(
+    database: PostgresDatabase,
+) -> None:
+    class InjectedCrash(BaseException):
+        pass
+
+    class CrashBeforeSecondAccounting(PostgresAIGatewayStore):
+        async def record_attempt(self, invocation_id: str, **values: Any) -> None:
+            if int(values["attempt_number"]) == 2 and values["state"] == "completed":
+                raise InjectedCrash
+            await super().record_attempt(invocation_id, **values)
+
+    first = DeterministicMockProvider(
+        "openai-responses",
+        prefix="OpenAI",
+        behaviors=(MockProviderBehavior.TRANSIENT_FAILURE,),
+    )
+    second = DeterministicMockProvider("gemini-generate-content", prefix="Gemini")
+    gateway, _, _ = durable_multi_provider_gateway(
+        database,
+        first=first,
+        second=second,
+        store=CrashBeforeSecondAccounting(database),
+    )
+    request = ai_request(idempotency_key="multi-provider-second-effect", max_provider_attempts=2)
+    with pytest.raises(InjectedCrash):
+        await gateway.invoke(request)
+
+    restarted, restarted_first, restarted_second = durable_multi_provider_gateway(database)
+    recovered = await restarted.invoke(replace(request, command_id="second-effect-replay"))
+    assert recovered.result.result_status is ResultStatus.SUCCEEDED
+    assert first.calls == 1 and second.calls == 1
+    assert restarted_first.calls == 0 and restarted_second.calls == 0
+    async with database.transaction() as session:
+        attempts = list(
+            await session.scalars(
+                select(AIGatewayAttemptRow)
+                .where(AIGatewayAttemptRow.ai_invocation_id == recovered.ai_invocation_id)
+                .order_by(AIGatewayAttemptRow.attempt_number)
+            )
+        )
+    assert [attempt.state for attempt in attempts] == ["failed", "completed"]
 
 
 async def test_ai_gateway_restart_does_not_probe_unapproved_expanded_cache(

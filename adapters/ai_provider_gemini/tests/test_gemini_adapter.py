@@ -209,6 +209,48 @@ async def test_transport_uncertainty_is_ambiguity_safe() -> None:
     await client.aclose()
 
 
+@pytest.mark.anyio
+async def test_post_dispatch_read_timeout_is_ambiguity_safe() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("response outcome unknown", request=request)
+
+    client = httpx.AsyncClient(
+        base_url="https://example.test/v1beta", transport=httpx.MockTransport(handler)
+    )
+    adapter = GeminiProviderAdapter(GeminiProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        await adapter.invoke(
+            model_key="economy-text-gemini-v1", prompt="text", request=make_request()
+        )
+    assert raised.value.code == "AI_PROVIDER_EFFECT_AMBIGUOUS"
+    assert raised.value.retryable is False
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_pre_dispatch_connect_timeout_remains_retryable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("not dispatched", request=request)
+
+    client = httpx.AsyncClient(
+        base_url="https://example.test/v1beta", transport=httpx.MockTransport(handler)
+    )
+    adapter = GeminiProviderAdapter(GeminiProviderConfig("secret"), client=client)
+    with pytest.raises(ProviderFailure) as raised:
+        await adapter.invoke(
+            model_key="economy-text-gemini-v1", prompt="text", request=make_request()
+        )
+    assert raised.value.code == "AI_PROVIDER_TIMEOUT"
+    assert raised.value.retryable is True
+    await client.aclose()
+
+
+def test_gemini_cost_includes_thoughts_and_cached_discount() -> None:
+    catalog = GEMINI_MODEL_CATALOG[0].catalog
+    cost = catalog.estimate_cost(10, 2, cached_tokens=4, reasoning_tokens=3)
+    assert cost == Decimal("0.00001442")
+
+
 def test_credentials_are_explicit_and_catalog_is_internal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setenv("AIEOS_AI_PROVIDER", "gemini")
