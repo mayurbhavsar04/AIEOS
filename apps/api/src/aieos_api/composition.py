@@ -55,7 +55,6 @@ from aieos.security_support import ScopeAuthorizer
 from aieos.skill_registry import SkillDefinition, SkillRegistry
 from aieos.skill_runtime import (
     STRUCTURED_TASK_KIND_PACKAGE,
-    STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE,
     CapabilityPolicyContext,
     InMemoryExecutionRepository,
     SkillRuntime,
@@ -379,9 +378,7 @@ def compose(
         failures_before_success=resolved.mock_ai_failures_before_success,
         delay_seconds=resolved.mock_ai_delay_seconds,
     )
-    prompt_packages = PromptPackageCatalog(
-        (STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE, STRUCTURED_TASK_KIND_PACKAGE)
-    )
+    prompt_packages = PromptPackageCatalog((STRUCTURED_TASK_KIND_PACKAGE,))
     reference_ai_gateway = ReferenceAIGateway(
         clock=resolved_clock,
         identifiers=resolved_identifiers,
@@ -514,6 +511,7 @@ def compose(
         "ExecutionAttemptSucceeded",
         "ExecutionAttemptFailed",
         "ExecutionAttemptTimedOut",
+        "ExecutionAttemptCancelled",
     ):
         event_bus.subscribe(event_type, "workflow-engine", workflow_engine)
     runtime = ReferenceRuntime(

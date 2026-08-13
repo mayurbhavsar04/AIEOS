@@ -1,10 +1,12 @@
 """Composed ES-016 execution through Skill Runtime and ReferenceAIGateway."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
+from aieos.adapters.ai_mock import DeterministicMockProvider
 from aieos.contracts import ResultStatus
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
@@ -60,6 +62,24 @@ async def test_composed_capability_resolves_schema_and_uses_real_gateway() -> No
     assert invocation.request.allowed_adapters == frozenset()
     assert invocation.request.context_items == ()
     assert invocation.terminal is not None
+    adapter = runtime.reference_ai_gateway._adapters["mock-economy"]  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(adapter, DeterministicMockProvider)
+    assert adapter.calls == 1
+    assert len(adapter.prompts) == 1
+    assembled = adapter.prompts[0]
+    assert "<task class='classification'>\nWhat is the status?\n</task>" in assembled
+    assert "<schema ref='structured-task-kind-schema-v1'>" in assembled
+    assert "history" not in assembled.lower()
+    assert "<evidence" not in assembled
+    capability_record = next(
+        record
+        for record in runtime.observations.records
+        if record.attributes.get("capability_id") == "StructuredTaskKindClassification"
+        and record.context.component_identity == "Skill Runtime"
+    )
+    assert capability_record.context.ai_invocation_id == invocation.invocation_id
+    assert capability_record.attributes["accounting_correlation"] == "ai_invocation_id"
+    assert capability_record.attributes["provider_attempt_count_status"] == "canonical_store"
 
 
 @pytest.mark.anyio
@@ -77,3 +97,18 @@ async def test_composed_replay_and_concurrent_duplicate_do_not_duplicate_ai_work
     assert first == second == replay
     assert len(runtime.execution_repository.records) == 1
     assert len(runtime.reference_ai_gateway.store.invocations) == 1
+
+
+@pytest.mark.anyio
+async def test_composed_exact_business_payload_rejects_extra_fields_before_gateway() -> None:
+    root = compose()
+    runtime = root.reference_runtime
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    delivery = command(root)
+    delivery = replace(delivery, payload={**delivery.payload, "data_classification": "Internal"})
+
+    await runtime.skill_runtime.handle(delivery)
+
+    record = runtime.execution_repository.records["execution-structured"]
+    assert record.result is not None and record.result.result_status is ResultStatus.FAILED
+    assert runtime.reference_ai_gateway.store.invocations == {}

@@ -34,7 +34,7 @@ class StructuredTaskKindInput:
 
     @classmethod
     def parse(cls, payload: Mapping[str, object]) -> StructuredTaskKindInput:
-        if set(payload) - {"statement", "skill_version_id", "timeout_seconds"}:
+        if set(payload) != {"statement"}:
             raise ValueError("structured task input must contain exactly statement")
         statement = payload.get("statement")
         if not isinstance(statement, str):
@@ -137,33 +137,6 @@ STRUCTURED_TASK_KIND_SCHEMA = {
     "additionalProperties": False,
 }
 
-STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE = PromptPackage(
-    reference="structured-task-kind",
-    version_reference="v0",
-    owner="Prompt Pipeline",
-    capability_id="StructuredTaskKindClassification",
-    capability_contract_version_id="1",
-    typed_variables=(("statement", "string[1..512]"),),
-    system_instruction_reference="structured-task-kind-system-v0",
-    system_instruction=(
-        "Classify only the communicative form. Return exactly one governed task_kind enum value."
-    ),
-    output_schema_reference="structured-task-kind-schema-v1",
-    output_schema=STRUCTURED_TASK_KIND_SCHEMA,
-    task_class="classification",
-    evaluation_set_reference="structured-task-kind-protected-v0",
-    rollback_version_reference="none",
-    quality_threshold=Decimal("0.95"),
-    per_class_recall_threshold=Decimal("0.90"),
-    max_regression=Decimal("0.02"),
-    max_input_tokens=256,
-    max_output_tokens=16,
-    max_cost=Decimal("0.01"),
-    state=PackageState.APPROVED,
-    change_history=("v0 approved rollback baseline",),
-)
-
-
 STRUCTURED_TASK_KIND_PACKAGE = PromptPackage(
     reference="structured-task-kind",
     version_reference="v1",
@@ -181,7 +154,7 @@ STRUCTURED_TASK_KIND_PACKAGE = PromptPackage(
     output_schema=STRUCTURED_TASK_KIND_SCHEMA,
     task_class="classification",
     evaluation_set_reference="structured-task-kind-protected-v1",
-    rollback_version_reference="v0",
+    rollback_version_reference=None,
     quality_threshold=Decimal("0.95"),
     per_class_recall_threshold=Decimal("0.90"),
     max_regression=Decimal("0.02"),
@@ -189,7 +162,7 @@ STRUCTURED_TASK_KIND_PACKAGE = PromptPackage(
     max_output_tokens=16,
     max_cost=Decimal("0.01"),
     state=PackageState.CANDIDATE,
-    change_history=("v0 approved baseline", "v1 candidate: minimum-sufficient wording"),
+    change_history=("v1 first-release candidate: minimum-sufficient wording",),
 )
 
 
@@ -206,9 +179,7 @@ class StructuredTaskKindClassification:
         authoritative_results: Mapping[str, TaskKind] | None = None,
         policy_context: CapabilityPolicyContext | None = None,
     ) -> None:
-        self._packages = prompt_packages or PromptPackageCatalog(
-            (STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE, STRUCTURED_TASK_KIND_PACKAGE)
-        )
+        self._packages = prompt_packages or PromptPackageCatalog((STRUCTURED_TASK_KIND_PACKAGE,))
         self._authoritative_results = dict(authoritative_results or {})
         self._policy_context = policy_context
 
@@ -337,7 +308,6 @@ def evaluate_predictions(
 
 __all__ = (
     "STRUCTURED_TASK_KIND_PACKAGE",
-    "STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE",
     "CapabilityExecutionEvidence",
     "CapabilityPolicyContext",
     "EvaluationResult",

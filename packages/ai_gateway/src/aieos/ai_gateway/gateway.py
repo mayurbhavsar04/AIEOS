@@ -2033,9 +2033,26 @@ class ReferenceAIGateway:
             "ai.invocation.succeeded",
             {
                 "result_id": result.result_id,
+                "capability_id": invocation.request.capability_id,
+                "capability_contract_version_id": (
+                    invocation.request.capability_contract_version_id
+                ),
+                "prompt_package_ref": invocation.request.prompt_template_ref,
+                "prompt_package_version_ref": invocation.request.prompt_template_version_ref,
+                "disposition": "invoked",
                 "cache_hit": cache_hit,
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
+                "cached_tokens": usage.cached_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
+                "token_measurement_status": "estimated" if usage.estimated else "measured",
+                "estimated_cost": str(route.estimated_cost),
+                "actual_cost_status": "canonical_store",
+                "budget_outcome": "within_ceiling",
+                "provider_attempt_count_status": "canonical_store",
+                "repair_attempt_count_status": "canonical_store",
+                "fallback_attempt_count_status": "canonical_store",
+                "total_model_call_count_status": "canonical_store",
                 "model_key": route.model_key,
             },
         )
@@ -2083,6 +2100,13 @@ class ReferenceAIGateway:
             "ai.invocation.failed",
             {
                 "result_id": result.result_id,
+                "capability_id": invocation.request.capability_id,
+                "capability_contract_version_id": (
+                    invocation.request.capability_contract_version_id
+                ),
+                "prompt_package_ref": invocation.request.prompt_template_ref,
+                "prompt_package_version_ref": invocation.request.prompt_template_version_ref,
+                "disposition": "invoked",
                 "error_id": error.error_id,
                 "error_code": failure.code,
                 "retryable": failure.retryable,

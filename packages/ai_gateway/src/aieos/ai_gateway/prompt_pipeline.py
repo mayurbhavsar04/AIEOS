@@ -31,7 +31,7 @@ class PromptPackage:
     output_schema: Mapping[str, object]
     task_class: str
     evaluation_set_reference: str
-    rollback_version_reference: str
+    rollback_version_reference: str | None
     quality_threshold: Decimal
     per_class_recall_threshold: Decimal
     max_regression: Decimal
@@ -53,7 +53,6 @@ class PromptPackage:
             self.output_schema_reference,
             self.task_class,
             self.evaluation_set_reference,
-            self.rollback_version_reference,
         )
         if any(not value for value in required):
             raise ValueError("prompt-package references and content must be non-empty")
@@ -163,7 +162,16 @@ class PromptPackageCatalog:
                 return package.output_schema
         raise LookupError("governed output schema is unresolved")
 
-    def rollback(self, package: PromptPackage) -> PromptPackage:
+    def rollback(self, package: PromptPackage) -> PromptPackage | None:
+        if package.rollback_version_reference is None:
+            if any(
+                item.reference == package.reference and item.state is PackageState.APPROVED
+                for item in self._packages.values()
+            ):
+                raise LookupError(
+                    "first-release rollback is invalid after an approved version exists"
+                )
+            return None
         target = self.resolve(package.reference, package.rollback_version_reference)
         if (
             target.state is not PackageState.APPROVED
@@ -178,16 +186,18 @@ class PromptPackageCatalog:
         *,
         accuracy: Decimal,
         per_class_recall: Mapping[str, Decimal],
-        rollback_accuracy: Decimal,
+        rollback_accuracy: Decimal | None,
         safety_and_schema_passed: bool,
-    ) -> PromptPackage:
+    ) -> PromptPackage | None:
         passed = (
             safety_and_schema_passed
             and accuracy >= package.quality_threshold
             and all(
                 value >= package.per_class_recall_threshold for value in per_class_recall.values()
             )
-            and rollback_accuracy - accuracy <= package.max_regression
+            and (
+                rollback_accuracy is None or rollback_accuracy - accuracy <= package.max_regression
+            )
         )
         return package if passed else self.rollback(package)
 

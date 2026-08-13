@@ -16,7 +16,6 @@ from aieos.skill_runtime.runtime import (
 )
 from aieos.skill_runtime.structured_task_kind import (
     STRUCTURED_TASK_KIND_PACKAGE,
-    STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE,
     CapabilityExecutionEvidence,
     CapabilityPolicyContext,
     EvaluationResult,
@@ -30,7 +29,6 @@ from aieos.skill_runtime.structured_task_kind import (
 
 __all__ = (
     "STRUCTURED_TASK_KIND_PACKAGE",
-    "STRUCTURED_TASK_KIND_ROLLBACK_PACKAGE",
     "CapabilityExecutionEvidence",
     "CapabilityPolicyContext",
     "EvaluationResult",

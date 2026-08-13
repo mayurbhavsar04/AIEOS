@@ -113,11 +113,13 @@ class SkillDependencyFailure(RuntimeError):
         self,
         message: str,
         *,
+        status: ResultStatus = ResultStatus.FAILED,
         category: ErrorCategory = ErrorCategory.DEPENDENCY_FAILURE,
         retry: RetryClassification = RetryClassification.REQUIRES_POLICY_EVALUATION,
         error_code: str = "SKILL_DEPENDENCY_FAILURE",
     ) -> None:
         super().__init__(message)
+        self.status = status
         self.category = category
         self.retry = retry
         self.error_code = error_code
@@ -125,10 +127,12 @@ class SkillDependencyFailure(RuntimeError):
     @classmethod
     def from_gateway(cls, response: object) -> SkillDependencyFailure:
         error = getattr(response, "error", None)
+        result = getattr(response, "result", None)
         if error is None:
             return cls("AI Gateway returned a normalized terminal failure")
         return cls(
             error.message,
+            status=getattr(result, "result_status", ResultStatus.FAILED),
             category=error.error_category,
             retry=error.retry_classification,
             error_code=error.error_code,
@@ -266,7 +270,11 @@ class SkillRuntime:
             correlation_id=command.correlation_id,
             causation_id=command.command_id,
             authorization=command.metadata.authorization,
-            payload=command.payload,
+            payload={
+                key: value
+                for key, value in command.payload.items()
+                if key not in {"skill_version_id", "timeout_seconds"}
+            },
         )
         try:
             output = await asyncio.wait_for(
@@ -293,7 +301,7 @@ class SkillRuntime:
             event_type = "ExecutionAttemptTimedOut"
         except SkillDependencyFailure as failure:
             terminal, error = self._outcomes.unsuccessful(
-                status=ResultStatus.FAILED,
+                status=failure.status,
                 subject=command.execution_id,
                 producer=self.component_name,
                 tenant_id=command.tenant_id,
@@ -308,8 +316,15 @@ class SkillRuntime:
                 message=str(failure),
                 predecessor_result_id=acknowledgement.result_id,
             )
-            record.state = ExecutionState.FAILED
-            event_type = "ExecutionAttemptFailed"
+            if failure.status is ResultStatus.TIMED_OUT:
+                record.state = ExecutionState.TIMED_OUT
+                event_type = "ExecutionAttemptTimedOut"
+            elif failure.status is ResultStatus.CANCELLED:
+                record.state = ExecutionState.CANCELLED
+                event_type = "ExecutionAttemptCancelled"
+            else:
+                record.state = ExecutionState.FAILED
+                event_type = "ExecutionAttemptFailed"
         except Exception:
             terminal, error = self._outcomes.unsuccessful(
                 status=ResultStatus.FAILED,
@@ -420,6 +435,9 @@ class SkillRuntime:
         await self._outbox.drain()
 
     def _observe(self, command: CommandEnvelope, result: ResultEnvelope) -> None:
+        structured = command.payload.get("skill_version_id") == "structured-task-kind-skill-v1"
+        raw_invocation_id = result.metadata.get("ai_invocation_id")
+        ai_invocation_id = raw_invocation_id if isinstance(raw_invocation_id, str) else None
         context = ObservabilityContext(
             component_identity=self.component_name,
             operation_name="execute_attempt",
@@ -427,8 +445,12 @@ class SkillRuntime:
             observed_at=self._clock.now(),
             environment_identity="local",
             deployment_identity="reference",
-            data_classification=DataClassification.NON_SENSITIVE,
-            redaction_status=RedactionStatus.NOT_REQUIRED,
+            data_classification=(
+                DataClassification.INTERNAL if structured else DataClassification.NON_SENSITIVE
+            ),
+            redaction_status=RedactionStatus.APPLIED
+            if structured
+            else RedactionStatus.NOT_REQUIRED,
             tenant_id=command.tenant_id,
             workspace_id=command.workspace_id,
             correlation_id=command.correlation_id,
@@ -438,9 +460,36 @@ class SkillRuntime:
             workflow_id=command.workflow_id,
             workflow_step_id=command.workflow_step_id,
             execution_id=command.execution_id,
+            ai_invocation_id=ai_invocation_id or None,
             result_id=result.result_id,
             error_id=result.error_id,
         )
+        attributes: dict[str, object] = {}
+        if structured:
+            bypassed = result.result_status is ResultStatus.SUCCEEDED and not ai_invocation_id
+            attributes = {
+                "capability_id": "StructuredTaskKindClassification",
+                "capability_contract_version_id": "1",
+                "prompt_package_ref": "structured-task-kind",
+                "prompt_package_version_ref": "v1",
+                "disposition": "bypassed" if bypassed else "invoked",
+                "terminal_outcome": result.result_status.value,
+                "accounting_correlation": ("not_applicable" if bypassed else "ai_invocation_id"),
+                "bypass_reason": "authoritative_result_reuse" if bypassed else "not_applicable",
+                "avoided_input_tokens": 256 if bypassed else 0,
+                "avoided_output_tokens": 16 if bypassed else 0,
+                "avoided_cost": "0.01" if bypassed else "0",
+                "provider_attempt_count_status": "not_applicable"
+                if bypassed
+                else "canonical_store",
+                "repair_attempt_count_status": "not_applicable" if bypassed else "canonical_store",
+                "fallback_attempt_count_status": "not_applicable"
+                if bypassed
+                else "canonical_store",
+                "total_model_call_count_status": (
+                    "not_applicable" if bypassed else "canonical_store"
+                ),
+            }
         self._observations.record_log(
             context=context,
             severity=(
@@ -449,6 +498,7 @@ class SkillRuntime:
                 else LogSeverity.ERROR
             ),
             message=f"Execution attempt reached {result.result_status.value}.",
+            attributes=attributes,
         )
 
     @staticmethod
