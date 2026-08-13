@@ -1,9 +1,9 @@
 ---
 title: Engineering Specifications
-version: 1.1
+version: 1.2
 status: Approved
 owner: Founding Team
-last_updated: 2026-07-21
+last_updated: 2026-08-13
 ---
 
 # Engineering Specifications
@@ -24,7 +24,7 @@ Codex implements approved Engineering Specifications. Codex does not invent arch
 | **Engineering Governance** | [Engineering Handbook](../02-engineering-handbook/README.md) |
 | **Architecture** | [Architecture v1.0](../03-architecture/README.md) |
 | **First Specification** | [ES-001 — Execution Core](ES-001-Execution-Core.md) |
-| **Current Approved** | [ES-016 — Governed Structured AI Capability Execution](ES-016-Governed-Structured-AI-Capability-Execution.md) |
+| **Current In Review** | [ES-016 — Governed Structured AI Capability Execution](ES-016-Governed-Structured-AI-Capability-Execution.md) |
 | **Related Pull Request** | [PR #3 — Establish Engineering Specification process](https://github.com/mayurbhavsar04/AIEOS/pull/3) |
 
 ## Engineering Lifecycle
@@ -207,7 +207,7 @@ Changes to canonical domain concepts, aggregate ownership, identities, commands,
 | [ES-013](ES-013-AI-Gateway-Reference-Implementation.md) | AI Gateway Reference Implementation | Implemented |
 | [ES-014](ES-014-First-Real-AI-Provider-Adapter.md) | First Real AI Provider Adapter | Implemented |
 | [ES-015](ES-015-Multi-Provider-Routing-and-Failover.md) | Multi-Provider Routing and Failover | Frozen Phase 4 baseline (source status: Proposed) |
-| [ES-016](ES-016-Governed-Structured-AI-Capability-Execution.md) | Governed Structured AI Capability Execution | Approved |
+| [ES-016](ES-016-Governed-Structured-AI-Capability-Execution.md) | Governed Structured AI Capability Execution | In Review |
 
 ES-015's source header remains `Proposed`; the immutable Phase 4 merge/tag nevertheless freezes its
 implemented governance baseline. The index records both facts rather than treating `Proposed` as an
@@ -217,6 +217,7 @@ unfrozen Phase 4 deliverable.
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.2 | 2026-08-13 | CTO / Architect | Updated ES-016 status to In Review for its first-release rollback clarification. |
 | 1.1 | 2026-07-21 | Founding Team | Added Domain v1.0 freeze governance following Milestone 3C completion. |
 | 1.0 | 2026-07-20 | Founding Team | Initial ES process, including mandatory traceability and specification version history. |
 

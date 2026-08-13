@@ -1,7 +1,7 @@
 ---
 title: ES-016 — Governed Structured AI Capability Execution
-version: 0.3
-status: Approved
+version: 0.4
+status: In Review
 owner: CTO / Architect
 implementer: Engineer (Codex)
 milestone: 6 Phase 5
@@ -38,12 +38,13 @@ this work. The Phase 4 merge commit is
 | Architecture | [Service Interfaces](../architecture/ServiceInterfaces.md), [Prompt and Context Pipeline](../architecture/PromptContextPipeline.md), [AI Gateway Architecture](../architecture/AIGatewayArchitecture.md) |
 | TDRs | [TDR-018](../runtime-architecture/decisions/TDR-018-Prompt-Context-and-Versioning.md), [TDR-020](../runtime-architecture/decisions/TDR-020-Structured-Output-and-Streaming.md), [TDR-022](../runtime-architecture/decisions/TDR-022-AI-Usage-and-Cost-Accounting.md) |
 | Future specifications | Pending: a product-authorized vertical slice may consume the proven capability only after separate approval. |
-| Related pull requests | Pending: governance-only Draft PR; implementation Draft PR after this ES and TDR-018 are approved. |
+| Related pull requests | [PR #29](https://github.com/mayurbhavsar04/AIEOS/pull/29) amends this governance; [PR #28](https://github.com/mayurbhavsar04/AIEOS/pull/28) remains Draft and implementation remains paused pending approval and merge of PR #29. |
 
 ## Version History
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 0.4 | 2026-08-13 | CTO / Architect | Returned to In Review for the first-release rollback clarification; no approval or immutable rollback baseline is asserted retroactively. |
 | 0.3 | 2026-08-13 | CTO / Architect | Approved for implementation after focused CTO re-review at `63cd3ba06fceec5e664fa85070a987876ed77a40` with Blocking 0 / Major 0 / Minor 0. |
 | 0.2 | 2026-08-13 | CTO / Architect | Defined the capability contract, ownership, sequencing, security propagation, evidence, and objective release gates after focused CTO review. |
 | 0.1 | 2026-08-13 | CTO / Architect | Initial Phase 5 governance draft. |
@@ -82,13 +83,25 @@ It SHALL:
    idempotency, provider-attempt, and cumulative token/cost machinery;
 6. apply only the deterministic capability acceptance check to the canonical Gateway Result;
 7. record the privacy-safe execution and accounting evidence required below; and
-8. have Prompt Pipeline select a previously approved immutable package version as the rollback
-   target while Capability Registry continues to own only capability contracts/catalog metadata.
+8. have Prompt Pipeline apply the first-release rollback clarification below while Capability
+   Registry continues to own only capability contracts/catalog metadata.
 
 The Prompt Pipeline's prompt-package catalog is implementation-local and static. Each package SHALL carry a stable
 reference, immutable version reference, owner, capability/version association, typed variables,
 system-instruction reference, output-schema reference, task class, quality threshold, input/output
 token ceiling, maximum cost, evaluation-set reference, rollback target, and change history.
+
+## First-release rollback clarification
+
+For the first governed package of a capability, where no previously approved immutable package
+version exists, rollback SHALL mean disabling or not promoting the candidate package and retaining
+the last frozen system state in which that capability package is not active. After the first package
+is approved and frozen, every subsequent candidate package MUST identify and support rollback to a
+genuinely previously approved immutable package version. No package may be designated, inferred, or
+represented as previously approved retroactively.
+
+This clarification does not approve, activate, release, tag, or freeze a package. TDR-018 is not
+amended because it does not independently contain conflicting absolute rollback language.
 
 ## Boundaries and compatibility
 
@@ -173,9 +186,10 @@ A candidate package release SHALL achieve 100% deterministic input/bypass/failur
 100% exact schema validity after Gateway processing, 100% hostile-case safe dispositions, and at
 least 95% exact task-kind accuracy overall with at least 90% recall for each enum value. It SHALL
 remain within every case's call/token/cost ceiling. Any safety/schema regression, any threshold
-failure, or an accuracy decrease greater than 2 percentage points against the approved rollback
-target blocks release and selects rollback. Model-as-judge and subjective/editorial scoring are not
-release gates.
+failure, or an accuracy decrease greater than 2 percentage points against the genuinely previously
+approved immutable rollback target, when one exists, blocks release and selects rollback. For the
+first governed package, the first-release rollback clarification applies. Model-as-judge and
+subjective/editorial scoring are not release gates.
 
 ## Acceptance Criteria
 
@@ -190,8 +204,9 @@ release gates.
   prevents dispatch.
 - [ ] Replay, cache, cancellation, ambiguity, route selection, and terminal uniqueness preserve
   every Phase 1–4 guarantee.
-- [ ] Rollback selects an approved immutable version and is observable without a code or contract
-  change.
+- [ ] First-release rollback disables or does not promote the candidate and retains the frozen
+  inactive-capability state; later rollback selects a genuinely previously approved immutable
+  version and is observable without a code or contract change.
 - [ ] Required offline evaluation, security, formatting, type, canonical regression, and
   PostgreSQL gates pass without new skips.
 - [ ] No raw prompt/output content is emitted by default observability.
