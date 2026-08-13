@@ -1,7 +1,7 @@
 ---
 title: Prompt and Context Pipeline
 version: 1.0
-status: Draft
+status: In Review
 owner: CTO / Architect
 last_updated: 2026-08-03
 ---
@@ -80,13 +80,29 @@ Post-acceptance estimation is adapter-aware but provider-neutral at the contract
 
 Templates use implementation-local stable references and immutable version references, with owner, purpose/capability, typed inputs, output schema, trust rules, evaluation set, quality threshold, token/cost expectation, rollback target, and change history. These references are non-canonical value references, not new Domain identities or causation targets. Business branching, deterministic/no-model resolution, and permissions remain with the accountable Manager/Workflow/Skill/capability software before `InvokeAI`, never prompt-only rules or Gateway-owned product logic.
 
+The first governed execution integration is limited to Stage 1: approved instructions, typed current
+input, and exact output schema. Prompt Pipeline owns the implementation-local static package catalog,
+immutable construction/versioning, declared-variable binding, accepted-lifecycle assembly artifact,
+schema lookup, and rollback selection. Capability Registry owns only the capability contract/catalog;
+Skill Runtime executes the capability attempt; AI Gateway owns acceptance, provider policy, and
+provider execution, not product/business prompt logic. Pre-acceptance work is limited to reference
+resolution, typed validation, deterministic bypass, and coarse admission. Binding and assembly use
+the existing Gateway-internal `accept -> execute` seam after `AIInvocationId` exists and before
+provider preparation. Retrieval, compression, tools, and product-specific prompt behavior need
+separate approved scope.
+
 ## Injection resistance
 
 Untrusted content is delimited and labeled with origin. Provider adapters cannot reorder instruction hierarchy. Tool schemas describe operations but do not authorize them. Model-produced tool arguments are validated by Skill Runtime. Suspicious instructions are retained only when necessary as quoted evidence and are never executed.
 
 ## Output validation
 
-Text output is bounded by requested purpose and verbosity. Structured output is validated against the exact schema. Factual workflows require source/evidence references and downstream fact verification; Gateway validation does not declare business truth.
+Text output is bounded by requested purpose and verbosity. AI Gateway authoritatively validates
+provider structured output against the exact immutable schema and alone performs any
+policy-permitted bounded schema repair. A capability may apply deterministic domain acceptance
+checks to the canonical Gateway Result, but it cannot repeat provider schema validation/repair or
+make a post-Gateway model call. Factual workflows require source/evidence references and downstream
+fact verification; Gateway validation does not declare business truth.
 
 ## Escalation audit
 
