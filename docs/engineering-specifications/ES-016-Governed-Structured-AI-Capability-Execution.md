@@ -1,7 +1,7 @@
 ---
 title: ES-016 — Governed Structured AI Capability Execution
-version: 0.4
-status: In Review
+version: 0.5
+status: Approved
 owner: CTO / Architect
 implementer: Engineer (Codex)
 milestone: 6 Phase 5
@@ -38,12 +38,13 @@ this work. The Phase 4 merge commit is
 | Architecture | [Service Interfaces](../architecture/ServiceInterfaces.md), [Prompt and Context Pipeline](../architecture/PromptContextPipeline.md), [AI Gateway Architecture](../architecture/AIGatewayArchitecture.md) |
 | TDRs | [TDR-018](../runtime-architecture/decisions/TDR-018-Prompt-Context-and-Versioning.md), [TDR-020](../runtime-architecture/decisions/TDR-020-Structured-Output-and-Streaming.md), [TDR-022](../runtime-architecture/decisions/TDR-022-AI-Usage-and-Cost-Accounting.md) |
 | Future specifications | Pending: a product-authorized vertical slice may consume the proven capability only after separate approval. |
-| Related pull requests | [PR #29](https://github.com/mayurbhavsar04/AIEOS/pull/29) amends this governance; [PR #28](https://github.com/mayurbhavsar04/AIEOS/pull/28) remains Draft and implementation remains paused pending approval and merge of PR #29. |
+| Related pull requests | [PR #29](https://github.com/mayurbhavsar04/AIEOS/pull/29) records the approved first-release rollback clarification; [PR #28](https://github.com/mayurbhavsar04/AIEOS/pull/28) remains Draft pending implementation remediation and a fresh comprehensive CTO gate. |
 
 ## Version History
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 0.5 | 2026-08-13 | CTO / Architect | Approved the first-release rollback clarification after focused CTO review at `1c88f8fc67eb9fcb9dae6d3a0165b0d1a73322e0` with Blocking 0 / Major 0 / Minor 0. |
 | 0.4 | 2026-08-13 | CTO / Architect | Returned to In Review for the first-release rollback clarification; no approval or immutable rollback baseline is asserted retroactively. |
 | 0.3 | 2026-08-13 | CTO / Architect | Approved for implementation after focused CTO re-review at `63cd3ba06fceec5e664fa85070a987876ed77a40` with Blocking 0 / Major 0 / Minor 0. |
 | 0.2 | 2026-08-13 | CTO / Architect | Defined the capability contract, ownership, sequencing, security propagation, evidence, and objective release gates after focused CTO review. |
