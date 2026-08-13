@@ -206,8 +206,12 @@ Changes to canonical domain concepts, aggregate ownership, identities, commands,
 | [ES-012](ES-012-AI-Gateway-and-Token-Governance.md) | AI Gateway and Token Governance | Implemented |
 | [ES-013](ES-013-AI-Gateway-Reference-Implementation.md) | AI Gateway Reference Implementation | Implemented |
 | [ES-014](ES-014-First-Real-AI-Provider-Adapter.md) | First Real AI Provider Adapter | Implemented |
-| [ES-015](ES-015-Multi-Provider-Routing-and-Failover.md) | Multi-Provider Routing and Failover | Proposed |
+| [ES-015](ES-015-Multi-Provider-Routing-and-Failover.md) | Multi-Provider Routing and Failover | Frozen Phase 4 baseline (source status: Proposed) |
 | [ES-016](ES-016-Governed-Structured-AI-Capability-Execution.md) | Governed Structured AI Capability Execution | Draft |
+
+ES-015's source header remains `Proposed`; the immutable Phase 4 merge/tag nevertheless freezes its
+implemented governance baseline. The index records both facts rather than treating `Proposed` as an
+unfrozen Phase 4 deliverable.
 
 ## Version History
 
