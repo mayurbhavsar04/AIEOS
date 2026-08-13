@@ -1,7 +1,7 @@
 ---
 title: Prompt and Context Pipeline
 version: 1.0
-status: Draft
+status: In Review
 owner: CTO / Architect
 last_updated: 2026-08-03
 ---
@@ -79,6 +79,11 @@ Post-acceptance estimation is adapter-aware but provider-neutral at the contract
 ## Prompt template governance
 
 Templates use implementation-local stable references and immutable version references, with owner, purpose/capability, typed inputs, output schema, trust rules, evaluation set, quality threshold, token/cost expectation, rollback target, and change history. These references are non-canonical value references, not new Domain identities or causation targets. Business branching, deterministic/no-model resolution, and permissions remain with the accountable Manager/Workflow/Skill/capability software before `InvokeAI`, never prompt-only rules or Gateway-owned product logic.
+
+The first governed execution integration is limited to Stage 1: approved instructions, typed current
+input, and exact output schema. Package lookup, variable binding, validation, and rollback are
+deterministic. Retrieval, compression, tools, and product-specific prompt behavior need separate
+approved scope.
 
 ## Injection resistance
 

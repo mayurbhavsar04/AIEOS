@@ -24,7 +24,7 @@ Codex implements approved Engineering Specifications. Codex does not invent arch
 | **Engineering Governance** | [Engineering Handbook](../02-engineering-handbook/README.md) |
 | **Architecture** | [Architecture v1.0](../03-architecture/README.md) |
 | **First Specification** | [ES-001 — Execution Core](ES-001-Execution-Core.md) |
-| **Current Draft** | [ES-012 — AI Gateway and Token Governance](ES-012-AI-Gateway-and-Token-Governance.md) |
+| **Current Draft** | [ES-016 — Governed Structured AI Capability Execution](ES-016-Governed-Structured-AI-Capability-Execution.md) |
 | **Related Pull Request** | [PR #3 — Establish Engineering Specification process](https://github.com/mayurbhavsar04/AIEOS/pull/3) |
 
 ## Engineering Lifecycle
@@ -207,6 +207,7 @@ Changes to canonical domain concepts, aggregate ownership, identities, commands,
 | [ES-013](ES-013-AI-Gateway-Reference-Implementation.md) | AI Gateway Reference Implementation | Implemented |
 | [ES-014](ES-014-First-Real-AI-Provider-Adapter.md) | First Real AI Provider Adapter | Implemented |
 | [ES-015](ES-015-Multi-Provider-Routing-and-Failover.md) | Multi-Provider Routing and Failover | Proposed |
+| [ES-016](ES-016-Governed-Structured-AI-Capability-Execution.md) | Governed Structured AI Capability Execution | Draft |
 
 ## Version History
 
