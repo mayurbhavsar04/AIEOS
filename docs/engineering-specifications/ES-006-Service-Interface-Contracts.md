@@ -1,9 +1,9 @@
 ---
 title: ES-006 — Service Interface Contracts
-version: 1.0
-status: Draft
+version: 1.1
+status: In Review
 owner: CTO / Architect
-last_updated: 2026-07-21
+last_updated: 2026-08-14
 ---
 
 # ES-006 — Service Interface Contracts
@@ -20,7 +20,7 @@ last_updated: 2026-07-21
 | **Domain baseline** | Domain v1.0, frozen at tag `domain-v1.0` |
 | **Command baseline** | ES-004, frozen at tag `contracts-v1.0-es004` |
 | **Event baseline** | ES-005, frozen at tag `contracts-v1.0-es005` |
-| **Architecture status** | Conforms; no component, ownership, identity, Command, Event, retry, or cross-boundary semantic is changed. |
+| **Architecture status** | In Review; adds governed v2 propagation and Skill Runtime-owned durable lookup without changing component ownership, canonical identities, Result semantics, or provider boundaries. |
 
 ## Related Documents
 
@@ -33,7 +33,7 @@ last_updated: 2026-07-21
 | **Prior specifications** | [ES-001](ES-001-Execution-Core.md), [ES-002](ES-002-Execution-Flow-Architecture.md), [ES-003](ES-003-Domain-Model-and-Ubiquitous-Language.md), [ES-004](ES-004-Command-Contract-Model.md), and [ES-005](ES-005-Event-Contract-Model.md) |
 | **Messaging contracts** | [Command Contract](../architecture/CommandContract.md) and [Event Contract](../architecture/EventContract.md) |
 | **Canonical deliverable** | [Service Interface Contracts](../architecture/ServiceInterfaces.md) |
-| **ADRs** | None required; this specification refines approved interfaces without changing frozen boundaries. |
+| **ADRs** | [ADR-001 — Authoritative Result Reuse](../architecture/decisions/ADR-001-Authoritative-Result-Reuse.md). |
 | **Future specifications** | ES-007 Error & Result Model and ES-008 Observability Model are pending. |
 | **Related Pull Requests** | Pending — update after Draft Pull Request creation. |
 
@@ -41,6 +41,7 @@ last_updated: 2026-07-21
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.1 | 2026-08-14 | CTO / Architect | Returned to In Review to define v2 authoritative-result propagation and Skill Runtime resolution ownership. |
 | 1.0 | 2026-07-21 | CTO / Architect | Initial Milestone 4 Phase 3 specification. |
 
 ## 1. Objective
@@ -120,6 +121,23 @@ Every retry SHALL create a new `ExecutionId`, increment `AttemptNumber`, retain 
 The deliverable SHALL define operations for accepting one Execution Attempt, validating and preparing it, executing the approved Skill version, invoking approved Capability boundaries, cancelling an active attempt, and reporting normalized status or outcome.
 
 Skill Runtime MUST NOT independently retry, modify retry policy, choose Workflow steps, mutate Workflow state, invoke undeclared Tools or Capabilities, or bypass Skill Registry and Capability Registry contracts.
+
+For `DispatchExecutionAttempt` v2, Skill Runtime receives optional metadata
+`AuthoritativeResultId: ResultId | absent` and propagates it only into the internal capability
+input as `authoritative_result_id: str | None`. It remains metadata, not `{statement}` business
+payload, and MUST NOT be placed in `CapabilityPolicyContext`. Skill Runtime owns the protected
+durable execution/result-repository lookup, validation, authorization, isolation checks, reuse
+lineage, and avoided-cost evidence. It does not delegate those decisions to Memory, Capability
+Registry, AI Gateway, a provider, or a new persistence/ledger subsystem.
+
+Before Gateway invocation, Skill Runtime MUST fail closed if the reference is unauthorized,
+cross-scope, nonterminal, incompatible, malformed, or input-mismatched. A valid reference must
+identify an immutable terminal `Succeeded` Result produced through the authorized
+capability/execution boundary; have exactly matching Tenant and Workspace, Capability ID, and
+capability contract version; match the new normalized statement using protected durable execution
+evidence (a stored canonical digest is acceptable); and pass current capability contract validation.
+The caller MUST be authorized both to read that Result and to invoke the Capability. This lookup
+resolves no new canonical identity.
 
 ### 5.4 AI Gateway
 

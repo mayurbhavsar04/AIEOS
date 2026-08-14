@@ -1,9 +1,9 @@
 ---
 title: Command Contract Model
-version: 1.0
-status: Draft
+version: 1.1
+status: In Review
 owner: Founding Team
-last_updated: 2026-07-21
+last_updated: 2026-08-14
 ---
 
 # Command Contract Model
@@ -66,6 +66,26 @@ The envelope is immutable after creation. Optional means the field MAY be absent
 | Contract expectations | Required when the caller requires a defined acknowledgement or normalized result contract. |
 
 Metadata keys are versioned with the Command contract. Extension metadata MAY be ignored only when the receiving version declares it non-authoritative and safe to ignore. Credentials, secret values, raw authorization headers, and mutable delivery observations MUST NOT appear in the immutable envelope.
+
+### 3.3 `DispatchExecutionAttempt` v2: authoritative-result metadata
+
+`DispatchExecutionAttempt` v2 adds optional, typed metadata `AuthoritativeResultId: ResultId`.
+Absence preserves the existing no-reuse path. Presence asks Skill Runtime to resolve an existing
+authoritative classification; it neither supplies a classification nor authorizes one. The business
+payload remains the exact capability payload `{statement}` and `AuthoritativeResultId` MUST NOT
+enter that payload or `CapabilityPolicyContext`.
+
+The governed schema is [DispatchExecutionAttempt v2](schemas/dispatch-execution-attempt-v2.schema.json).
+The v1/v2 matrix is below; a v1 consumer MUST reject v2 rather than silently ignore the member.
+
+| Command version | `AuthoritativeResultId` | Target handling |
+| --- | --- | --- |
+| v1 | Not defined | Existing behavior only. |
+| v2 | Absent | Existing behavior exactly; no result lookup is required. |
+| v2 | Present | Resolve and validate before Gateway invocation; any invalid reference fails closed. |
+
+This is a new supported version because the member is authority-sensitive. It is not a v1
+extension, and neither an idempotency key nor an ordinary metadata extension may substitute for it.
 
 ### 3.2 Field relationships
 
@@ -302,6 +322,12 @@ Retention duration, storage design, and replay representation remain deferred to
 - Creators SHALL issue only versions supported by the declared target.
 - Compatibility MUST be demonstrated by contract tests before a target drops an older version.
 - No compatibility adapter may weaken authorization, Tenant/Workspace isolation, validation, or exactly-one-target semantics.
+
+For `DispatchExecutionAttempt`, v1 and v2 are both published supported versions. A v2 producer
+MUST target a v2-capable Skill Runtime. A v2 target MAY accept v1 under the unchanged v1
+interpretation. It MUST reject a v2 envelope when v2 is unsupported or its
+`AuthoritativeResultId` is malformed; it MUST NOT strip the field, reinterpret it as a v1
+extension, or downgrade the Command. The v2 schema is normative for the new version.
 
 ### 10.1 Deprecation
 

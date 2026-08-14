@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aieos.dev/contracts/commands/dispatch-execution-attempt/v2",
+  "title": "DispatchExecutionAttempt v2 metadata extension",
+  "description": "Normative governance schema for the optional authoritative-result reference. This document does not select a serialization technology or implement a runtime model.",
+  "type": "object",
+  "required": ["CommandType", "CommandVersion", "Metadata"],
+  "properties": {
+    "CommandType": {
+      "const": "DispatchExecutionAttempt"
+    },
+    "CommandVersion": {
+      "const": 2
+    },
+    "Metadata": {
+      "type": "object",
+      "properties": {
+        "AuthoritativeResultId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional opaque ResultId. Its authority, authorization, scope, terminality, provenance, input match, and output validity MUST be verified by Skill Runtime; this value is not self-authenticating."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "not": {
+        "required": ["Payload"],
+        "properties": {
+          "Payload": {
+            "type": "object",
+            "required": ["AuthoritativeResultId"]
+          }
+        }
+      }
+    }
+  ],
+  "$comment": "Absence of Metadata.AuthoritativeResultId preserves existing behavior. When present, it is propagated only as SkillInput.authoritative_result_id: str | None, never as the {statement} payload or CapabilityPolicyContext."
+}
