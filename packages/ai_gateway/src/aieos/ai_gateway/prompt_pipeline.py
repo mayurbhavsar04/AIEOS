@@ -9,6 +9,27 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
+from typing import cast
+
+
+def _deep_freeze(value: object) -> object:
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
+        return MappingProxyType({str(key): _deep_freeze(item) for key, item in mapping.items()})
+    if isinstance(value, list | tuple):
+        sequence = cast(list[object] | tuple[object, ...], value)
+        return tuple(_deep_freeze(item) for item in sequence)
+    return value
+
+
+def _json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
+        return {str(key): _json_value(item) for key, item in mapping.items()}
+    if isinstance(value, tuple):
+        sequence = cast(tuple[object, ...], value)
+        return [_json_value(item) for item in sequence]
+    return value
 
 
 class PackageState(StrEnum):
@@ -78,7 +99,7 @@ class PromptPackage:
             or self.max_cost != Decimal("0.01")
         ):
             raise ValueError("prompt-package bounds do not match the governed contract")
-        object.__setattr__(self, "output_schema", MappingProxyType(dict(self.output_schema)))
+        object.__setattr__(self, "output_schema", _deep_freeze(self.output_schema))
 
     @property
     def identity(self) -> str:
@@ -87,7 +108,7 @@ class PromptPackage:
                 "reference": self.reference,
                 "version": self.version_reference,
                 "instruction": self.system_instruction,
-                "schema": dict(self.output_schema),
+                "schema": _json_value(self.output_schema),
                 "variables": self.typed_variables,
             },
             sort_keys=True,
@@ -144,7 +165,9 @@ class PromptPackageCatalog:
                 statement,
                 "</task>",
                 f"<schema ref='{package.output_schema_reference}'>",
-                json.dumps(dict(package.output_schema), sort_keys=True, separators=(",", ":")),
+                json.dumps(
+                    _json_value(package.output_schema), sort_keys=True, separators=(",", ":")
+                ),
                 "</schema>",
             )
         )
@@ -189,6 +212,12 @@ class PromptPackageCatalog:
         rollback_accuracy: Decimal | None,
         safety_and_schema_passed: bool,
     ) -> PromptPackage | None:
+        if self._packages.get((package.reference, package.version_reference)) is not package:
+            raise LookupError("candidate package is not an immutable catalog member")
+        expected_classes = {"Question", "Instruction", "Statement"}
+        if set(per_class_recall) != expected_classes:
+            raise ValueError("release evidence must contain the exact governed class set")
+        rollback = self.rollback(package)
         passed = (
             safety_and_schema_passed
             and accuracy >= package.quality_threshold
@@ -199,7 +228,7 @@ class PromptPackageCatalog:
                 rollback_accuracy is None or rollback_accuracy - accuracy <= package.max_regression
             )
         )
-        return package if passed else self.rollback(package)
+        return package if passed else rollback
 
 
 __all__ = ("AssembledPrompt", "PackageState", "PromptPackage", "PromptPackageCatalog")

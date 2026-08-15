@@ -70,6 +70,18 @@ def test_construction_is_model_free_and_validates_exact_variables() -> None:
         packages.assemble("structured-task-kind", "v1", {"statement": "ok", "extra": "x"})
 
 
+def test_package_schema_is_deeply_immutable() -> None:
+    schema = STRUCTURED_TASK_KIND_PACKAGE.output_schema
+    properties = schema["properties"]
+    assert isinstance(properties, dict | type(schema))
+    with pytest.raises(TypeError):
+        properties["other"] = {}  # type: ignore[index]
+    enum = properties["task_kind"]["enum"]  # type: ignore[index]
+    assert isinstance(enum, tuple)
+    with pytest.raises(TypeError):
+        enum[0] = "Other"  # type: ignore[index]
+
+
 def test_disabled_unknown_and_incompatible_packages_fail_closed() -> None:
     disabled = replace(STRUCTURED_TASK_KIND_PACKAGE, state=PackageState.DISABLED)
     packages = PromptPackageCatalog((disabled,))
@@ -141,3 +153,22 @@ def test_later_release_requires_genuinely_approved_rollback_target() -> None:
     )
     with pytest.raises(LookupError, match="first-release"):
         packages.rollback(replace(candidate, rollback_version_reference=None))
+
+    missing = replace(candidate, rollback_version_reference=None)
+    missing_catalog = PromptPackageCatalog((approved, missing))
+    with pytest.raises(LookupError, match="first-release"):
+        missing_catalog.release_selection(
+            missing,
+            accuracy=Decimal("0.99"),
+            per_class_recall=recall,
+            rollback_accuracy=Decimal("0.98"),
+            safety_and_schema_passed=True,
+        )
+    with pytest.raises(ValueError, match="exact governed class set"):
+        packages.release_selection(
+            candidate,
+            accuracy=Decimal("0.99"),
+            per_class_recall={"Question": Decimal("0.99")},
+            rollback_accuracy=Decimal("0.98"),
+            safety_and_schema_passed=True,
+        )

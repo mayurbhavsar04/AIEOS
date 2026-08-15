@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -236,63 +235,14 @@ def test_objective_quality_gate_passes_and_fails_deterministically() -> None:
     assert not exact_accuracy(expected, worse, threshold=Decimal("0.95"))
 
 
-@pytest.mark.anyio
-async def test_protected_evaluation_set_is_versioned_balanced_and_meets_release_gate() -> None:
+def test_protected_evaluation_set_has_truthful_count_and_exact_governed_classes() -> None:
     fixture = Path(__file__).parent / "fixtures" / "structured_task_kind_protected_v1.csv"
     with fixture.open(encoding="utf-8", newline="") as source:
         rows = tuple(csv.DictReader(source))
     expected = tuple(TaskKind(row["task_kind"]) for row in rows)
-    predictions: list[TaskKind] = []
-    for index, row in enumerate(rows):
-        predicted = _offline_predict(row["statement"])
-        gateway = GatewaySpy(json.dumps({"task_kind": predicted.value}))
-        output = await capability().execute(
-            skill_input(execution_id=f"evaluation-{index}", statement=row["statement"]),
-            SkillServices(gateway, UnusedMemory()),  # type: ignore[arg-type]
-        )
-        predictions.append(StructuredTaskKindResult.accept(output.value).task_kind)
-
-    assert len(rows) >= 100
+    assert len(rows) == 100
+    assert set(expected) == set(TaskKind)
     assert all(sum(value is kind for value in expected) >= 30 for kind in TaskKind)
-    result = evaluate_predictions(expected, tuple(predictions))
-    assert result.passed
-    assert result.accuracy == Decimal("1")
-    assert all(value == Decimal("1") for value in result.per_class_recall.values())
-
-
-def _offline_predict(statement: str) -> TaskKind:
-    first = statement.split(maxsplit=1)[0].lower().rstrip(".,!?")
-    if statement.endswith("?"):
-        return TaskKind.QUESTION
-    if first in {
-        "apply",
-        "avoid",
-        "check",
-        "count",
-        "do",
-        "fail",
-        "keep",
-        "leave",
-        "limit",
-        "measure",
-        "normalize",
-        "open",
-        "preserve",
-        "propagate",
-        "record",
-        "reject",
-        "report",
-        "resolve",
-        "return",
-        "run",
-        "select",
-        "stop",
-        "use",
-        "validate",
-        "verify",
-    }:
-        return TaskKind.INSTRUCTION
-    return TaskKind.STATEMENT
 
 
 @pytest.mark.anyio

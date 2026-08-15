@@ -17,6 +17,7 @@ from aieos.ai_gateway import (
     PromptPackageCatalog,
     ResponseMode,
 )
+from aieos.capability_registry import CapabilityImplementation
 from aieos.contracts import DataClassification, ResultStatus, RetryClassification
 from aieos.skill_runtime.ports import SkillInput, SkillOutput, SkillServices
 from aieos.skill_runtime.runtime import SkillDependencyFailure
@@ -182,6 +183,22 @@ class StructuredTaskKindClassification:
         self._packages = prompt_packages or PromptPackageCatalog((STRUCTURED_TASK_KIND_PACKAGE,))
         self._authoritative_results = dict(authoritative_results or {})
         self._policy_context = policy_context
+
+    def validate_registry_binding(self, capability: CapabilityImplementation) -> None:
+        package = self._packages.resolve("structured-task-kind", "v1")
+        if (
+            capability.capability_id != self.capability_id
+            or capability.capability_contract_version_id != self.contract_version
+            or capability.prompt_package_ref != package.reference
+            or capability.prompt_package_version_ref != package.version_reference
+            or capability.output_schema_ref != package.output_schema_reference
+            or package.identity != STRUCTURED_TASK_KIND_PACKAGE.identity
+        ):
+            raise ValueError("immutable capability package/schema binding mismatch")
+
+    @staticmethod
+    def validate_reused_output(value: str) -> str:
+        return StructuredTaskKindResult.accept(value).canonical_json()
 
     async def execute(self, skill_input: SkillInput, services: SkillServices) -> SkillOutput:
         typed_input = StructuredTaskKindInput.parse(skill_input.payload)

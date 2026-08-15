@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+import hashlib
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import cast
 
 from aieos.ai_gateway import AIGateway
 from aieos.capability_registry import CapabilityRegistry
@@ -30,7 +32,7 @@ from aieos.observability import ObservationRecorder
 from aieos.result_error_support import OutcomeFactory
 from aieos.security_support import AuthorizationFailure, ScopeAuthorizer
 from aieos.skill_registry import SkillRegistry
-from aieos.skill_runtime.ports import Skill, SkillInput, SkillServices
+from aieos.skill_runtime.ports import Skill, SkillInput, SkillOutput, SkillServices
 
 
 class ExecutionState(StrEnum):
@@ -105,6 +107,39 @@ class InMemoryExecutionRepository:
         receipt = self.begin_command(command, result, error)
         receipt.completed = True
 
+    def resolve_authoritative_result(
+        self,
+        result_id: str,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+        capability_id: str,
+        capability_contract_version_id: str,
+        normalized_input_digest: str,
+    ) -> ResultEnvelope:
+        result = next(
+            (
+                record.result
+                for record in self.records.values()
+                if record.result and record.result.result_id == result_id
+            ),
+            None,
+        )
+        if result is None:
+            raise LookupError("authoritative Result is unavailable")
+        metadata = result.metadata
+        if (
+            result.result_status is not ResultStatus.SUCCEEDED
+            or result.tenant_id != tenant_id
+            or result.workspace_id != workspace_id
+            or metadata.get("capability_id") != capability_id
+            or metadata.get("capability_contract_version_id") != capability_contract_version_id
+            or metadata.get("normalized_input_digest") != normalized_input_digest
+            or not isinstance(result.value_reference, str)
+        ):
+            raise PermissionError("authoritative Result is incompatible or outside scope")
+        return result
+
 
 class SkillDependencyFailure(RuntimeError):
     """Normalized failure raised by approved Skill code."""
@@ -117,12 +152,14 @@ class SkillDependencyFailure(RuntimeError):
         category: ErrorCategory = ErrorCategory.DEPENDENCY_FAILURE,
         retry: RetryClassification = RetryClassification.REQUIRES_POLICY_EVALUATION,
         error_code: str = "SKILL_DEPENDENCY_FAILURE",
+        ai_invocation_id: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.category = category
         self.retry = retry
         self.error_code = error_code
+        self.ai_invocation_id = ai_invocation_id
 
     @classmethod
     def from_gateway(cls, response: object) -> SkillDependencyFailure:
@@ -136,6 +173,7 @@ class SkillDependencyFailure(RuntimeError):
             category=error.error_category,
             retry=error.retry_classification,
             error_code=error.error_code,
+            ai_invocation_id=getattr(response, "ai_invocation_id", None),
         )
 
 
@@ -205,7 +243,13 @@ class SkillRuntime:
         ):
             return self._reject(command, "SKILL_CONTEXT_INVALID", "execution context is incomplete")
 
-        skill_version_id = self._payload_string(command.payload, "skill_version_id")
+        skill_version_id = (
+            command.metadata.skill_version_id
+            if command.command_version in {"2", "2.0"}
+            else self._payload_string(command.payload, "skill_version_id")
+        )
+        if not skill_version_id:
+            return self._reject(command, "SKILL_CONTEXT_INVALID", "SkillVersionId is required")
         definition = self._skills.resolve(skill_version_id)
         capability = self._capabilities.resolve(
             definition.capability_id, definition.capability_contract_version_id
@@ -222,6 +266,16 @@ class SkillRuntime:
             return self._reject(
                 command, "SKILL_IMPLEMENTATION_MISSING", "approved Skill implementation unavailable"
             )
+        binding_validator = getattr(implementation, "validate_registry_binding", None)
+        if callable(binding_validator):
+            try:
+                binding_validator(capability)
+            except (LookupError, ValueError):
+                return self._reject(
+                    command,
+                    "CAPABILITY_PACKAGE_BINDING_MISMATCH",
+                    "Capability Registry and immutable package/schema evidence disagree",
+                )
 
         if receipt is None:
             acknowledgement = self._outcomes.accepted(
@@ -275,11 +329,36 @@ class SkillRuntime:
                 for key, value in command.payload.items()
                 if key not in {"skill_version_id", "timeout_seconds"}
             },
+            authoritative_result_id=command.metadata.authoritative_result_id,
         )
         try:
-            output = await asyncio.wait_for(
-                implementation.execute(skill_input, self._services), timeout=timeout
-            )
+            if skill_input.authoritative_result_id is not None:
+                self._authorizer.require(
+                    command.metadata.authorization,
+                    permission="result.read",
+                    tenant_id=command.tenant_id,
+                    workspace_id=command.workspace_id,
+                )
+                statement = self._payload_string(skill_input.payload, "statement").strip()
+                source = self._repository.resolve_authoritative_result(
+                    skill_input.authoritative_result_id,
+                    tenant_id=command.tenant_id,
+                    workspace_id=command.workspace_id,
+                    capability_id=definition.capability_id,
+                    capability_contract_version_id=definition.capability_contract_version_id,
+                    normalized_input_digest=hashlib.sha256(statement.encode()).hexdigest(),
+                )
+                reuse_validator = getattr(implementation, "validate_reused_output", None)
+                if not callable(reuse_validator):
+                    raise ValueError("Capability cannot validate authoritative reused output")
+                validator = cast(Callable[[str], str], reuse_validator)
+                assert source.value_reference is not None
+                reused_value = validator(source.value_reference)
+                output = SkillOutput(reused_value, "", "", source.result_id)
+            else:
+                output = await asyncio.wait_for(
+                    implementation.execute(skill_input, self._services), timeout=timeout
+                )
         except TimeoutError:
             terminal, error = self._outcomes.unsuccessful(
                 status=ResultStatus.TIMED_OUT,
@@ -314,6 +393,11 @@ class SkillRuntime:
                 severity=ErrorSeverity.WARNING,
                 retry=failure.retry,
                 message=str(failure),
+                metadata=(
+                    {"ai_invocation_id": failure.ai_invocation_id}
+                    if failure.ai_invocation_id
+                    else {"ai_invocation_id_status": "not_created"}
+                ),
                 predecessor_result_id=acknowledgement.result_id,
             )
             if failure.status is ResultStatus.TIMED_OUT:
@@ -321,7 +405,7 @@ class SkillRuntime:
                 event_type = "ExecutionAttemptTimedOut"
             elif failure.status is ResultStatus.CANCELLED:
                 record.state = ExecutionState.CANCELLED
-                event_type = "ExecutionAttemptCancelled"
+                event_type = "ExecutionAttemptFailed"
             else:
                 record.state = ExecutionState.FAILED
                 event_type = "ExecutionAttemptFailed"
@@ -357,6 +441,20 @@ class SkillRuntime:
                 metadata={
                     "memory_id": output.memory_id,
                     "ai_invocation_id": output.ai_invocation_id,
+                    "capability_id": definition.capability_id,
+                    "capability_contract_version_id": definition.capability_contract_version_id,
+                    "normalized_input_digest": (
+                        hashlib.sha256(
+                            self._payload_string(skill_input.payload, "statement").strip().encode()
+                        ).hexdigest()
+                        if definition.capability_id == "StructuredTaskKindClassification"
+                        else ""
+                    ),
+                    "reused_result_id": output.reused_result_id or "",
+                    "avoided_model_calls": 1 if output.reused_result_id else 0,
+                    "avoided_input_tokens": 256 if output.reused_result_id else 0,
+                    "avoided_output_tokens": 16 if output.reused_result_id else 0,
+                    "avoided_cost": "0.01" if output.reused_result_id else "0",
                 },
                 predecessor_result_id=acknowledgement.result_id,
             )

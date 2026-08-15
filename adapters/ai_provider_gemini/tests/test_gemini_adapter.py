@@ -117,6 +117,43 @@ async def test_structured_schema_is_native_hint_but_content_remains_neutral() ->
 
 
 @pytest.mark.anyio
+async def test_governed_task_kind_schema_is_native_hint_offline() -> None:
+    payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload.update(json.loads(request.content))
+        return httpx.Response(200, json=response_body(text='{"task_kind":"Question"}'))
+
+    client = httpx.AsyncClient(
+        base_url="https://example.test/v1beta", transport=httpx.MockTransport(handler)
+    )
+    adapter = GeminiProviderAdapter(GeminiProviderConfig("secret"), client=client)
+    result = await adapter.invoke(
+        model_key="economy-text-gemini-v1",
+        prompt="What is the status?",
+        request=make_request(
+            response_mode=ResponseMode.STRUCTURED,
+            output_schema_ref="structured-task-kind-schema-v1",
+        ),
+    )
+    config = payload["generationConfig"]
+    assert isinstance(config, dict)
+    assert config["responseJsonSchema"] == {
+        "type": "object",
+        "properties": {
+            "task_kind": {
+                "type": "string",
+                "enum": ["Question", "Instruction", "Statement"],
+            }
+        },
+        "required": ["task_kind"],
+        "additionalProperties": False,
+    }
+    assert result.content == '{"task_kind":"Question"}'
+    await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_real_incremental_sse_requires_stop_and_maps_usage() -> None:
     stream = "".join(
         [

@@ -51,6 +51,17 @@ _SCHEMAS: dict[str, dict[str, object]] = {
         "required": ["result"],
         "additionalProperties": False,
     },
+    "structured-task-kind-schema-v1": {
+        "type": "object",
+        "properties": {
+            "task_kind": {
+                "type": "string",
+                "enum": ["Question", "Instruction", "Statement"],
+            }
+        },
+        "required": ["task_kind"],
+        "additionalProperties": False,
+    },
 }
 
 

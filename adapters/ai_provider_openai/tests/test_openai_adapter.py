@@ -263,6 +263,38 @@ async def test_maps_structured_output_without_replacing_gateway_validation() -> 
 
 
 @pytest.mark.anyio
+async def test_maps_governed_task_kind_schema_to_native_payload_offline() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200, json={"status": "completed", "output_text": '{"task_kind":"Question"}'}
+        )
+
+    client = _client(handler)
+    adapter = OpenAIProviderAdapter(OpenAIProviderConfig("secret"), client=client)
+    result = await adapter.invoke(
+        model_key="economy-text-v1",
+        prompt="What is the status?",
+        request=make_request(
+            response_mode=ResponseMode.STRUCTURED,
+            output_schema_ref="structured-task-kind-schema-v1",
+        ),
+    )
+    text = seen["text"]
+    assert isinstance(text, dict)
+    schema = text["format"]["schema"]  # type: ignore[index]
+    assert schema["properties"]["task_kind"]["enum"] == [  # type: ignore[index]
+        "Question",
+        "Instruction",
+        "Statement",
+    ]
+    assert result.content == '{"task_kind":"Question"}'
+    await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_provider_minimum_does_not_change_caller_facing_output_limit() -> None:
     seen: dict[str, object] = {}
 

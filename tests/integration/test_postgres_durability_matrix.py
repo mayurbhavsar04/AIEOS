@@ -59,6 +59,7 @@ from aieos.ai_gateway import (
 )
 from aieos.ai_gateway.gateway import CachedContent, ExecutionOwnershipLost, ProviderFailure
 from aieos.contracts import AuthorizationContext, ResultEnvelope, ResultStatus
+from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.contracts.events import EventEnvelope, EventMetadata
 from aieos.security_support import ScopeAuthorizer
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
@@ -2410,4 +2411,77 @@ async def test_memory_terminal_checkpoint_rolls_back_and_redelivery_is_exactly_o
             )
             == 1
         )
+    await recovered.close()
+
+
+async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_zero_call(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    first = compose(settings)
+    runtime = first.reference_runtime
+    base = CommandEnvelope(
+        command_id="command-authoritative-source",
+        command_type="DispatchExecutionAttempt",
+        command_version="1.0",
+        correlation_id="correlation-authoritative-source",
+        causation_id="workflow-authoritative-source",
+        target_component="Skill Runtime",
+        initiator="Workflow Engine",
+        timestamp=datetime(2026, 8, 15, tzinfo=UTC),
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        workflow_id="workflow-authoritative-source",
+        workflow_step_id="step-authoritative-source",
+        execution_id="execution-authoritative-source",
+        payload={
+            "skill_version_id": "structured-task-kind-skill-v1",
+            "statement": "What is the status?",
+        },
+        metadata=CommandMetadata(
+            request_id="request-authoritative-source",
+            idempotency_key="idem-authoritative-source",
+            attempt_number=1,
+            authorization=runtime.authorization,
+        ),
+    )
+    await runtime.run_execution_command(base)
+    source = runtime.execution_repository.records["execution-authoritative-source"].result
+    assert source is not None
+    await first.close()
+
+    recovered = compose(settings)
+    recovered_runtime = recovered.reference_runtime
+    reuse = replace(
+        base,
+        command_id="command-authoritative-reuse",
+        command_version="2",
+        correlation_id="correlation-authoritative-reuse",
+        causation_id="workflow-authoritative-reuse",
+        workflow_id="workflow-authoritative-reuse",
+        workflow_step_id="step-authoritative-reuse",
+        execution_id="execution-authoritative-reuse",
+        payload={"statement": "What is the status?"},
+        metadata=CommandMetadata(
+            request_id="request-authoritative-reuse",
+            idempotency_key="idem-authoritative-reuse",
+            attempt_number=1,
+            authorization=recovered_runtime.authorization,
+            skill_version_id="structured-task-kind-skill-v1",
+            authoritative_result_id=source.result_id,
+        ),
+    )
+    first_delivery, duplicate = await asyncio.gather(
+        recovered_runtime.run_execution_command(reuse),
+        recovered_runtime.run_execution_command(reuse),
+    )
+    assert first_delivery == duplicate
+    result = recovered_runtime.execution_repository.records["execution-authoritative-reuse"].result
+    assert result is not None and result.metadata["reused_result_id"] == source.result_id
+    assert result.metadata["ai_invocation_id"] == ""
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
     await recovered.close()

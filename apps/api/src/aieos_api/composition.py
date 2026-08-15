@@ -263,6 +263,19 @@ class ReferenceRuntime:
                 return await self._run_prepared(command)
         return await self._run_prepared(command)
 
+    async def run_execution_command(self, command: CommandEnvelope) -> ResultEnvelope:
+        """Dispatch one governed Skill Runtime command with the durable host checkpoint."""
+        if command.target_component != "Skill Runtime":
+            raise ValueError("execution command must target Skill Runtime")
+        if self.database is not None:
+            async with self.database.command_lock(scoped_idempotency_lock_key(command)):
+                for participant in self.durable_participants:
+                    await participant.prepare()
+                result = await self.dispatcher.dispatch(command)
+                await checkpoint(self.database, self.durable_participants)
+                return result
+        return await self.dispatcher.dispatch(command)
+
     async def _run_prepared(self, command: CommandEnvelope) -> ResultEnvelope:
         for participant in self.durable_participants:
             await participant.prepare()
@@ -297,6 +310,7 @@ def compose(
                 "ai.invoke",
                 "memory.write",
                 "memory.read",
+                "result.read",
             }
         ),
         tenant_id=resolved.tenant_id,
@@ -511,7 +525,6 @@ def compose(
         "ExecutionAttemptSucceeded",
         "ExecutionAttemptFailed",
         "ExecutionAttemptTimedOut",
-        "ExecutionAttemptCancelled",
     ):
         event_bus.subscribe(event_type, "workflow-engine", workflow_engine)
     runtime = ReferenceRuntime(

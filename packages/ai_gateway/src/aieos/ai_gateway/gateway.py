@@ -1202,7 +1202,7 @@ class ReferenceAIGateway:
             if reservation is not None:
                 with suppress(Exception):
                     await self.store.release(invocation_id)
-            code = (
+            code = invocation.last_provider_failure_code or (
                 "AI_GATEWAY_PERSISTENCE_FAILURE"
                 if "persist" in str(error).lower()
                 else "AI_GATEWAY_FAILURE"
