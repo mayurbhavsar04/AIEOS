@@ -1,9 +1,9 @@
 ---
 title: ES-006 — Service Interface Contracts
-version: 1.0
-status: Draft
+version: 1.2
+status: Approved
 owner: CTO / Architect
-last_updated: 2026-07-21
+last_updated: 2026-08-15
 ---
 
 # ES-006 — Service Interface Contracts
@@ -20,7 +20,7 @@ last_updated: 2026-07-21
 | **Domain baseline** | Domain v1.0, frozen at tag `domain-v1.0` |
 | **Command baseline** | ES-004, frozen at tag `contracts-v1.0-es004` |
 | **Event baseline** | ES-005, frozen at tag `contracts-v1.0-es005` |
-| **Architecture status** | Conforms; no component, ownership, identity, Command, Event, retry, or cross-boundary semantic is changed. |
+| **Architecture status** | Approved; adds governed v2 propagation and Skill Runtime-owned durable lookup without changing component ownership, canonical identities, Result semantics, or provider boundaries. |
 
 ## Related Documents
 
@@ -33,7 +33,7 @@ last_updated: 2026-07-21
 | **Prior specifications** | [ES-001](ES-001-Execution-Core.md), [ES-002](ES-002-Execution-Flow-Architecture.md), [ES-003](ES-003-Domain-Model-and-Ubiquitous-Language.md), [ES-004](ES-004-Command-Contract-Model.md), and [ES-005](ES-005-Event-Contract-Model.md) |
 | **Messaging contracts** | [Command Contract](../architecture/CommandContract.md) and [Event Contract](../architecture/EventContract.md) |
 | **Canonical deliverable** | [Service Interface Contracts](../architecture/ServiceInterfaces.md) |
-| **ADRs** | None required; this specification refines approved interfaces without changing frozen boundaries. |
+| **ADRs** | [ADR-001 — Authoritative Result Reuse](../architecture/decisions/ADR-001-Authoritative-Result-Reuse.md). |
 | **Future specifications** | ES-007 Error & Result Model and ES-008 Observability Model are pending. |
 | **Related Pull Requests** | Pending — update after Draft Pull Request creation. |
 
@@ -41,6 +41,8 @@ last_updated: 2026-07-21
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.2 | 2026-08-15 | CTO / Architect | Approved after focused CTO review of `210df6491397b57875edf9942da009341c8161e1` with Blocking 0 / Major 0 / Minor 0. |
+| 1.1 | 2026-08-14 | CTO / Architect | Returned to In Review to define v2 authoritative-result propagation and Skill Runtime resolution ownership. |
 | 1.0 | 2026-07-21 | CTO / Architect | Initial Milestone 4 Phase 3 specification. |
 
 ## 1. Objective
@@ -120,6 +122,23 @@ Every retry SHALL create a new `ExecutionId`, increment `AttemptNumber`, retain 
 The deliverable SHALL define operations for accepting one Execution Attempt, validating and preparing it, executing the approved Skill version, invoking approved Capability boundaries, cancelling an active attempt, and reporting normalized status or outcome.
 
 Skill Runtime MUST NOT independently retry, modify retry policy, choose Workflow steps, mutate Workflow state, invoke undeclared Tools or Capabilities, or bypass Skill Registry and Capability Registry contracts.
+
+For `DispatchExecutionAttempt` v2, Skill Runtime receives optional metadata
+`AuthoritativeResultId: ResultId | absent` and propagates it only into the internal capability
+input as `authoritative_result_id: str | None`. It remains metadata, not `{statement}` business
+payload, and MUST NOT be placed in `CapabilityPolicyContext`. Skill Runtime owns the protected
+durable execution/result-repository lookup, validation, authorization, isolation checks, reuse
+lineage, and avoided-cost evidence. It does not delegate those decisions to Memory, Capability
+Registry, AI Gateway, a provider, or a new persistence/ledger subsystem.
+
+Before Gateway invocation, Skill Runtime MUST fail closed if the reference is unauthorized,
+cross-scope, nonterminal, incompatible, malformed, or input-mismatched. A valid reference must
+identify an immutable terminal `Succeeded` Result produced through the authorized
+capability/execution boundary; have exactly matching Tenant and Workspace, Capability ID, and
+capability contract version; match the new normalized statement using protected durable execution
+evidence (a stored canonical digest is acceptable); and pass current capability contract validation.
+The caller MUST be authorized both to read that Result and to invoke the Capability. This lookup
+resolves no new canonical identity.
 
 ### 5.4 AI Gateway
 
@@ -256,7 +275,7 @@ Changes to component ownership, authoritative decisions, canonical identities, C
 - [ ] Versioning, compatibility, deprecation, and security requirements are testable.
 - [ ] All nine Mermaid diagrams are valid and consistent with prose.
 - [ ] Relative links resolve and `git diff --check` passes.
-- [ ] Frozen baselines remain unchanged and no ADR is required.
+- [ ] Frozen baselines remain unchanged except for the focused `DispatchExecutionAttempt` v2 interpretation authorized by ADR-001; no additional ADR or boundary change is required.
 
 ## 15. Review Checklist
 
@@ -278,16 +297,22 @@ Reviewers SHALL verify:
 
 ## 16. Definition of Done
 
-- [ ] Only the two requested documentation files are created.
+- [ ] The original two-file ES-006 baseline remains intact except for the focused ADR-001 governance artifacts and directly required index/schema updates.
 - [ ] Acceptance criteria and review checks pass.
-- [ ] No frozen-boundary conflict requires an ADR.
+- [ ] ADR-001 authorizes only v2 metadata propagation into `SkillInput.authoritative_result_id`; no other frozen-boundary conflict is introduced.
 - [ ] Validation evidence is recorded in a Draft Pull Request.
 - [ ] The Draft Pull Request targets `main`, remains unmerged, and creates no tag or release.
 
 ## 17. Implementation Instructions
 
-The Engineer SHALL work from current `main`, create `docs/es-006-service-interface-contracts`, change only the two ES-006 documentation files, validate the deliverables, commit with `docs: add ES-006 Service Interface Contracts`, push the branch, and open a Draft Pull Request with the same title.
+The original ES-006 implementation used its dedicated branch and two-file scope. The focused
+ADR-001 amendment MAY additionally update the governed v2 schema, ADR/index records, and the
+directly affected ES-004, ES-006, and ES-016 contracts; it MUST remain documentation/schema-only.
 
-If implementation would alter a frozen component name, ownership boundary, domain identity, Command target, Event producer, retry decision, or cross-boundary semantic, the Engineer MUST stop and report the conflict instead of creating an ADR or inventing a resolution.
+If implementation would alter a frozen component name, ownership boundary, domain identity,
+Command target, Event producer, retry decision, or cross-boundary semantic beyond ADR-001's
+specific v2 propagation path, the Engineer MUST stop and report the conflict instead of inventing
+an additional resolution. ADR-001 does not broaden metadata into free-form authoritative behavior;
+Skill Runtime remains the durable resolution owner.
 
 Return to the [Engineering Specifications process](README.md).

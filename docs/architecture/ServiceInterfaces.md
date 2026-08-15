@@ -147,11 +147,35 @@ Skill Runtime owns validation, preparation, restricted execution, timeout and ca
 
 Skill Runtime MUST NOT choose a new attempt, alter `AttemptNumber`, decide Workflow retry policy, orchestrate another Skill, mutate Workflow state, or call an undeclared Capability, Tool, or AI provider.
 
+### 5.1.1 Authoritative-result reuse for `DispatchExecutionAttempt` v2
+
+`DispatchExecutionAttempt` v2 carries optional metadata `AuthoritativeResultId: ResultId | absent`.
+Skill Runtime propagates this only as `SkillInput.authoritative_result_id: str | None`; it is not
+the `{statement}` business payload and MUST NOT be placed in `CapabilityPolicyContext`.
+
+Skill Runtime owns resolution through its existing durable execution/result repository. Before any
+Gateway invocation it MUST validate that the reference is immutable, terminal `Succeeded`, produced
+by the authorized capability/execution boundary, readable by the caller, and compatible with the
+current invocation. Compatibility requires exact Tenant and Workspace, Capability ID, capability
+contract version, and normalized source statement match, verified from protected durable execution
+evidence; a stored canonical digest is acceptable. The reused output must pass the current
+capability contract validation, and the caller must also be authorized to invoke the capability.
+Missing, unauthorized, cross-scope, nonterminal, incompatible, malformed, or input-mismatched
+references fail closed before Gateway invocation.
+
+For a valid reference, Skill Runtime returns the classified value through the new execution without
+creating an `AIInvocationId`, calling AI Gateway or a provider, or consuming model tokens. It
+records reuse lineage and avoided-cost evidence through existing audit/accounting evidence only;
+it MUST NOT create a duplicate ledger or persistence subsystem. Same-command replay follows normal
+replay/idempotency and returns the existing outcome. A distinct execution receives a new
+`ExecutionId`, `CommandId`, idempotency scope, and terminal Result even when it reuses the
+classification.
+
 ### 5.2 Public operations
 
 | Operation | Caller → target | Input and outcome | Messages | Preconditions and postconditions | Idempotency, scope, trace, cancellation, timeout, version |
 | --- | --- | --- | --- | --- | --- |
-| `DispatchExecutionAttempt` | Workflow Engine → Skill Runtime | `ExecutionId`, `AttemptNumber`, `SkillVersionId`, input Context, allowed Capabilities/Tools, policy, deadline; returns acknowledgement or rejection. | Accepts directed Command; produces attempt lifecycle Events. | New immutable Execution identity, compatible Skill version, authorized scope. Success registers exactly one attempt. | Redelivery of same Command/Execution is safe; different Command cannot reuse `ExecutionId`. Cancellation and deadline bind this attempt only. |
+| `DispatchExecutionAttempt` | Workflow Engine → Skill Runtime | v1: `ExecutionId`, `AttemptNumber`, `SkillVersionId`, input Context, allowed Capabilities/Tools, policy, deadline. v2 additionally permits typed metadata `AuthoritativeResultId: ResultId | absent`; it propagates only as `SkillInput.authoritative_result_id: str | None`. | Accepts directed Command; produces attempt lifecycle Events. | New immutable Execution identity, compatible Skill version, authorized scope; v2 reference checks are completed fail-closed before Gateway invocation. Success registers exactly one attempt. | Same-command replay returns its existing disposition under normal replay/idempotency semantics. A distinct execution always has a new `ExecutionId`, `CommandId`, idempotency scope, and terminal Result even when it reuses a classification. |
 | `ExecuteSkill` | Skill Runtime execution controller → Skill Runtime | Registered attempt and resolved Skill contract; returns normalized attempt outcome. | May call Capability Registry, AI Gateway, Memory Service, or Tools under declared permissions; produces terminal attempt Event. | Inputs validated and execution context restricted. Success means output contract validated. | Never reruns terminal attempt. Timeout yields `TimedOut`; cancellation yields `Cancelled`. Contract versions remain fixed. |
 | `CancelExecutionAttempt` | Workflow Engine cancellation path → Skill Runtime | Active `ExecutionId`, authority, cause; returns accepted, already terminal, or unsupported stage. | Accepts directed cancellation Command; produces an approved attempt-cancellation fact when the Event catalog defines it. | Attempt exists and scope matches. Success prevents further accepted effects where supported. | Duplicate cancellation safe. Late result cannot replace terminal outcome; reconciliation remains explicit. |
 | `GetExecutionStatus` | Authorized Workflow Engine or operator path → Skill Runtime | `ExecutionId` and scope; returns current attempt state and safe evidence. | Query only; emits no domain Event merely for reading. | Caller authorized; attempt exists. No state change. | Repeated reads safe. Query timeout has no lifecycle effect. Interface version required. |

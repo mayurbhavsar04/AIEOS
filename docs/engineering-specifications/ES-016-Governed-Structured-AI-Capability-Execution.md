@@ -1,11 +1,11 @@
 ---
 title: ES-016 — Governed Structured AI Capability Execution
-version: 0.3
+version: 0.7
 status: Approved
 owner: CTO / Architect
 implementer: Engineer (Codex)
 milestone: 6 Phase 5
-last_updated: 2026-08-13
+last_updated: 2026-08-15
 ---
 
 # ES-016 — Governed Structured AI Capability Execution
@@ -35,15 +35,20 @@ this work. The Phase 4 merge commit is
 | Relationship | Document |
 | --- | --- |
 | PRD | None. This is a bounded platform integration proof; it MUST NOT introduce product behavior. |
-| Architecture | [Service Interfaces](../architecture/ServiceInterfaces.md), [Prompt and Context Pipeline](../architecture/PromptContextPipeline.md), [AI Gateway Architecture](../architecture/AIGatewayArchitecture.md) |
+| Architecture | [Command Contract](../architecture/CommandContract.md), [Service Interfaces](../architecture/ServiceInterfaces.md), [Prompt and Context Pipeline](../architecture/PromptContextPipeline.md), [AI Gateway Architecture](../architecture/AIGatewayArchitecture.md) |
+| ADR | [ADR-001 — Authoritative Result Reuse](../architecture/decisions/ADR-001-Authoritative-Result-Reuse.md) |
 | TDRs | [TDR-018](../runtime-architecture/decisions/TDR-018-Prompt-Context-and-Versioning.md), [TDR-020](../runtime-architecture/decisions/TDR-020-Structured-Output-and-Streaming.md), [TDR-022](../runtime-architecture/decisions/TDR-022-AI-Usage-and-Cost-Accounting.md) |
 | Future specifications | Pending: a product-authorized vertical slice may consume the proven capability only after separate approval. |
-| Related pull requests | Pending: governance-only Draft PR; implementation Draft PR after this ES and TDR-018 are approved. |
+| Related pull requests | [PR #29](https://github.com/mayurbhavsar04/AIEOS/pull/29) records the approved first-release rollback clarification; [PR #28](https://github.com/mayurbhavsar04/AIEOS/pull/28) remains paused and Draft pending approval and merge of this governance change, then its separate remediation and a fresh comprehensive CTO gate. |
 
 ## Version History
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 0.7 | 2026-08-15 | CTO / Architect | Approved after focused CTO review of `210df6491397b57875edf9942da009341c8161e1` with Blocking 0 / Major 0 / Minor 0. |
+| 0.6 | 2026-08-14 | CTO / Architect | Returned to In Review for the approved `AuthoritativeResultId` v2 Command path; PR #28 is paused pending governance approval and merge. |
+| 0.5 | 2026-08-13 | CTO / Architect | Approved the first-release rollback clarification after focused CTO review at `1c88f8fc67eb9fcb9dae6d3a0165b0d1a73322e0` with Blocking 0 / Major 0 / Minor 0. |
+| 0.4 | 2026-08-13 | CTO / Architect | Returned to In Review for the first-release rollback clarification; no approval or immutable rollback baseline is asserted retroactively. |
 | 0.3 | 2026-08-13 | CTO / Architect | Approved for implementation after focused CTO re-review at `63cd3ba06fceec5e664fa85070a987876ed77a40` with Blocking 0 / Major 0 / Minor 0. |
 | 0.2 | 2026-08-13 | CTO / Architect | Defined the capability contract, ownership, sequencing, security propagation, evidence, and objective release gates after focused CTO review. |
 | 0.1 | 2026-08-13 | CTO / Architect | Initial Phase 5 governance draft. |
@@ -59,7 +64,7 @@ implementation-local package and schema references do not create canonical ident
 | Typed input | `{statement: string}` after existing request normalization. UTF-8 text; trimmed length `1..512` Unicode scalar values; no attachments, context collection, history, or optional fields. |
 | Structured output | Exact object `{task_kind: "Question" | "Instruction" | "Statement"}`; no additional properties. `Question` requests information, `Instruction` requests an action, and `Statement` is neither. |
 | Bounds | Stage 1 only; one statement; package input ceiling 256 tokens; output ceiling 16 tokens; exactly one primary Gateway invocation by default; Gateway may perform at most one schema repair within the same `AIInvocationId` and cumulative budget. |
-| Deterministic bypass | Before `InvokeAI`, the capability owner MUST return an already-authoritative, contract-valid classification supplied by the approved invocation input/policy, if present through an existing frozen reference; it MUST reject empty/oversize/invalid input and disabled, unknown, or incompatible versions. None creates an `AIInvocationId`. No heuristic punctuation or keyword guess may be treated as authoritative. |
+| Deterministic bypass | Before `InvokeAI`, the capability owner MUST use only `DispatchExecutionAttempt` v2 metadata `AuthoritativeResultId: ResultId | absent`, propagated as `SkillInput.authoritative_result_id: str | None`. It is not `{statement}` payload and MUST NOT be placed in `CapabilityPolicyContext`. A valid reference yields deterministic, contract-valid reuse; absence preserves ordinary behavior. No heuristic punctuation or keyword guess may be treated as authoritative. |
 | Gateway failure | Rejection, policy/budget failure, provider failure/ambiguity, schema-invalid output after the permitted Gateway repair, cancellation, or timeout returns the existing normalized terminal Result/Error. The capability MUST NOT retry or call a model to repair it. |
 | Capability acceptance | After a successful canonical Gateway Result, deterministically require the exact field set and enum membership above. Failure is a normalized capability failure and MUST NOT trigger another model call. This check does not repeat provider payload parsing, schema validation, or repair. |
 
@@ -82,18 +87,42 @@ It SHALL:
    idempotency, provider-attempt, and cumulative token/cost machinery;
 6. apply only the deterministic capability acceptance check to the canonical Gateway Result;
 7. record the privacy-safe execution and accounting evidence required below; and
-8. have Prompt Pipeline select a previously approved immutable package version as the rollback
-   target while Capability Registry continues to own only capability contracts/catalog metadata.
+8. have Prompt Pipeline apply the first-release rollback clarification below while Capability
+   Registry continues to own only capability contracts/catalog metadata.
+
+For the optional v2 authoritative-result path, Skill Runtime resolves `AuthoritativeResultId` via
+its existing durable execution/result repository before Gateway invocation. The referenced Result
+MUST be immutable and terminal `Succeeded`, originate from the authorized capability/execution
+boundary, exactly match Tenant and Workspace, Capability ID and capability contract version, and
+match the new normalized statement from protected durable execution evidence; a stored canonical
+digest is acceptable. Its output MUST pass current capability contract validation. The caller MUST
+be authorized both to read the Result and to invoke the Capability. Missing, unauthorized,
+cross-scope, nonterminal, incompatible, malformed, or input-mismatched references fail closed
+before Gateway invocation.
 
 The Prompt Pipeline's prompt-package catalog is implementation-local and static. Each package SHALL carry a stable
 reference, immutable version reference, owner, capability/version association, typed variables,
 system-instruction reference, output-schema reference, task class, quality threshold, input/output
 token ceiling, maximum cost, evaluation-set reference, rollback target, and change history.
 
+## First-release rollback clarification
+
+For the first governed package of a capability, where no previously approved immutable package
+version exists, rollback SHALL mean disabling or not promoting the candidate package and retaining
+the last frozen system state in which that capability package is not active. After the first package
+is approved and frozen, every subsequent candidate package MUST identify and support rollback to a
+genuinely previously approved immutable package version. No package may be designated, inferred, or
+represented as previously approved retroactively.
+
+This clarification does not approve, activate, release, tag, or freeze a package. TDR-018 is not
+amended because it does not independently contain conflicting absolute rollback language.
+
 ## Boundaries and compatibility
 
-This ES adds no canonical Domain identity, Command, Event, Result/Error semantic, component,
-ownership transfer, provider-specific caller value, or public Gateway contract. Prompt references
+This ES adds no Domain identity, Event, Result/Error semantic, component, ownership transfer,
+provider-specific caller value, or public Gateway contract. It governs the new supported
+`DispatchExecutionAttempt` v2 Command version and its optional metadata
+`AuthoritativeResultId: ResultId | absent`; it is not a v1 ignorable extension. Prompt references
 remain non-canonical value references. Skill Runtime remains the owner of one execution attempt;
 Workflow Engine remains the only retry owner; AI Gateway remains the sole provider boundary and
 owner of `AIInvocationId`, routing, provider retry/failover, authoritative provider structured-output
@@ -103,13 +132,16 @@ construction/versioning, accepted-lifecycle assembly artifacts, schema lookup, a
 it does not become a new component or public boundary.
 
 The implementation MUST use the existing approved Skill Runtime → Capability Registry → AI Gateway
-path and the Gateway-internal accepted lifecycle. Pre-acceptance performs contract/package reference
-resolution, typed validation, deterministic bypass, and coarse admission only. Gateway acceptance
+path and the Gateway-internal accepted lifecycle. Before Gateway invocation, Skill Runtime performs
+v2 authoritative-result resolution, typed validation, authorization/isolation validation, and
+deterministic bypass. Gateway acceptance
 atomically creates `AIInvocationId`; only then may Prompt Pipeline bind and assemble Stage 1 within
 the existing `Requested -> PolicyValidated -> ProviderSelected` path before preparation/dispatch.
 This sequencing MUST preserve canonical request identity, scoped idempotency, and acceptance/replay
-rules. It MUST stop for architecture review if the work cannot be additive or requires a frozen
-contract change.
+rules. Same-command replay returns the existing outcome under ordinary replay/idempotency semantics.
+A new execution always receives a new `ExecutionId`, `CommandId`, idempotency scope, and terminal
+Result even when its classification is reused. It MUST stop for architecture review if the work
+cannot implement the approved v2 contract exactly.
 
 ## Token, cost, and safety requirements
 
@@ -117,6 +149,9 @@ contract change.
   selection, capability acceptance, and evaluation scoring MUST NOT call a model. Bypass occurs
   before `InvokeAI` wherever the frozen architecture permits and MUST NOT move product logic into
   Gateway.
+- A valid authoritative reuse creates no `AIInvocationId`, Gateway call, provider call, or model
+  tokens. It records source Result lineage plus avoided invocation/token/cost evidence through
+  existing audit/accounting evidence; no duplicate ledger or persistence subsystem is permitted.
 - Invalid, unknown, incompatible, disabled, or non-immutable package versions MUST fail closed
   before paid dispatch.
 - One primary Gateway invocation is permitted per execution by default. Only Gateway may issue one
@@ -173,9 +208,10 @@ A candidate package release SHALL achieve 100% deterministic input/bypass/failur
 100% exact schema validity after Gateway processing, 100% hostile-case safe dispositions, and at
 least 95% exact task-kind accuracy overall with at least 90% recall for each enum value. It SHALL
 remain within every case's call/token/cost ceiling. Any safety/schema regression, any threshold
-failure, or an accuracy decrease greater than 2 percentage points against the approved rollback
-target blocks release and selects rollback. Model-as-judge and subjective/editorial scoring are not
-release gates.
+failure, or an accuracy decrease greater than 2 percentage points against the genuinely previously
+approved immutable rollback target, when one exists, blocks release and selects rollback. For the
+first governed package, the first-release rollback clarification applies. Model-as-judge and
+subjective/editorial scoring are not release gates.
 
 ## Acceptance Criteria
 
@@ -190,22 +226,24 @@ release gates.
   prevents dispatch.
 - [ ] Replay, cache, cancellation, ambiguity, route selection, and terminal uniqueness preserve
   every Phase 1–4 guarantee.
-- [ ] Rollback selects an approved immutable version and is observable without a code or contract
-  change.
+- [ ] First-release rollback disables or does not promote the candidate and retains the frozen
+  inactive-capability state; later rollback selects a genuinely previously approved immutable
+  version and is observable without a code or contract change.
 - [ ] Required offline evaluation, security, formatting, type, canonical regression, and
   PostgreSQL gates pass without new skips.
 - [ ] No raw prompt/output content is emitted by default observability.
 - [ ] Verified scope/security/privacy policy is propagated fail-closed and per-execution
   bypass/invocation/token/cost/attempt evidence reuses canonical Gateway accounting.
 - [ ] The protected evaluation set passes every objective threshold and rollback regression rule.
-- [ ] No frozen contract or ownership changes are present.
+- [ ] The only contract change is the reviewed `DispatchExecutionAttempt` v2 metadata contract;
+  Domain identity, ES-007 Result semantics, Memory contracts, AI Gateway contracts, TDR-018,
+  provider adapters, and runtime implementation remain unchanged.
 
 ## Implementation sequencing
 
-This governance PR authorizes no runtime code. CTO approval SHALL first change this document's
-frontmatter from `Draft` to `Approved`, add the approval to Version History, change TDR-018 from
-`In Review` to the repository's accepted decision status `Accepted`, and update both indexes in the
-same governance PR. Only after those recorded transitions may one separate implementation Draft PR
-add the static resolver, one capability integration, evaluations, and regression evidence. Gateway
-structured validation/repair remains existing authority, not capability implementation scope. The
-implementation MUST stop on any required architectural deviation.
+This governance PR authorizes no runtime code. Approval and merge of this v2 contract governance
+are required before any implementation begins. Only after those recorded transitions may a separate
+implementation Draft PR add the resolver, one capability integration, evaluations, and regression
+evidence. PR #28 remains paused until then and is not amended, resumed, merged, or reviewed by this
+governance PR. Gateway structured validation/repair remains existing authority, not capability
+implementation scope. The implementation MUST stop on any required architectural deviation.
