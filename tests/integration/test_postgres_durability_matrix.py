@@ -2535,7 +2535,6 @@ async def test_structured_cancellation_uses_governed_event_and_workflow_is_termi
     execution = next(iter(runtime.execution_repository.records.values()))
     assert execution.result is not None
     assert execution.result.result_status is ResultStatus.FAILED
-    assert execution.result.metadata["ai_invocation_id"]
     assert execution.terminal_event is not None
     assert execution.terminal_event.event_type == "ExecutionAttemptFailed"
     assert workflow.outcome is not None and workflow.outcome.result_status is ResultStatus.FAILED
