@@ -283,6 +283,19 @@ class ReferenceRuntime:
                 return result
         return await self.dispatcher.dispatch(command)
 
+    async def run_workflow_command(self, command: CommandEnvelope) -> ResultEnvelope:
+        """Dispatch one governed Workflow Engine command with the durable host checkpoint."""
+        if command.target_component != "Workflow Engine":
+            raise ValueError("workflow command must target Workflow Engine")
+        if self.database is not None:
+            async with self.database.command_lock(scoped_idempotency_lock_key(command)):
+                for participant in self.durable_participants:
+                    await participant.prepare()
+                result = await self.dispatcher.dispatch(command)
+                await checkpoint(self.database, self.durable_participants)
+                return result
+        return await self.dispatcher.dispatch(command)
+
     async def _run_prepared(self, command: CommandEnvelope) -> ResultEnvelope:
         for participant in self.durable_participants:
             await participant.prepare()

@@ -2489,3 +2489,69 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
     async with database.transaction() as session:
         assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
     await recovered.close()
+
+
+async def test_structured_cancellation_uses_governed_event_and_workflow_is_terminal_after_restart(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    first = compose(settings)
+    runtime = first.reference_runtime
+    adapter = runtime.reference_ai_gateway._adapters[  # pyright: ignore[reportPrivateUsage]
+        "mock-economy"
+    ]
+    assert isinstance(adapter, DeterministicMockProvider)
+    adapter._behaviors = [MockProviderBehavior.CANCELLED]  # pyright: ignore[reportPrivateUsage]
+    command_envelope = CommandEnvelope(
+        command_id="command-structured-cancellation",
+        command_type="StartWorkflow",
+        command_version="1.0",
+        correlation_id="correlation-structured-cancellation",
+        causation_id="decision-structured-cancellation",
+        target_component="Workflow Engine",
+        initiator="Manager",
+        timestamp=datetime(2026, 8, 15, tzinfo=UTC),
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        payload={
+            "workflow_definition_id": "structured-cancellation-workflow",
+            "workflow_definition_version_id": "v1",
+            "skill_version_id": "structured-task-kind-skill-v1",
+            "max_attempts": 1,
+            "statement": "What is the status?",
+            "timeout_seconds": 5,
+        },
+        metadata=CommandMetadata(
+            request_id="request-structured-cancellation",
+            idempotency_key="idem-structured-cancellation",
+            authorization=runtime.authorization,
+        ),
+    )
+    await runtime.run_workflow_command(command_envelope)
+    workflow = next(iter(runtime.workflow_repository.instances.values()))
+    execution = next(iter(runtime.execution_repository.records.values()))
+    assert execution.result is not None
+    assert execution.result.result_status is ResultStatus.CANCELLED
+    assert execution.terminal_event is not None
+    assert execution.terminal_event.event_type == "ExecutionAttemptFailed"
+    assert workflow.outcome is not None and workflow.outcome.result_status is ResultStatus.FAILED
+    workflow_id = workflow.workflow_id
+    await first.close()
+
+    recovered = compose(settings)
+    for participant in recovered.reference_runtime.durable_participants:
+        await participant.prepare()
+    durable_workflow = recovered.reference_runtime.workflow_repository.instances[workflow_id]
+    assert durable_workflow.outcome is not None
+    assert durable_workflow.outcome.result_status is ResultStatus.FAILED
+    async with database.transaction() as session:
+        cancelled_events = await session.scalar(
+            select(func.count())
+            .select_from(OutboxEventRow)
+            .where(OutboxEventRow.event_type == "ExecutionAttemptCancelled")
+        )
+        assert cancelled_events == 0
+    await recovered.close()
