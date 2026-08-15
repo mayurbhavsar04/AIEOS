@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aieos.dev/contracts/commands/dispatch-execution-attempt/v2",
+  "title": "DispatchExecutionAttempt v2",
+  "description": "Complete normative schema for the supported DispatchExecutionAttempt v2 Command envelope and the StructuredTaskKindClassification {statement} payload.",
+  "type": "object",
+  "required": [
+    "CommandId",
+    "CommandType",
+    "CommandVersion",
+    "CorrelationId",
+    "CausationId",
+    "WorkflowId",
+    "WorkflowStepId",
+    "ExecutionId",
+    "TargetComponent",
+    "Initiator",
+    "Timestamp",
+    "TenantId",
+    "WorkspaceId",
+    "Payload",
+    "Metadata"
+  ],
+  "properties": {
+    "CommandId": { "$ref": "#/$defs/opaqueId" },
+    "CommandType": { "const": "DispatchExecutionAttempt" },
+    "CommandVersion": { "const": 2 },
+    "CorrelationId": { "$ref": "#/$defs/opaqueId" },
+    "CausationId": { "$ref": "#/$defs/opaqueId" },
+    "WorkflowId": { "$ref": "#/$defs/opaqueId" },
+    "WorkflowStepId": { "$ref": "#/$defs/opaqueId" },
+    "ExecutionId": { "$ref": "#/$defs/opaqueId" },
+    "TargetComponent": { "const": "Skill Runtime" },
+    "Initiator": { "$ref": "#/$defs/opaqueId" },
+    "Timestamp": { "type": "string", "format": "date-time" },
+    "TenantId": { "$ref": "#/$defs/opaqueId" },
+    "WorkspaceId": { "$ref": "#/$defs/opaqueId" },
+    "Payload": {
+      "type": "object",
+      "required": ["statement"],
+      "properties": {
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S",
+          "description": "The normalized StructuredTaskKindClassification statement."
+        }
+      },
+      "additionalProperties": false
+    },
+    "Metadata": {
+      "type": "object",
+      "required": ["IdempotencyContext", "AuthorizationContext", "AttemptContext"],
+      "properties": {
+        "IdempotencyContext": { "$ref": "#/$defs/nonEmptyContext" },
+        "AuthorizationContext": { "$ref": "#/$defs/nonEmptyContext" },
+        "TimeConstraints": { "$ref": "#/$defs/nonEmptyContext" },
+        "RequestContext": { "$ref": "#/$defs/nonEmptyContext" },
+        "TraceContext": { "$ref": "#/$defs/nonEmptyContext" },
+        "AttemptContext": {
+          "type": "object",
+          "required": ["AttemptNumber", "SkillVersionId"],
+          "properties": {
+            "AttemptNumber": { "type": "integer", "minimum": 1 },
+            "SkillVersionId": { "$ref": "#/$defs/opaqueId" }
+          },
+          "additionalProperties": false
+        },
+        "ContractExpectations": { "$ref": "#/$defs/nonEmptyContext" },
+        "AuthoritativeResultId": {
+          "$ref": "#/$defs/resultId",
+          "description": "Optional opaque ResultId. Skill Runtime must verify authority, authorization, scope, terminality, provenance, input match, and output validity; this value is not self-authenticating."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "resultId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "$comment": "ResultId is the existing opaque canonical Result identity; this schema does not create or impose a replacement identity format."
+    },
+    "nonEmptyContext": {
+      "type": "object",
+      "minProperties": 1
+    }
+  },
+  "$comment": "AuthoritativeResultId is optional v2 metadata only. Absence preserves the existing execution path. It is propagated only as SkillInput.authoritative_result_id: str | None, never as the exact {statement} payload or CapabilityPolicyContext."
+}
