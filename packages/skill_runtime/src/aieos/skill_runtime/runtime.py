@@ -564,29 +564,36 @@ class SkillRuntime:
         )
         attributes: dict[str, object] = {}
         if structured:
-            bypassed = result.result_status is ResultStatus.SUCCEEDED and not ai_invocation_id
+            reused_result_id = result.metadata.get("reused_result_id")
+            bypassed = (
+                result.result_status is ResultStatus.SUCCEEDED
+                and isinstance(reused_result_id, str)
+                and bool(reused_result_id)
+            )
+            invoked = ai_invocation_id is not None
+            count_status = "canonical_store" if invoked else "not_applicable"
             attributes = {
                 "capability_id": "StructuredTaskKindClassification",
                 "capability_contract_version_id": "1",
                 "prompt_package_ref": "structured-task-kind",
                 "prompt_package_version_ref": "v1",
-                "disposition": "bypassed" if bypassed else "invoked",
+                "disposition": "bypassed" if bypassed else "invoked" if invoked else "not_invoked",
                 "terminal_outcome": result.result_status.value,
-                "accounting_correlation": ("not_applicable" if bypassed else "ai_invocation_id"),
+                "accounting_correlation": (
+                    "not_applicable"
+                    if bypassed
+                    else "ai_invocation_id"
+                    if invoked
+                    else "not_created"
+                ),
                 "bypass_reason": "authoritative_result_reuse" if bypassed else "not_applicable",
                 "avoided_input_tokens": 256 if bypassed else 0,
                 "avoided_output_tokens": 16 if bypassed else 0,
                 "avoided_cost": "0.01" if bypassed else "0",
-                "provider_attempt_count_status": "not_applicable"
-                if bypassed
-                else "canonical_store",
-                "repair_attempt_count_status": "not_applicable" if bypassed else "canonical_store",
-                "fallback_attempt_count_status": "not_applicable"
-                if bypassed
-                else "canonical_store",
-                "total_model_call_count_status": (
-                    "not_applicable" if bypassed else "canonical_store"
-                ),
+                "provider_attempt_count_status": count_status,
+                "repair_attempt_count_status": count_status,
+                "fallback_attempt_count_status": count_status,
+                "total_model_call_count_status": count_status,
             }
         self._observations.record_log(
             context=context,

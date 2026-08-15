@@ -143,6 +143,14 @@ async def test_composed_exact_business_payload_rejects_extra_fields_before_gatew
     record = runtime.execution_repository.records["execution-structured"]
     assert record.result is not None and record.result.result_status is ResultStatus.FAILED
     assert runtime.reference_ai_gateway.store.invocations == {}
+    observation = next(
+        item
+        for item in runtime.observations.records
+        if item.attributes.get("capability_id") == "StructuredTaskKindClassification"
+    )
+    assert observation.context.ai_invocation_id is None
+    assert observation.attributes["disposition"] == "not_invoked"
+    assert observation.attributes["accounting_correlation"] == "not_created"
 
 
 @pytest.mark.anyio
