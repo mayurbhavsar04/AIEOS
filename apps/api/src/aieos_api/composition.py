@@ -271,6 +271,13 @@ class ReferenceRuntime:
             async with self.database.command_lock(scoped_idempotency_lock_key(command)):
                 for participant in self.durable_participants:
                     await participant.prepare()
+                receipt = self.execution_repository.receipt_for_command(command.command_id)
+                if receipt is not None and receipt.completed:
+                    if receipt.command != command:
+                        raise ValueError(
+                            "CommandId cannot be reused with changed immutable content"
+                        )
+                    return receipt.acknowledgement
                 result = await self.dispatcher.dispatch(command)
                 await checkpoint(self.database, self.durable_participants)
                 return result
