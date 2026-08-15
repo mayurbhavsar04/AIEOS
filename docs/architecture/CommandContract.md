@@ -67,6 +67,15 @@ The envelope is immutable after creation. Optional means the field MAY be absent
 
 Metadata keys are versioned with the Command contract. Extension metadata MAY be ignored only when the receiving version declares it non-authoritative and safe to ignore. Credentials, secret values, raw authorization headers, and mutable delivery observations MUST NOT appear in the immutable envelope.
 
+### 3.2 Field relationships
+
+- `WorkflowStepId` MUST NOT appear without `WorkflowId`.
+- `ExecutionId` MUST NOT appear without both `WorkflowId` and `WorkflowStepId`.
+- A Workflow retry preserves `CorrelationId` and `WorkflowId`, assigns a new `ExecutionId`, increments `AttemptNumber`, and creates a new logical Command with a new `CommandId`.
+- Redelivery preserves the entire immutable envelope, including `CommandId`, `ExecutionId`, and idempotency context.
+- `Initiator`, authorization metadata, `TenantId`, and `WorkspaceId` MUST agree; mismatch is an authorization or invariant failure.
+- `TargetComponent` MUST name an existing accountable target defined by the governing architecture or domain contract.
+
 ### 3.3 `DispatchExecutionAttempt` v2: authoritative-result metadata
 
 `DispatchExecutionAttempt` v2 adds optional, typed metadata `AuthoritativeResultId: ResultId`.
@@ -86,15 +95,6 @@ The v1/v2 matrix is below; a v1 consumer MUST reject v2 rather than silently ign
 
 This is a new supported version because the member is authority-sensitive. It is not a v1
 extension, and neither an idempotency key nor an ordinary metadata extension may substitute for it.
-
-### 3.2 Field relationships
-
-- `WorkflowStepId` MUST NOT appear without `WorkflowId`.
-- `ExecutionId` MUST NOT appear without both `WorkflowId` and `WorkflowStepId`.
-- A Workflow retry preserves `CorrelationId` and `WorkflowId`, assigns a new `ExecutionId`, increments `AttemptNumber`, and creates a new logical Command with a new `CommandId`.
-- Redelivery preserves the entire immutable envelope, including `CommandId`, `ExecutionId`, and idempotency context.
-- `Initiator`, authorization metadata, `TenantId`, and `WorkspaceId` MUST agree; mismatch is an authorization or invariant failure.
-- `TargetComponent` MUST name an existing accountable target defined by the governing architecture or domain contract.
 
 ## 4. Command Lifecycle
 

@@ -274,7 +274,7 @@ Changes to component ownership, authoritative decisions, canonical identities, C
 - [ ] Versioning, compatibility, deprecation, and security requirements are testable.
 - [ ] All nine Mermaid diagrams are valid and consistent with prose.
 - [ ] Relative links resolve and `git diff --check` passes.
-- [ ] Frozen baselines remain unchanged and no ADR is required.
+- [ ] Frozen baselines remain unchanged except for the focused `DispatchExecutionAttempt` v2 interpretation authorized by ADR-001; no additional ADR or boundary change is required.
 
 ## 15. Review Checklist
 
@@ -296,16 +296,22 @@ Reviewers SHALL verify:
 
 ## 16. Definition of Done
 
-- [ ] Only the two requested documentation files are created.
+- [ ] The original two-file ES-006 baseline remains intact except for the focused ADR-001 governance artifacts and directly required index/schema updates.
 - [ ] Acceptance criteria and review checks pass.
-- [ ] No frozen-boundary conflict requires an ADR.
+- [ ] ADR-001 authorizes only v2 metadata propagation into `SkillInput.authoritative_result_id`; no other frozen-boundary conflict is introduced.
 - [ ] Validation evidence is recorded in a Draft Pull Request.
 - [ ] The Draft Pull Request targets `main`, remains unmerged, and creates no tag or release.
 
 ## 17. Implementation Instructions
 
-The Engineer SHALL work from current `main`, create `docs/es-006-service-interface-contracts`, change only the two ES-006 documentation files, validate the deliverables, commit with `docs: add ES-006 Service Interface Contracts`, push the branch, and open a Draft Pull Request with the same title.
+The original ES-006 implementation used its dedicated branch and two-file scope. The focused
+ADR-001 amendment MAY additionally update the governed v2 schema, ADR/index records, and the
+directly affected ES-004, ES-006, and ES-016 contracts; it MUST remain documentation/schema-only.
 
-If implementation would alter a frozen component name, ownership boundary, domain identity, Command target, Event producer, retry decision, or cross-boundary semantic, the Engineer MUST stop and report the conflict instead of creating an ADR or inventing a resolution.
+If implementation would alter a frozen component name, ownership boundary, domain identity,
+Command target, Event producer, retry decision, or cross-boundary semantic beyond ADR-001's
+specific v2 propagation path, the Engineer MUST stop and report the conflict instead of inventing
+an additional resolution. ADR-001 does not broaden metadata into free-form authoritative behavior;
+Skill Runtime remains the durable resolution owner.
 
 Return to the [Engineering Specifications process](README.md).

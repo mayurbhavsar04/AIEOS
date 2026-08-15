@@ -1,9 +1,9 @@
 ---
 title: Engineering Specifications
-version: 1.3
+version: 1.4
 status: Approved
 owner: Founding Team
-last_updated: 2026-08-13
+last_updated: 2026-08-14
 ---
 
 # Engineering Specifications

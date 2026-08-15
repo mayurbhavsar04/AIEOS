@@ -77,9 +77,11 @@ The deliverable MUST preserve these constraints:
 7. Each Workflow retry creates a new `ExecutionId` and incremented `AttemptNumber`; terminal attempts remain immutable.
 8. `CorrelationId` and `WorkflowId` remain stable across Workflow retries; `CausationId` records the immediate cause.
 9. Tenant and Workspace isolation remains explicit.
-10. No component, aggregate, service, route, Command meaning, identity, or owner may be added or changed.
+10. No component, aggregate, service, route, canonical identity, or owner may be added or changed. ADR-001 authorizes only the separately versioned `DispatchExecutionAttempt` v2 interpretation defined in §4.1–4.2; v1 and every unrelated Command meaning remain unchanged.
 
-If satisfying ES-004 would violate a constraint, work MUST stop for architecture review rather than introduce an ADR or solution within this milestone.
+Except for the focused change already authorized by ADR-001, satisfying ES-004 in a way that would
+violate a constraint requires work to stop for architecture review. ADR-001 does not authorize any
+other Command, boundary, identity, owner, or semantic change.
 
 ## 4. Canonical Envelope Requirements
 
@@ -299,16 +301,21 @@ Reviewers SHALL verify:
 
 ## 16. Definition of Done
 
-- [ ] Only the two intended documentation files are created.
+- [ ] The original two-file ES-004 baseline remains intact except for the focused ADR-001 governance artifacts and directly required index/schema updates.
 - [ ] All acceptance criteria and review checks are satisfied.
-- [ ] No architecture or domain conflict requires an ADR.
+- [ ] ADR-001 authorizes only `DispatchExecutionAttempt` v2 and its optional `AuthoritativeResultId` metadata; no other architecture or domain conflict is introduced.
 - [ ] Validation evidence is recorded in the Draft Pull Request.
 - [ ] A Draft Pull Request is opened against `main` and is not merged.
 
 ## 17. Implementation Instructions
 
-The Engineer SHALL work from current `main`, create `docs/es-004-command-contract-model`, change only the two ES-004 documentation files, validate the deliverables, commit with `docs: add ES-004 Command Contract Model`, push the branch, and open a Draft Pull Request titled `docs: add ES-004 Command Contract Model`.
+The original ES-004 implementation used its dedicated branch and two-file scope. The focused
+ADR-001 amendment MAY additionally update the governed v2 schema, ADR/index records, and the
+directly affected ES-004, ES-006, and ES-016 contracts; it MUST remain documentation/schema-only.
 
-If implementation would alter an Architecture v1.0 boundary or Domain v1.0 semantic, the Engineer MUST stop and report the conflict. The Engineer MUST NOT resolve it by inventing a component, owner, route, technology, or domain meaning.
+If implementation would alter an Architecture v1.0 boundary or Domain v1.0 semantic beyond the
+specific versioned Command interpretation approved by ADR-001, the Engineer MUST stop and report
+the conflict. The Engineer MUST NOT invent a component, owner, route, technology, domain meaning,
+or additional authoritative metadata.
 
 Return to the [Engineering Specifications process](README.md).
