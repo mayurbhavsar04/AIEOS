@@ -1,11 +1,11 @@
 ---
 title: ES-016 — Governed Structured AI Capability Execution
-version: 0.6
-status: In Review
+version: 0.7
+status: Approved
 owner: CTO / Architect
 implementer: Engineer (Codex)
 milestone: 6 Phase 5
-last_updated: 2026-08-14
+last_updated: 2026-08-15
 ---
 
 # ES-016 — Governed Structured AI Capability Execution
@@ -45,6 +45,7 @@ this work. The Phase 4 merge commit is
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 0.7 | 2026-08-15 | CTO / Architect | Approved after focused CTO review of `210df6491397b57875edf9942da009341c8161e1` with Blocking 0 / Major 0 / Minor 0. |
 | 0.6 | 2026-08-14 | CTO / Architect | Returned to In Review for the approved `AuthoritativeResultId` v2 Command path; PR #28 is paused pending governance approval and merge. |
 | 0.5 | 2026-08-13 | CTO / Architect | Approved the first-release rollback clarification after focused CTO review at `1c88f8fc67eb9fcb9dae6d3a0165b0d1a73322e0` with Blocking 0 / Major 0 / Minor 0. |
 | 0.4 | 2026-08-13 | CTO / Architect | Returned to In Review for the first-release rollback clarification; no approval or immutable rollback baseline is asserted retroactively. |

@@ -1,9 +1,9 @@
 ---
 title: Architecture Decision Records
-version: 1.0
-status: In Review
+version: 1.1
+status: Approved
 owner: CTO / Architect
-last_updated: 2026-08-14
+last_updated: 2026-08-15
 ---
 
 # Architecture Decision Records
@@ -14,7 +14,7 @@ implementation authorization. Proposed and In Review records require approval be
 
 | ID | Decision | Status |
 | --- | --- | --- |
-| [ADR-001](ADR-001-Authoritative-Result-Reuse.md) | Govern authoritative-result reuse through `DispatchExecutionAttempt` v2 | In Review |
+| [ADR-001](ADR-001-Authoritative-Result-Reuse.md) | Govern authoritative-result reuse through `DispatchExecutionAttempt` v2 | Accepted |
 
 The Runtime Technology Decision Records remain separately indexed in
 [runtime decisions](../../runtime-architecture/decisions/README.md).

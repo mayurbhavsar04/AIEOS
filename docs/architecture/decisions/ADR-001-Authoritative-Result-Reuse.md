@@ -1,8 +1,8 @@
 ---
 title: ADR-001 — Authoritative Result Reuse
-status: In Review
+status: Accepted
 owner: CTO / Architect
-date: 2026-08-14
+date: 2026-08-15
 ---
 
 # ADR-001 — Authoritative Result Reuse

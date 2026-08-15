@@ -1,9 +1,9 @@
 ---
 title: Engineering Specifications
-version: 1.4
+version: 1.5
 status: Approved
 owner: Founding Team
-last_updated: 2026-08-14
+last_updated: 2026-08-15
 ---
 
 # Engineering Specifications
@@ -201,15 +201,15 @@ Changes to canonical domain concepts, aggregate ownership, identities, commands,
 | Specification | Title | Status |
 | --- | --- | --- |
 | [ES-001](ES-001-Execution-Core.md) | Execution Core | Draft |
-| [ES-004](ES-004-Command-Contract-Model.md) | Command Contract Model | In Review — `DispatchExecutionAttempt` v2 governance |
-| [ES-006](ES-006-Service-Interface-Contracts.md) | Service Interface Contracts | In Review — authoritative-result propagation and lookup ownership |
+| [ES-004](ES-004-Command-Contract-Model.md) | Command Contract Model | Approved |
+| [ES-006](ES-006-Service-Interface-Contracts.md) | Service Interface Contracts | Approved |
 | [ES-010](ES-010-Executable-Reference-Workflow.md) | Executable Reference Workflow | Implemented |
 | [ES-011](ES-011-Durable-Runtime-Infrastructure.md) | Durable Runtime Infrastructure | Implemented |
 | [ES-012](ES-012-AI-Gateway-and-Token-Governance.md) | AI Gateway and Token Governance | Implemented |
 | [ES-013](ES-013-AI-Gateway-Reference-Implementation.md) | AI Gateway Reference Implementation | Implemented |
 | [ES-014](ES-014-First-Real-AI-Provider-Adapter.md) | First Real AI Provider Adapter | Implemented |
 | [ES-015](ES-015-Multi-Provider-Routing-and-Failover.md) | Multi-Provider Routing and Failover | Frozen Phase 4 baseline (source status: Proposed) |
-| [ES-016](ES-016-Governed-Structured-AI-Capability-Execution.md) | Governed Structured AI Capability Execution | In Review — `AuthoritativeResultId` v2 governance; PR #28 paused |
+| [ES-016](ES-016-Governed-Structured-AI-Capability-Execution.md) | Governed Structured AI Capability Execution | Approved |
 
 ES-015's source header remains `Proposed`; the immutable Phase 4 merge/tag nevertheless freezes its
 implemented governance baseline. The index records both facts rather than treating `Proposed` as an
@@ -219,6 +219,7 @@ unfrozen Phase 4 deliverable.
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.5 | 2026-08-15 | CTO / Architect | Recorded approval of ES-004 v1.2, ES-006 v1.2, and ES-016 v0.7 after focused CTO review of `210df6491397b57875edf9942da009341c8161e1`. |
 | 1.4 | 2026-08-14 | CTO / Architect | Returned ES-004, ES-006, and ES-016 to In Review for `DispatchExecutionAttempt` v2 authoritative-result reuse governance. |
 | 1.3 | 2026-08-13 | CTO / Architect | Recorded approval of ES-016's first-release rollback clarification. |
 | 1.2 | 2026-08-13 | CTO / Architect | Updated ES-016 status to In Review for its first-release rollback clarification. |

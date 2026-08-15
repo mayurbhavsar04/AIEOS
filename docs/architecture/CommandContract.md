@@ -1,9 +1,9 @@
 ---
 title: Command Contract Model
-version: 1.1
-status: In Review
+version: 1.2
+status: Approved
 owner: Founding Team
-last_updated: 2026-08-14
+last_updated: 2026-08-15
 ---
 
 # Command Contract Model

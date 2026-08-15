@@ -1,9 +1,9 @@
 ---
 title: ES-006 — Service Interface Contracts
-version: 1.1
-status: In Review
+version: 1.2
+status: Approved
 owner: CTO / Architect
-last_updated: 2026-08-14
+last_updated: 2026-08-15
 ---
 
 # ES-006 — Service Interface Contracts
@@ -20,7 +20,7 @@ last_updated: 2026-08-14
 | **Domain baseline** | Domain v1.0, frozen at tag `domain-v1.0` |
 | **Command baseline** | ES-004, frozen at tag `contracts-v1.0-es004` |
 | **Event baseline** | ES-005, frozen at tag `contracts-v1.0-es005` |
-| **Architecture status** | In Review; adds governed v2 propagation and Skill Runtime-owned durable lookup without changing component ownership, canonical identities, Result semantics, or provider boundaries. |
+| **Architecture status** | Approved; adds governed v2 propagation and Skill Runtime-owned durable lookup without changing component ownership, canonical identities, Result semantics, or provider boundaries. |
 
 ## Related Documents
 
@@ -41,6 +41,7 @@ last_updated: 2026-08-14
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.2 | 2026-08-15 | CTO / Architect | Approved after focused CTO review of `210df6491397b57875edf9942da009341c8161e1` with Blocking 0 / Major 0 / Minor 0. |
 | 1.1 | 2026-08-14 | CTO / Architect | Returned to In Review to define v2 authoritative-result propagation and Skill Runtime resolution ownership. |
 | 1.0 | 2026-07-21 | CTO / Architect | Initial Milestone 4 Phase 3 specification. |
 
