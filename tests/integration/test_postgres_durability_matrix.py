@@ -2423,6 +2423,8 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
     )
     first = compose(settings)
     runtime = first.reference_runtime
+    await runtime.run("seed durable workflow parents")
+    workflow = next(iter(runtime.workflow_repository.instances.values()))
     base = CommandEnvelope(
         command_id="command-authoritative-source",
         command_type="DispatchExecutionAttempt",
@@ -2434,8 +2436,8 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
         timestamp=datetime(2026, 8, 15, tzinfo=UTC),
         tenant_id=settings.tenant_id,
         workspace_id=settings.workspace_id,
-        workflow_id="workflow-authoritative-source",
-        workflow_step_id="step-authoritative-source",
+        workflow_id=workflow.workflow_id,
+        workflow_step_id=workflow.workflow_step_id,
         execution_id="execution-authoritative-source",
         payload={
             "skill_version_id": "structured-task-kind-skill-v1",
@@ -2444,7 +2446,7 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
         metadata=CommandMetadata(
             request_id="request-authoritative-source",
             idempotency_key="idem-authoritative-source",
-            attempt_number=1,
+            attempt_number=2,
             authorization=runtime.authorization,
         ),
     )
@@ -2461,14 +2463,14 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
         command_version="2",
         correlation_id="correlation-authoritative-reuse",
         causation_id="workflow-authoritative-reuse",
-        workflow_id="workflow-authoritative-reuse",
-        workflow_step_id="step-authoritative-reuse",
+        workflow_id=workflow.workflow_id,
+        workflow_step_id=workflow.workflow_step_id,
         execution_id="execution-authoritative-reuse",
         payload={"statement": "What is the status?"},
         metadata=CommandMetadata(
             request_id="request-authoritative-reuse",
             idempotency_key="idem-authoritative-reuse",
-            attempt_number=1,
+            attempt_number=3,
             authorization=recovered_runtime.authorization,
             skill_version_id="structured-task-kind-skill-v1",
             authoritative_result_id=source.result_id,
