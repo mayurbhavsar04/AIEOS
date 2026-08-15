@@ -2425,6 +2425,7 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
     runtime = first.reference_runtime
     await runtime.run("seed durable workflow parents")
     workflow = next(iter(runtime.workflow_repository.instances.values()))
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
     base = CommandEnvelope(
         command_id="command-authoritative-source",
         command_type="DispatchExecutionAttempt",
@@ -2457,6 +2458,7 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
 
     recovered = compose(settings)
     recovered_runtime = recovered.reference_runtime
+    recovered_runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
     reuse = replace(
         base,
         command_id="command-authoritative-reuse",
