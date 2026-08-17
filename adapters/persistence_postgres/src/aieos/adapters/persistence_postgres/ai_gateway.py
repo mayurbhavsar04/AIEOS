@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import MappingProxyType
+from typing import cast
 
 from pydantic import TypeAdapter
 from sqlalchemy import func, or_, select, text, update
@@ -42,6 +45,44 @@ _INVOCATION = TypeAdapter(GatewayInvocation)
 _CACHE = TypeAdapter(CachedContent)
 _USAGE = TypeAdapter(AIUsage)
 _PROVIDER_RESULT = TypeAdapter(ProviderResult)
+
+
+def _storage_json(value: object) -> object:
+    """Thaw immutable governed JSON only at the durable serialization boundary."""
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
+        return {str(key): _storage_json(item) for key, item in mapping.items()}
+    if isinstance(value, tuple | list):
+        items = cast(tuple[object, ...] | list[object], value)
+        return [_storage_json(item) for item in items]
+    return value
+
+
+def _governed_json(value: object) -> object:
+    """Restore the immutable JSON representation expected by the Gateway."""
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
+        return MappingProxyType({str(key): _governed_json(item) for key, item in mapping.items()})
+    if isinstance(value, list | tuple):
+        items = cast(tuple[object, ...] | list[object], value)
+        return tuple(_governed_json(item) for item in items)
+    return value
+
+
+def _dump_invocation(invocation: GatewayInvocation) -> bytes:
+    schema = invocation.request.output_schema
+    if schema is None:
+        return _INVOCATION.dump_json(invocation)
+    storage_request = replace(invocation.request, output_schema=_storage_json(schema))
+    return _INVOCATION.dump_json(replace(invocation, request=storage_request))
+
+
+def _load_invocation(payload: str) -> GatewayInvocation:
+    invocation = _INVOCATION.validate_json(payload)
+    schema = invocation.request.output_schema
+    if schema is not None:
+        invocation.request = replace(invocation.request, output_schema=_governed_json(schema))
+    return invocation
 
 
 class PostgresProviderEffectBoundary:
@@ -234,7 +275,7 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
         candidate = GatewayInvocation(
             request, invocation_id, acknowledgement, InvocationState.REQUESTED, now
         )
-        payload = _INVOCATION.dump_json(candidate).decode()
+        payload = _dump_invocation(candidate).decode()
         digest = self.request_digest(request)
         async with self._database.transaction() as session:
             await session.execute(
@@ -251,7 +292,7 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
             if existing is not None:
                 if existing.intent_fingerprint != digest:
                     raise ValueError("IdempotencyKey payload conflict")
-                recovered = _INVOCATION.validate_json(existing.request_payload)
+                recovered = _load_invocation(existing.request_payload)
                 self.invocations[recovered.invocation_id] = recovered
                 return Acceptance(recovered.invocation_id, recovered.acknowledgement, replay=True)
             await session.execute(
@@ -280,11 +321,11 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
             )
         if row is None:
             raise KeyError(invocation_id)
-        invocation = _INVOCATION.validate_json(row.request_payload)
+        invocation = _load_invocation(row.request_payload)
         if row.terminal_payload is None:
             invocation.terminal = None
         if row.terminal_intent_payload is not None:
-            intended = _INVOCATION.validate_json(row.terminal_intent_payload)
+            intended = _load_invocation(row.terminal_intent_payload)
             invocation.terminal_intent = intended.terminal_intent or intended.terminal
             invocation.recovery_phase = row.recovery_phase
         invocation.execution_owner = row.execution_owner
@@ -319,7 +360,7 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
             )
         if row is None:
             return None
-        invocation = _INVOCATION.validate_json(row.request_payload)
+        invocation = _load_invocation(row.request_payload)
         invocation.execution_owner = row.execution_owner
         invocation.execution_lease_expires_at = row.execution_lease_expires_at
         invocation.claim_generation = row.claim_generation
@@ -387,7 +428,7 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
         raise RuntimeError("execution lease ended without terminal outcome")
 
     async def checkpoint(self, invocation: GatewayInvocation) -> None:
-        encoded = _INVOCATION.dump_json(invocation).decode()
+        encoded = _dump_invocation(invocation).decode()
         async with self._database.transaction() as session:
             result = await session.execute(
                 update(AIGatewayInvocationRow)
@@ -428,7 +469,7 @@ class PostgresAIGatewayStore(ReferenceGatewayStore):
     async def checkpoint_terminal_intent(self, invocation: GatewayInvocation) -> None:
         if invocation.execution_owner is None or invocation.claim_generation <= 0:
             raise ExecutionOwnershipLost("terminal intent requires execution ownership")
-        encoded = _INVOCATION.dump_json(invocation).decode()
+        encoded = _dump_invocation(invocation).decode()
         async with self._database.transaction() as session:
             result = await session.execute(
                 update(AIGatewayInvocationRow)
