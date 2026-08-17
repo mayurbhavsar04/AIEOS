@@ -331,6 +331,7 @@ class SkillRuntime:
             },
             authoritative_result_id=command.metadata.authoritative_result_id,
         )
+        reused_result_id: str | None = None
         try:
             if skill_input.authoritative_result_id is not None:
                 self._authorizer.require(
@@ -362,7 +363,12 @@ class SkillRuntime:
                 validator = cast(Callable[[str], str], reuse_validator)
                 assert source.value_reference is not None
                 reused_value = validator(source.value_reference)
-                output = SkillOutput(reused_value, "", "", source.result_id)
+                # The authoritative store is the source of truth for reuse
+                # evidence.  Retain that identity directly after validation
+                # rather than deriving terminal accounting from a transport
+                # field on SkillOutput.
+                reused_result_id = source.result_id
+                output = SkillOutput(reused_value, "", "", reused_result_id)
             else:
                 output = await asyncio.wait_for(
                     implementation.execute(skill_input, self._services), timeout=timeout
@@ -454,7 +460,7 @@ class SkillRuntime:
             record.state = ExecutionState.FAILED
             event_type = "ExecutionAttemptFailed"
         else:
-            is_authoritative_bypass = bool(output.reused_result_id)
+            is_authoritative_bypass = reused_result_id is not None
             terminal_metadata: dict[str, object] = {
                 "memory_id": output.memory_id,
                 "capability_id": definition.capability_id,
@@ -466,7 +472,7 @@ class SkillRuntime:
                     if definition.capability_id == "StructuredTaskKindClassification"
                     else ""
                 ),
-                "reused_result_id": output.reused_result_id or "",
+                "reused_result_id": reused_result_id or "",
                 "execution_disposition": (
                     "authoritative_result_bypass"
                     if is_authoritative_bypass
@@ -489,7 +495,7 @@ class SkillRuntime:
                 terminal_metadata.update(
                     {
                         "ai_invocation_id_status": "no_ai_invocation_by_design",
-                        "reuse_lineage": output.reused_result_id,
+                        "reuse_lineage": reused_result_id,
                     }
                 )
             else:
