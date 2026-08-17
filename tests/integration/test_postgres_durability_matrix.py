@@ -2485,7 +2485,7 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
     assert first_delivery == duplicate
     result = recovered_runtime.execution_repository.records["execution-authoritative-reuse"].result
     error = recovered_runtime.execution_repository.records["execution-authoritative-reuse"].error
-    assert result is not None and result.metadata["reused_result_id"] == source.result_id, (
+    assert result is not None and result.metadata.get("reused_result_id") == source.result_id, (
         result,
         error,
     )
