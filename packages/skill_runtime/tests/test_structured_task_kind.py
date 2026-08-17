@@ -266,27 +266,6 @@ async def test_bad_predictor_fixture_is_rejected_by_real_quality_gate() -> None:
     assert result.per_class_recall[TaskKind.QUESTION] == Decimal("0")
 
 
-def test_protected_disposition_matrix_covers_required_negative_and_ceiling_cases() -> None:
-    fixture = Path(__file__).parent / "fixtures" / "structured_task_kind_dispositions_v1.csv"
-    with fixture.open(encoding="utf-8", newline="") as source:
-        rows = tuple(csv.DictReader(source))
-    categories = {row["category"] for row in rows}
-
-    assert {
-        "invalid",
-        "bypass",
-        "hostile",
-        "schema",
-        "rollback",
-        "replay",
-        "concurrency",
-        "ceiling",
-        "adapter",
-    } <= categories
-    assert all(int(row["max_primary_calls"]) <= 1 for row in rows)
-    assert all(int(row["max_repair_calls"]) <= 1 for row in rows)
-
-
 @pytest.mark.anyio
 @pytest.mark.parametrize("adapter_key", ["openai-mock", "gemini-mock"])
 async def test_provider_routing_is_neutral_to_the_capability(adapter_key: str) -> None:

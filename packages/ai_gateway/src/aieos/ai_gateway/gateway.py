@@ -1024,6 +1024,16 @@ class ReferenceAIGateway:
                         tokens, request.max_output_tokens, estimated=True
                     )
                     attempt_cost = self._usage_cost(candidate.model_key, usage)
+                    # Admission is based on the governed envelope, but the
+                    # provider's metered result remains authoritative for the
+                    # actual execution.  Never turn a post-admission output
+                    # or cost overrun into a successful terminal response.
+                    if usage.output_tokens > request.max_output_tokens:
+                        raise ProviderFailure(
+                            "AI_OUTPUT_LIMIT_EXCEEDED", retryable=False, usage=usage
+                        )
+                    if attempt_cost > request.max_total_cost - spent:
+                        raise ProviderFailure("AI_BUDGET_OVERRUN", retryable=False, usage=usage)
                     spent += attempt_cost
                     total_input += usage.input_tokens
                     total_output += usage.output_tokens
@@ -1207,9 +1217,12 @@ class ReferenceAIGateway:
             if reservation is not None:
                 with suppress(Exception):
                     await self.store.release(invocation_id)
+            error_text = str(error).lower()
             code = invocation.last_provider_failure_code or (
-                "AI_GATEWAY_PERSISTENCE_FAILURE"
-                if "persist" in str(error).lower()
+                "AI_INPUT_LIMIT_EXCEEDED"
+                if "input ceiling" in error_text
+                else "AI_GATEWAY_PERSISTENCE_FAILURE"
+                if "persist" in error_text
                 else "AI_GATEWAY_FAILURE"
             )
             response = self._failure(invocation, ProviderFailure(code, retryable=False))
@@ -1918,6 +1931,10 @@ class ReferenceAIGateway:
                 usage = repaired.usage or AIUsage(
                     self._estimate(repair_prompt), request.max_output_tokens, estimated=True
                 )
+                if usage.output_tokens > request.max_output_tokens:
+                    raise ProviderFailure(
+                        "AI_OUTPUT_LIMIT_EXCEEDED", retryable=False, usage=usage
+                    ) from None
                 cost = self._usage_cost(candidate.model_key, usage)
                 if cost > remaining_cost - repair_cost:
                     raise ProviderFailure(
