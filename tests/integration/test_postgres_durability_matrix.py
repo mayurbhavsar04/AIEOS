@@ -2453,7 +2453,12 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
     )
     await runtime.run_execution_command(base)
     source = runtime.execution_repository.records["execution-authoritative-source"].result
-    assert source is not None
+    source_error = runtime.execution_repository.records["execution-authoritative-source"].error
+    assert source is not None and source.result_status is ResultStatus.SUCCEEDED, (
+        "source authoritative result was not reusable: "
+        f"{source_error.error_code if source_error else 'missing error'}: "
+        f"{source_error.message if source_error else 'missing source error'}"
+    )
     await first.close()
 
     recovered = compose(settings)
