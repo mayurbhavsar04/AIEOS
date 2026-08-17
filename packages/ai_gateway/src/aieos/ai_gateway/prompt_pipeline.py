@@ -11,6 +11,18 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import cast
 
+# The single provider-neutral semantic definition for the governed Stage 1
+# package.  Capability, Gateway, and provider adapters consume this only via
+# the immutable catalog member and never maintain parallel task-kind fields.
+STRUCTURED_TASK_KIND_SCHEMA: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "task_kind": {"type": "string", "enum": ["Question", "Instruction", "Statement"]}
+    },
+    "required": ["task_kind"],
+    "additionalProperties": False,
+}
+
 
 def _deep_freeze(value: object) -> object:
     if isinstance(value, Mapping):
@@ -231,4 +243,10 @@ class PromptPackageCatalog:
         return package if passed else rollback
 
 
-__all__ = ("AssembledPrompt", "PackageState", "PromptPackage", "PromptPackageCatalog")
+__all__ = (
+    "STRUCTURED_TASK_KIND_SCHEMA",
+    "AssembledPrompt",
+    "PackageState",
+    "PromptPackage",
+    "PromptPackageCatalog",
+)

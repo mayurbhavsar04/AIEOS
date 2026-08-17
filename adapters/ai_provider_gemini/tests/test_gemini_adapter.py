@@ -15,6 +15,7 @@ from aieos.adapters.ai_provider_gemini import (
 )
 from aieos.ai_gateway import AIInvocationRequest, ProviderFailure, ResponseMode
 from aieos.contracts import AuthorizationContext
+from aieos.skill_runtime import STRUCTURED_TASK_KIND_PACKAGE
 
 
 def make_request(**changes: object) -> AIInvocationRequest:
@@ -134,6 +135,8 @@ async def test_governed_task_kind_schema_is_native_hint_offline() -> None:
         request=make_request(
             response_mode=ResponseMode.STRUCTURED,
             output_schema_ref="structured-task-kind-schema-v1",
+            output_schema=STRUCTURED_TASK_KIND_PACKAGE.output_schema,
+            output_schema_identity=STRUCTURED_TASK_KIND_PACKAGE.identity,
         ),
     )
     config = payload["generationConfig"]

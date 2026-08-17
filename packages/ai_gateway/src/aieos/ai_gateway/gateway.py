@@ -85,6 +85,11 @@ class AIInvocationRequest:
     system_instruction_ref: str = "reference-system-v1"
     response_mode: ResponseMode = ResponseMode.TEXT
     output_schema_ref: str | None = None
+    # A governed structured request carries the immutable package-resolved schema
+    # rather than asking the Gateway or a provider adapter to look up/redefine it.
+    # It is intentionally provider-neutral JSON Schema material.
+    output_schema: Mapping[str, object] | None = None
+    output_schema_identity: str | None = None
     required_capabilities: frozenset[str] = frozenset({"text"})
     quality_tier: int = 1
     latency_tier: int = 1
@@ -1552,6 +1557,8 @@ class ReferenceAIGateway:
             raise ValueError("token budgets must be positive")
         if request.max_total_cost <= 0:
             raise ValueError("coarse budget feasibility failed")
+        if (request.output_schema is None) != (request.output_schema_identity is None):
+            raise ValueError("governed schema material and identity must be bound together")
 
     def _assemble(self, request: AIInvocationRequest, *, stage: int = 0) -> tuple[str, int, str]:
         if (
@@ -1567,6 +1574,13 @@ class ReferenceAIGateway:
             )
             if assembled.output_schema_reference != request.output_schema_ref:
                 raise ValueError("governed schema reference does not match the prompt package")
+            if (
+                request.output_schema != assembled.output_schema
+                or request.output_schema_identity != assembled.package_identity
+            ):
+                raise ValueError(
+                    "governed schema material does not match immutable package binding"
+                )
             content = assembled.content
             tokens = self._estimate(content)
             if tokens > request.max_input_tokens:
@@ -1962,16 +1976,64 @@ class ReferenceAIGateway:
             items = cast(list[object], raw_items)
             if not all(isinstance(item, str) for item in items):
                 raise ValueError("structured items must be strings")
-        elif request.output_schema_ref == "structured-task-kind-schema-v1":
-            if set(value) != {"task_kind"} or value.get("task_kind") not in {
-                "Question",
-                "Instruction",
-                "Statement",
-            }:
-                raise ValueError("structured task-kind output is invalid")
+        elif request.output_schema is not None:
+            ReferenceAIGateway._validate_json_schema(request.output_schema, value)
         else:
             raise ValueError("structured output schema is unresolved")
         return json.dumps(value, sort_keys=True)
+
+    @staticmethod
+    def _validate_json_schema(schema: Mapping[str, object], value: object) -> None:
+        """Small provider-neutral JSON-Schema subset used by governed packages.
+
+        Schema semantics remain owned by Prompt Pipeline; this routine merely
+        interprets the exact resolved schema at the Gateway validation boundary.
+        """
+        schema_type = schema.get("type")
+        if schema_type == "object":
+            if not isinstance(value, dict):
+                raise ValueError("structured output must be an object")
+            object_value = cast(dict[str, object], value)
+            properties = schema.get("properties")
+            required = schema.get("required")
+            # Prompt Pipeline deep-freezes governed package content, so an
+            # immutable schema's JSON-array members are tuples at this boundary.
+            if not isinstance(properties, Mapping) or not isinstance(required, list | tuple):
+                raise ValueError("governed object schema is invalid")
+            property_mapping = cast(Mapping[str, object], properties)
+            required_fields = cast(list[object] | tuple[object, ...], required)
+            if schema.get("additionalProperties") is False and set(object_value) - set(
+                property_mapping
+            ):
+                raise ValueError("structured output contains unsupported properties")
+            if not all(isinstance(key, str) and key in object_value for key in required_fields):
+                raise ValueError("structured output omits a required property")
+            for key, item in property_mapping.items():
+                if key in object_value:
+                    if not isinstance(item, Mapping):
+                        raise ValueError("governed object schema is invalid")
+                    ReferenceAIGateway._validate_json_schema(
+                        cast(Mapping[str, object], item), object_value[key]
+                    )
+            return
+        if schema_type == "string":
+            if not isinstance(value, str):
+                raise ValueError("structured output value must be a string")
+            enum = schema.get("enum")
+            if enum is not None and (not isinstance(enum, list | tuple) or value not in enum):
+                raise ValueError("structured output value is outside the governed enum")
+            return
+        if schema_type == "array":
+            if not isinstance(value, list):
+                raise ValueError("structured output value must be an array")
+            items = schema.get("items")
+            if not isinstance(items, Mapping):
+                raise ValueError("governed array schema is invalid")
+            array_value = cast(list[object], value)
+            for item in array_value:
+                ReferenceAIGateway._validate_json_schema(cast(Mapping[str, object], items), item)
+            return
+        raise ValueError("governed structured output schema is unsupported")
 
     def _transition(self, invocation: GatewayInvocation, state: InvocationState) -> None:
         invocation.state = state

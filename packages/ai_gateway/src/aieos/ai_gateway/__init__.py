@@ -21,6 +21,7 @@ from aieos.ai_gateway.gateway import (
     StreamChunk,
 )
 from aieos.ai_gateway.prompt_pipeline import (
+    STRUCTURED_TASK_KIND_SCHEMA,
     AssembledPrompt,
     PackageState,
     PromptPackage,
@@ -28,6 +29,7 @@ from aieos.ai_gateway.prompt_pipeline import (
 )
 
 __all__ = (
+    "STRUCTURED_TASK_KIND_SCHEMA",
     "AIGateway",
     "AIInvocationRequest",
     "AIInvocationResponse",

@@ -2,6 +2,7 @@
 
 import asyncio
 import csv
+import inspect
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -11,9 +12,9 @@ from pathlib import Path
 import pytest
 
 from aieos.adapters.ai_mock import DeterministicMockProvider, MockProviderBehavior
-from aieos.contracts import ResultStatus
+from aieos.contracts import AuthorizationContext, ResultStatus
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
-from aieos.skill_runtime import TaskKind, evaluate_predictions
+from aieos.skill_runtime import STRUCTURED_TASK_KIND_PACKAGE, TaskKind, evaluate_predictions
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
 from aieos_api.composition import CompositionRoot, compose
 
@@ -70,10 +71,14 @@ async def test_composed_capability_resolves_schema_and_uses_real_gateway() -> No
     assert record.result.value_reference == '{"task_kind":"Question"}'
     invocation = next(iter(runtime.reference_ai_gateway.store.invocations.values()))
     assert invocation.request.output_schema_ref == "structured-task-kind-schema-v1"
+    assert invocation.request.output_schema is STRUCTURED_TASK_KIND_PACKAGE.output_schema
+    assert invocation.request.output_schema_identity == STRUCTURED_TASK_KIND_PACKAGE.identity
     assert invocation.request.allowed_adapters == frozenset()
     assert invocation.request.context_items == ()
     assert invocation.terminal is not None
-    adapter = runtime.reference_ai_gateway._adapters["mock-economy"]  # pyright: ignore[reportPrivateUsage]
+    adapter = runtime.reference_ai_gateway._adapters[  # pyright: ignore[reportPrivateUsage]
+        "mock-economy"
+    ]
     assert isinstance(adapter, DeterministicMockProvider)
     assert adapter.calls == 1
     assert len(adapter.prompts) == 1
@@ -193,8 +198,73 @@ async def test_v2_authoritative_result_reuse_is_durable_runtime_owned_and_zero_c
     assert result.result_id != source.result_id
     assert result.value_reference == source.value_reference
     assert result.metadata["reused_result_id"] == source.result_id
-    assert result.metadata["ai_invocation_id"] == ""
+    assert "ai_invocation_id" not in result.metadata
+    assert result.metadata["ai_invocation_id_status"] == "no_ai_invocation_by_design"
     assert result.metadata["avoided_model_calls"] == 1
+    assert result.metadata["reuse_lineage"] == source.result_id
+    assert result.metadata["prompt_package_ref"] == "structured-task-kind"
+    assert len(runtime.reference_ai_gateway.store.invocations) == 1
+    observation = next(
+        item
+        for item in runtime.observations.records
+        if item.context.execution_id == "execution-structured-reuse"
+    )
+    assert observation.context.ai_invocation_id is None
+    assert observation.attributes["disposition"] == "authoritative_result_bypass"
+    assert observation.attributes["accounting_correlation"] == "no_ai_invocation_by_design"
+    assert observation.attributes["avoided_cost"] == "0.01"
+
+
+@pytest.mark.anyio
+async def test_v2_reuse_requires_read_and_capability_invocation_authorization_before_gateway() -> (
+    None
+):
+    root = compose()
+    runtime = root.reference_runtime
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    await runtime.skill_runtime.handle(command(root))
+    source = runtime.execution_repository.records["execution-structured"].result
+    assert source is not None
+    read_only = AuthorizationContext(
+        "actor-1",
+        frozenset({"skill.execute", "result.read"}),
+        root.settings.tenant_id,
+        root.settings.workspace_id,
+        "security-policy",
+        "v1",
+    )
+    denied = CommandEnvelope(
+        command_id="structured-command-reuse-without-invoke",
+        command_type="DispatchExecutionAttempt",
+        command_version="2",
+        correlation_id="structured-correlation-reuse-without-invoke",
+        causation_id="workflow-command-reuse-without-invoke",
+        target_component="Skill Runtime",
+        initiator="Workflow Engine",
+        timestamp=datetime(2026, 8, 15, tzinfo=UTC),
+        tenant_id=root.settings.tenant_id,
+        workspace_id=root.settings.workspace_id,
+        workflow_id="workflow-structured-reuse",
+        workflow_step_id="step-structured-reuse",
+        execution_id="execution-structured-reuse-without-invoke",
+        payload={"statement": "What is the status?"},
+        metadata=CommandMetadata(
+            request_id="request-structured-reuse-without-invoke",
+            attempt_number=1,
+            idempotency_key="execution-structured-reuse-without-invoke",
+            authorization=read_only,
+            skill_version_id="structured-task-kind-skill-v1",
+            authoritative_result_id=source.result_id,
+        ),
+    )
+
+    await runtime.skill_runtime.handle(denied)
+
+    result = runtime.execution_repository.records[
+        "execution-structured-reuse-without-invoke"
+    ].result
+    assert result is not None and result.result_status is ResultStatus.FAILED
+    assert result.metadata["ai_invocation_id_status"] == "not_created"
     assert len(runtime.reference_ai_gateway.store.invocations) == 1
 
 
@@ -205,30 +275,85 @@ async def test_protected_evaluation_uses_real_composed_release_path() -> None:
         / "packages/skill_runtime/tests/fixtures/structured_task_kind_protected_v1.csv"
     )
     with fixture.open(encoding="utf-8", newline="") as source:
-        rows = tuple(csv.DictReader(source))
+        # Candidate execution receives statements only.  Expected labels are
+        # deliberately loaded after all provider calls have completed.
+        statements = tuple(row["statement"] for row in csv.DictReader(source))
     root = compose()
     runtime = root.reference_runtime
     runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
     actual: list[TaskKind] = []
-    for index, row in enumerate(rows):
+    for index, statement in enumerate(statements):
         execution_id = f"protected-execution-{index}"
         await runtime.skill_runtime.handle(
             command(
                 root,
                 command_id=f"protected-command-{index}",
                 execution_id=execution_id,
-                statement=row["statement"],
+                statement=statement,
             )
         )
         result = runtime.execution_repository.records[execution_id].result
         assert result is not None and result.value_reference is not None
         actual.append(TaskKind(json.loads(result.value_reference)["task_kind"]))
 
-    expected = tuple(TaskKind(row["task_kind"]) for row in rows)
+    with fixture.open(encoding="utf-8", newline="") as source:
+        expected = tuple(TaskKind(row["task_kind"]) for row in csv.DictReader(source))
     evidence = evaluate_predictions(expected, tuple(actual))
-    assert len(rows) == 100
+    assert len(statements) == 100
     assert evidence.passed
     assert evidence.accuracy >= Decimal("0.95")
     assert set(evidence.per_class_recall) == set(TaskKind)
     assert all(value >= Decimal("0.90") for value in evidence.per_class_recall.values())
+    assert sum(sum(row.values()) for row in evidence.confusion.values()) == 100
     assert len(runtime.reference_ai_gateway.store.invocations) == 100
+
+
+@pytest.mark.anyio
+async def test_composed_degraded_candidate_fails_truthful_quality_gate() -> None:
+    fixture = (
+        Path(__file__).parents[2]
+        / "packages/skill_runtime/tests/fixtures/structured_task_kind_protected_v1.csv"
+    )
+    with fixture.open(encoding="utf-8", newline="") as source:
+        statements = tuple(row["statement"] for row in csv.DictReader(source))
+    root = compose()
+    runtime = root.reference_runtime
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    provider = runtime.reference_ai_gateway._adapters[  # pyright: ignore[reportPrivateUsage]
+        "mock-economy"
+    ]
+    assert isinstance(provider, DeterministicMockProvider)
+    provider._behaviors = [  # pyright: ignore[reportPrivateUsage]
+        MockProviderBehavior.DEGRADED
+    ] * len(statements)
+    actual: list[TaskKind] = []
+    for index, statement in enumerate(statements):
+        execution_id = f"degraded-execution-{index}"
+        await runtime.skill_runtime.handle(
+            command(
+                root,
+                command_id=f"degraded-command-{index}",
+                execution_id=execution_id,
+                statement=statement,
+            )
+        )
+        result = runtime.execution_repository.records[execution_id].result
+        assert result is not None and result.value_reference is not None
+        actual.append(TaskKind(json.loads(result.value_reference)["task_kind"]))
+    with fixture.open(encoding="utf-8", newline="") as source:
+        expected = tuple(TaskKind(row["task_kind"]) for row in csv.DictReader(source))
+
+    evidence = evaluate_predictions(expected, tuple(actual))
+
+    assert not evidence.passed
+    assert evidence.per_class_recall[TaskKind.QUESTION] == Decimal("0")
+
+
+def test_protected_evaluation_provider_has_no_fixture_or_expected_label_input() -> None:
+    """The deterministic provider's only model input is its composed prompt."""
+    from aieos.adapters.ai_mock import DeterministicMockProvider
+
+    source = Path(inspect.getfile(DeterministicMockProvider)).read_text(encoding="utf-8")
+    assert "structured_task_kind_protected_v1" not in source
+    assert "csv.DictReader" not in source
+    assert "expected_label" not in source

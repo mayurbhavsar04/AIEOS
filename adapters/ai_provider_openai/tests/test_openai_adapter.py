@@ -26,6 +26,7 @@ from aieos.ai_gateway import (
 from aieos.contracts import AuthorizationContext, ResultStatus
 from aieos.domain import SystemClock, UuidIdentifierFactory
 from aieos.security_support import ScopeAuthorizer
+from aieos.skill_runtime import STRUCTURED_TASK_KIND_PACKAGE
 
 
 def make_request(**changes: object) -> AIInvocationRequest:
@@ -280,16 +281,24 @@ async def test_maps_governed_task_kind_schema_to_native_payload_offline() -> Non
         request=make_request(
             response_mode=ResponseMode.STRUCTURED,
             output_schema_ref="structured-task-kind-schema-v1",
+            output_schema=STRUCTURED_TASK_KIND_PACKAGE.output_schema,
+            output_schema_identity=STRUCTURED_TASK_KIND_PACKAGE.identity,
         ),
     )
     text = seen["text"]
     assert isinstance(text, dict)
     schema = text["format"]["schema"]  # type: ignore[index]
-    assert schema["properties"]["task_kind"]["enum"] == [  # type: ignore[index]
-        "Question",
-        "Instruction",
-        "Statement",
-    ]
+    assert schema == {  # type: ignore[index]
+        "type": "object",
+        "properties": {
+            "task_kind": {
+                "type": "string",
+                "enum": ["Question", "Instruction", "Statement"],
+            }
+        },
+        "required": ["task_kind"],
+        "additionalProperties": False,
+    }
     assert result.content == '{"task_kind":"Question"}'
     await client.aclose()
 

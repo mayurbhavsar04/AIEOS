@@ -339,6 +339,14 @@ class SkillRuntime:
                     tenant_id=command.tenant_id,
                     workspace_id=command.workspace_id,
                 )
+                # A reusable Result never grants execution authority.  The
+                # target capability has a separate invocation authorization.
+                self._authorizer.require(
+                    command.metadata.authorization,
+                    permission="ai.invoke",
+                    tenant_id=command.tenant_id,
+                    workspace_id=command.workspace_id,
+                )
                 statement = self._payload_string(skill_input.payload, "statement").strip()
                 source = self._repository.resolve_authoritative_result(
                     skill_input.authoritative_result_id,
@@ -394,9 +402,21 @@ class SkillRuntime:
                 retry=failure.retry,
                 message=str(failure),
                 metadata=(
-                    {"ai_invocation_id": failure.ai_invocation_id}
+                    {
+                        "ai_invocation_id": failure.ai_invocation_id,
+                        "capability_id": definition.capability_id,
+                        "capability_contract_version_id": (
+                            definition.capability_contract_version_id
+                        ),
+                    }
                     if failure.ai_invocation_id
-                    else {"ai_invocation_id_status": "not_created"}
+                    else {
+                        "ai_invocation_id_status": "not_created",
+                        "capability_id": definition.capability_id,
+                        "capability_contract_version_id": (
+                            definition.capability_contract_version_id
+                        ),
+                    }
                 ),
                 predecessor_result_id=acknowledgement.result_id,
             )
@@ -424,11 +444,56 @@ class SkillRuntime:
                 severity=ErrorSeverity.ERROR,
                 retry=RetryClassification.REQUIRES_POLICY_EVALUATION,
                 message="The execution attempt failed.",
+                metadata={
+                    "ai_invocation_id_status": "not_created",
+                    "capability_id": definition.capability_id,
+                    "capability_contract_version_id": definition.capability_contract_version_id,
+                },
                 predecessor_result_id=acknowledgement.result_id,
             )
             record.state = ExecutionState.FAILED
             event_type = "ExecutionAttemptFailed"
         else:
+            is_authoritative_bypass = bool(output.reused_result_id)
+            terminal_metadata: dict[str, object] = {
+                "memory_id": output.memory_id,
+                "capability_id": definition.capability_id,
+                "capability_contract_version_id": definition.capability_contract_version_id,
+                "normalized_input_digest": (
+                    hashlib.sha256(
+                        self._payload_string(skill_input.payload, "statement").strip().encode()
+                    ).hexdigest()
+                    if definition.capability_id == "StructuredTaskKindClassification"
+                    else ""
+                ),
+                "reused_result_id": output.reused_result_id or "",
+                "execution_disposition": (
+                    "authoritative_result_bypass"
+                    if is_authoritative_bypass
+                    else "gateway_accepted_ai_execution"
+                ),
+                "avoided_model_calls": 1 if is_authoritative_bypass else 0,
+                "avoided_input_tokens": 256 if is_authoritative_bypass else 0,
+                "avoided_output_tokens": 16 if is_authoritative_bypass else 0,
+                "avoided_cost": "0.01" if is_authoritative_bypass else "0",
+            }
+            if definition.capability_id == "StructuredTaskKindClassification":
+                terminal_metadata.update(
+                    {
+                        "prompt_package_ref": capability.prompt_package_ref,
+                        "prompt_package_version_ref": capability.prompt_package_version_ref,
+                        "output_schema_ref": capability.output_schema_ref,
+                    }
+                )
+            if is_authoritative_bypass:
+                terminal_metadata.update(
+                    {
+                        "ai_invocation_id_status": "no_ai_invocation_by_design",
+                        "reuse_lineage": output.reused_result_id,
+                    }
+                )
+            else:
+                terminal_metadata["ai_invocation_id"] = output.ai_invocation_id
             terminal = self._outcomes.succeeded(
                 subject=command.execution_id,
                 producer=self.component_name,
@@ -438,24 +503,7 @@ class SkillRuntime:
                 causation_id=command.command_id,
                 command_id=command.command_id,
                 value_reference=output.value,
-                metadata={
-                    "memory_id": output.memory_id,
-                    "ai_invocation_id": output.ai_invocation_id,
-                    "capability_id": definition.capability_id,
-                    "capability_contract_version_id": definition.capability_contract_version_id,
-                    "normalized_input_digest": (
-                        hashlib.sha256(
-                            self._payload_string(skill_input.payload, "statement").strip().encode()
-                        ).hexdigest()
-                        if definition.capability_id == "StructuredTaskKindClassification"
-                        else ""
-                    ),
-                    "reused_result_id": output.reused_result_id or "",
-                    "avoided_model_calls": 1 if output.reused_result_id else 0,
-                    "avoided_input_tokens": 256 if output.reused_result_id else 0,
-                    "avoided_output_tokens": 16 if output.reused_result_id else 0,
-                    "avoided_cost": "0.01" if output.reused_result_id else "0",
-                },
+                metadata=terminal_metadata,
                 predecessor_result_id=acknowledgement.result_id,
             )
             error = None
@@ -485,6 +533,7 @@ class SkillRuntime:
             message=message,
         )
         self._repository.remember_completed_command(command, result, error)
+        self._observe(command, result)
         return result
 
     def _event_envelope(
@@ -533,7 +582,11 @@ class SkillRuntime:
         await self._outbox.drain()
 
     def _observe(self, command: CommandEnvelope, result: ResultEnvelope) -> None:
-        structured = command.payload.get("skill_version_id") == "structured-task-kind-skill-v1"
+        structured = (
+            result.metadata.get("capability_id") == "StructuredTaskKindClassification"
+            or command.metadata.skill_version_id == "structured-task-kind-skill-v1"
+            or command.payload.get("skill_version_id") == "structured-task-kind-skill-v1"
+        )
         raw_invocation_id = result.metadata.get("ai_invocation_id")
         ai_invocation_id = raw_invocation_id if isinstance(raw_invocation_id, str) else None
         context = ObservabilityContext(
@@ -570,17 +623,26 @@ class SkillRuntime:
                 and isinstance(reused_result_id, str)
                 and bool(reused_result_id)
             )
-            invoked = ai_invocation_id is not None
-            count_status = "canonical_store" if invoked else "not_applicable"
+            invoked = bool(ai_invocation_id)
+            rejected = result.result_status is ResultStatus.REJECTED
+            count_status = "canonical_store" if invoked else "not_exposed"
             attributes = {
                 "capability_id": "StructuredTaskKindClassification",
                 "capability_contract_version_id": "1",
                 "prompt_package_ref": "structured-task-kind",
                 "prompt_package_version_ref": "v1",
-                "disposition": "bypassed" if bypassed else "invoked" if invoked else "not_invoked",
+                "disposition": (
+                    "authoritative_result_bypass"
+                    if bypassed
+                    else "gateway_accepted_ai_execution"
+                    if invoked
+                    else "pre_acceptance_rejection"
+                    if rejected
+                    else "not_invoked"
+                ),
                 "terminal_outcome": result.result_status.value,
                 "accounting_correlation": (
-                    "not_applicable"
+                    "no_ai_invocation_by_design"
                     if bypassed
                     else "ai_invocation_id"
                     if invoked

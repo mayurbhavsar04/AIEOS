@@ -2485,7 +2485,8 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
     assert first_delivery == duplicate
     result = recovered_runtime.execution_repository.records["execution-authoritative-reuse"].result
     assert result is not None and result.metadata["reused_result_id"] == source.result_id
-    assert result.metadata["ai_invocation_id"] == ""
+    assert "ai_invocation_id" not in result.metadata
+    assert result.metadata["ai_invocation_id_status"] == "no_ai_invocation_by_design"
     async with database.transaction() as session:
         assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
     await recovered.close()

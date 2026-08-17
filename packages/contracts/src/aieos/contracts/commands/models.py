@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,6 +31,10 @@ class CommandMetadata:
             raise ValueError("attempt number must be positive")
         if self.authoritative_result_id is not None and not self.authoritative_result_id.strip():
             raise ValueError("AuthoritativeResultId must be a non-empty opaque ResultId")
+        if self.authoritative_result_id is not None and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", self.authoritative_result_id
+        ):
+            raise ValueError("AuthoritativeResultId must be a well-formed opaque ResultId")
 
 
 @dataclass(frozen=True, slots=True)

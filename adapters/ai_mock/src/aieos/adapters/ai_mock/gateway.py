@@ -98,6 +98,7 @@ class MockProviderBehavior(StrEnum):
     CANCELLED = "cancelled"
     MALFORMED = "malformed"
     LOW_CONFIDENCE = "low_confidence"
+    DEGRADED = "degraded"
     MISSING_USAGE = "missing_usage"
     MID_STREAM_FAILURE = "mid_stream_failure"
 
@@ -217,50 +218,10 @@ class DeterministicMockProvider:
         if behavior is MockProviderBehavior.MALFORMED:
             content = "not-json"
         elif request.output_schema_ref == "structured-task-kind-schema-v1":
-            normalized = request.prompt.strip()
-            first = normalized.split(maxsplit=1)[0].lower().rstrip(".,!?")
-            if normalized.endswith("?"):
-                kind = "Question"
-            elif first in {
-                "add",
-                "apply",
-                "avoid",
-                "build",
-                "check",
-                "count",
-                "create",
-                "delete",
-                "do",
-                "fail",
-                "keep",
-                "leave",
-                "limit",
-                "list",
-                "measure",
-                "normalize",
-                "open",
-                "preserve",
-                "propagate",
-                "record",
-                "reject",
-                "remove",
-                "report",
-                "resolve",
-                "return",
-                "run",
-                "select",
-                "send",
-                "stop",
-                "update",
-                "use",
-                "validate",
-                "verify",
-                "write",
-            }:
-                kind = "Instruction"
+            if behavior is MockProviderBehavior.DEGRADED:
+                content = json.dumps({"task_kind": "Statement"})
             else:
-                kind = "Statement"
-            content = json.dumps({"task_kind": kind})
+                content = json.dumps({"task_kind": self._surface_form_task_kind(request.prompt)})
         elif request.output_schema_ref == "analysis-v1":
             content = json.dumps(
                 {"result": {"summary": request.prompt.strip(), "items": [model_key]}}
@@ -282,6 +243,41 @@ class DeterministicMockProvider:
         if effect_key is not None:
             self._effects[effect_key] = result
         return result
+
+    @staticmethod
+    def _surface_form_task_kind(prompt: str) -> str:
+        """Offline model-boundary double based only on input surface form.
+
+        It has no protected-fixture import, expected-label parameter, or row
+        identity.  Questions are punctuated interrogatives; declarative clauses
+        begin with a determiner/pronoun; every other imperative-form sentence is
+        treated as an instruction.  Gateway remains responsible for schema
+        validation and repair of this provider's emitted JSON.
+        """
+        statement = prompt.strip()
+        if statement.endswith("?"):
+            return "Question"
+        first = statement.split(maxsplit=1)[0].lower().rstrip(".,!?")
+        declarative_openers = {
+            "a",
+            "an",
+            "the",
+            "this",
+            "that",
+            "these",
+            "those",
+            "i",
+            "we",
+            "you",
+            "he",
+            "she",
+            "it",
+            "they",
+            "there",
+        }
+        if first in declarative_openers:
+            return "Statement"
+        return "Instruction"
 
     async def stream(
         self, *, model_key: str, prompt: str, request: AIInvocationRequest

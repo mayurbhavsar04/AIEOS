@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import cast
 
 from aieos.ai_gateway import (
+    STRUCTURED_TASK_KIND_SCHEMA,
     AIInvocationRequest,
     AIInvocationResponse,
     PackageState,
@@ -129,15 +130,6 @@ class CapabilityPolicyContext:
             raise ValueError("verified capability policy context is incomplete")
 
 
-STRUCTURED_TASK_KIND_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "task_kind": {"type": "string", "enum": ["Question", "Instruction", "Statement"]}
-    },
-    "required": ["task_kind"],
-    "additionalProperties": False,
-}
-
 STRUCTURED_TASK_KIND_PACKAGE = PromptPackage(
     reference="structured-task-kind",
     version_reference="v1",
@@ -229,6 +221,8 @@ class StructuredTaskKindClassification:
                 system_instruction_ref=package.system_instruction_reference,
                 response_mode=ResponseMode.STRUCTURED,
                 output_schema_ref=package.output_schema_reference,
+                output_schema=package.output_schema,
+                output_schema_identity=package.identity,
                 required_capabilities=frozenset({"structured"}),
                 max_input_tokens=package.max_input_tokens,
                 max_output_tokens=package.max_output_tokens,
@@ -297,6 +291,7 @@ def exact_accuracy(
 class EvaluationResult:
     accuracy: Decimal
     per_class_recall: Mapping[TaskKind, Decimal]
+    confusion: Mapping[TaskKind, Mapping[TaskKind, int]]
     passed: bool
 
 
@@ -304,7 +299,7 @@ def evaluate_predictions(
     expected: tuple[TaskKind, ...], actual: tuple[TaskKind, ...]
 ) -> EvaluationResult:
     if not expected or len(expected) != len(actual):
-        return EvaluationResult(Decimal("0"), {}, False)
+        return EvaluationResult(Decimal("0"), {}, {}, False)
     correct = sum(left is right for left, right in zip(expected, actual, strict=True))
     accuracy = Decimal(correct) / Decimal(len(expected))
     recall = {
@@ -316,9 +311,20 @@ def evaluate_predictions(
         / Decimal(sum(left is kind for left in expected))
         for kind in TaskKind
     }
+    confusion = {
+        expected_kind: {
+            actual_kind: sum(
+                left is expected_kind and right is actual_kind
+                for left, right in zip(expected, actual, strict=True)
+            )
+            for actual_kind in TaskKind
+        }
+        for expected_kind in TaskKind
+    }
     return EvaluationResult(
         accuracy,
         recall,
+        confusion,
         accuracy >= Decimal("0.95") and all(value >= Decimal("0.90") for value in recall.values()),
     )
 
