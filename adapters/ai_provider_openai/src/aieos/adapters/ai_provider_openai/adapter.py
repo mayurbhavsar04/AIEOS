@@ -54,6 +54,17 @@ _SCHEMAS: dict[str, dict[str, object]] = {
 }
 
 
+def _provider_json(value: object) -> object:
+    """Translate canonical JSON material only; never redefine schema semantics."""
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
+        return {str(key): _provider_json(item) for key, item in mapping.items()}
+    if isinstance(value, tuple):
+        sequence = cast(tuple[object, ...], value)
+        return [_provider_json(item) for item in sequence]
+    return value
+
+
 class OpenAIProviderAdapter:
     key = "openai-responses"
 
@@ -265,7 +276,7 @@ class OpenAIProviderAdapter:
         }
         if request.response_mode is ResponseMode.STRUCTURED:
             schema_ref = request.output_schema_ref or ""
-            schema = _SCHEMAS.get(schema_ref)
+            schema = request.output_schema or _SCHEMAS.get(schema_ref)
             if schema is None:
                 raise ProviderFailure("AI_SCHEMA_NOT_SUPPORTED", retryable=False)
             payload["text"] = {
@@ -273,7 +284,7 @@ class OpenAIProviderAdapter:
                     "type": "json_schema",
                     "name": schema_ref.replace("-", "_"),
                     "strict": True,
-                    "schema": schema,
+                    "schema": _provider_json(schema),
                 }
             }
         return payload

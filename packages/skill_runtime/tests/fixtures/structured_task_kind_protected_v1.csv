@@ -1,0 +1,101 @@
+statement,task_kind
+What is the current status?,Question
+Who owns this task?,Question
+When does the review begin?,Question
+Where is the report?,Question
+Why did the job stop?,Question
+How should this be tested?,Question
+Is the service healthy?,Question
+Can the change be reverted?,Question
+Which branch is active?,Question
+What evidence is required?,Question
+Who approved the package?,Question
+When was the result recorded?,Question
+Where are the fixtures stored?,Question
+Why is the budget bounded?,Question
+How many attempts occurred?,Question
+Is the context sufficient?,Question
+Can this run offline?,Question
+Which schema is selected?,Question
+What is the token ceiling?,Question
+Who may view the evidence?,Question
+When will CI finish?,Question
+Where is the rollback target?,Question
+Why was the request rejected?,Question
+How is cost measured?,Question
+Is tenant scope preserved?,Question
+Can providers fail over?,Question
+Which policy applies?,Question
+What result was accepted?,Question
+Who retries the workflow?,Question
+When does the deadline expire?,Question
+Where is routing decided?,Question
+Why is raw content omitted?,Question
+How is the version resolved?,Question
+Is repair permitted?,Question
+Run the validation suite.,Instruction
+Open the approved report.,Instruction
+Record the execution evidence.,Instruction
+Verify the tenant scope.,Instruction
+Reject the malformed input.,Instruction
+Select the rollback version.,Instruction
+Preserve the immutable reference.,Instruction
+Return the canonical result.,Instruction
+Check the token budget.,Instruction
+Use the offline provider mock.,Instruction
+Keep the pull request in Draft.,Instruction
+Propagate the security context.,Instruction
+Apply the deterministic bypass.,Instruction
+Normalize the gateway failure.,Instruction
+Measure the governed cost.,Instruction
+Limit the output to sixteen tokens.,Instruction
+Resolve the exact package version.,Instruction
+Do not log the raw prompt.,Instruction
+Leave workflow retries unchanged.,Instruction
+Validate the structured response.,Instruction
+Use one gateway invocation.,Instruction
+Fail closed on missing policy.,Instruction
+Keep provider details internal.,Instruction
+Run strict type checking.,Instruction
+Check dependency boundaries.,Instruction
+Preserve the event-only boundary.,Instruction
+Avoid memory writes.,Instruction
+Use minimum sufficient context.,Instruction
+Report cached token usage.,Instruction
+Count provider attempts.,Instruction
+Keep the caller provider-neutral.,Instruction
+Stop on an architecture conflict.,Instruction
+The service is healthy.,Statement
+The review begins tomorrow.,Statement
+The report is in the archive.,Statement
+The package version is immutable.,Statement
+The result contains one field.,Statement
+The input is within bounds.,Statement
+The gateway owns schema repair.,Statement
+The capability owns no retry loop.,Statement
+The workflow engine owns retries.,Statement
+The context contains no history.,Statement
+The execution was bypassed.,Statement
+The provider was invoked once.,Statement
+The budget remained available.,Statement
+The tenant scope was preserved.,Statement
+The workspace matched the policy.,Statement
+The output passed acceptance.,Statement
+The failure was normalized.,Statement
+The evidence contains no prompt.,Statement
+The route reference is internal.,Statement
+The cached token count is two.,Statement
+The reasoning token count is one.,Statement
+The cost estimate is bounded.,Statement
+The package has a rollback target.,Statement
+The catalog contains metadata only.,Statement
+The prompt pipeline owns assembly.,Statement
+The gateway owns provider routing.,Statement
+The test uses an offline mock.,Statement
+The branch remains unmerged.,Statement
+The draft status remains active.,Statement
+The contract files are unchanged.,Statement
+The event bus carries events only.,Statement
+The memory service was not called.,Statement
+The quality threshold is objective.,Statement
+The protected set is versioned.,Statement

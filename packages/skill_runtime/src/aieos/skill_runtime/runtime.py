@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+import hashlib
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import cast
 
 from aieos.ai_gateway import AIGateway
 from aieos.capability_registry import CapabilityRegistry
@@ -30,7 +32,7 @@ from aieos.observability import ObservationRecorder
 from aieos.result_error_support import OutcomeFactory
 from aieos.security_support import AuthorizationFailure, ScopeAuthorizer
 from aieos.skill_registry import SkillRegistry
-from aieos.skill_runtime.ports import Skill, SkillInput, SkillServices
+from aieos.skill_runtime.ports import Skill, SkillInput, SkillOutput, SkillServices
 
 
 class ExecutionState(StrEnum):
@@ -105,6 +107,39 @@ class InMemoryExecutionRepository:
         receipt = self.begin_command(command, result, error)
         receipt.completed = True
 
+    def resolve_authoritative_result(
+        self,
+        result_id: str,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+        capability_id: str,
+        capability_contract_version_id: str,
+        normalized_input_digest: str,
+    ) -> ResultEnvelope:
+        result = next(
+            (
+                record.result
+                for record in self.records.values()
+                if record.result and record.result.result_id == result_id
+            ),
+            None,
+        )
+        if result is None:
+            raise LookupError("authoritative Result is unavailable")
+        metadata = result.metadata
+        if (
+            result.result_status is not ResultStatus.SUCCEEDED
+            or result.tenant_id != tenant_id
+            or result.workspace_id != workspace_id
+            or metadata.get("capability_id") != capability_id
+            or metadata.get("capability_contract_version_id") != capability_contract_version_id
+            or metadata.get("normalized_input_digest") != normalized_input_digest
+            or not isinstance(result.value_reference, str)
+        ):
+            raise PermissionError("authoritative Result is incompatible or outside scope")
+        return result
+
 
 class SkillDependencyFailure(RuntimeError):
     """Normalized failure raised by approved Skill code."""
@@ -113,12 +148,33 @@ class SkillDependencyFailure(RuntimeError):
         self,
         message: str,
         *,
+        status: ResultStatus = ResultStatus.FAILED,
         category: ErrorCategory = ErrorCategory.DEPENDENCY_FAILURE,
         retry: RetryClassification = RetryClassification.REQUIRES_POLICY_EVALUATION,
+        error_code: str = "SKILL_DEPENDENCY_FAILURE",
+        ai_invocation_id: str | None = None,
     ) -> None:
         super().__init__(message)
+        self.status = status
         self.category = category
         self.retry = retry
+        self.error_code = error_code
+        self.ai_invocation_id = ai_invocation_id
+
+    @classmethod
+    def from_gateway(cls, response: object) -> SkillDependencyFailure:
+        error = getattr(response, "error", None)
+        result = getattr(response, "result", None)
+        if error is None:
+            return cls("AI Gateway returned a normalized terminal failure")
+        return cls(
+            error.message,
+            status=getattr(result, "result_status", ResultStatus.FAILED),
+            category=error.error_category,
+            retry=error.retry_classification,
+            error_code=error.error_code,
+            ai_invocation_id=getattr(response, "ai_invocation_id", None),
+        )
 
 
 class SkillRuntime:
@@ -187,7 +243,13 @@ class SkillRuntime:
         ):
             return self._reject(command, "SKILL_CONTEXT_INVALID", "execution context is incomplete")
 
-        skill_version_id = self._payload_string(command.payload, "skill_version_id")
+        skill_version_id = (
+            command.metadata.skill_version_id
+            if command.command_version in {"2", "2.0"}
+            else self._payload_string(command.payload, "skill_version_id")
+        )
+        if not skill_version_id:
+            return self._reject(command, "SKILL_CONTEXT_INVALID", "SkillVersionId is required")
         definition = self._skills.resolve(skill_version_id)
         capability = self._capabilities.resolve(
             definition.capability_id, definition.capability_contract_version_id
@@ -204,6 +266,16 @@ class SkillRuntime:
             return self._reject(
                 command, "SKILL_IMPLEMENTATION_MISSING", "approved Skill implementation unavailable"
             )
+        binding_validator = getattr(implementation, "validate_registry_binding", None)
+        if callable(binding_validator):
+            try:
+                binding_validator(capability)
+            except (LookupError, ValueError):
+                return self._reject(
+                    command,
+                    "CAPABILITY_PACKAGE_BINDING_MISMATCH",
+                    "Capability Registry and immutable package/schema evidence disagree",
+                )
 
         if receipt is None:
             acknowledgement = self._outcomes.accepted(
@@ -252,12 +324,55 @@ class SkillRuntime:
             correlation_id=command.correlation_id,
             causation_id=command.command_id,
             authorization=command.metadata.authorization,
-            payload=command.payload,
+            payload={
+                key: value
+                for key, value in command.payload.items()
+                if key not in {"skill_version_id", "timeout_seconds"}
+            },
+            authoritative_result_id=command.metadata.authoritative_result_id,
         )
+        reused_result_id: str | None = None
         try:
-            output = await asyncio.wait_for(
-                implementation.execute(skill_input, self._services), timeout=timeout
-            )
+            if skill_input.authoritative_result_id is not None:
+                self._authorizer.require(
+                    command.metadata.authorization,
+                    permission="result.read",
+                    tenant_id=command.tenant_id,
+                    workspace_id=command.workspace_id,
+                )
+                # A reusable Result never grants execution authority.  The
+                # target capability has a separate invocation authorization.
+                self._authorizer.require(
+                    command.metadata.authorization,
+                    permission="ai.invoke",
+                    tenant_id=command.tenant_id,
+                    workspace_id=command.workspace_id,
+                )
+                statement = self._payload_string(skill_input.payload, "statement").strip()
+                source = self._repository.resolve_authoritative_result(
+                    skill_input.authoritative_result_id,
+                    tenant_id=command.tenant_id,
+                    workspace_id=command.workspace_id,
+                    capability_id=definition.capability_id,
+                    capability_contract_version_id=definition.capability_contract_version_id,
+                    normalized_input_digest=hashlib.sha256(statement.encode()).hexdigest(),
+                )
+                reuse_validator = getattr(implementation, "validate_reused_output", None)
+                if not callable(reuse_validator):
+                    raise ValueError("Capability cannot validate authoritative reused output")
+                validator = cast(Callable[[str], str], reuse_validator)
+                assert source.value_reference is not None
+                reused_value = validator(source.value_reference)
+                # The authoritative store is the source of truth for reuse
+                # evidence.  Retain that identity directly after validation
+                # rather than deriving terminal accounting from a transport
+                # field on SkillOutput.
+                reused_result_id = source.result_id
+                output = SkillOutput(reused_value, "", "", reused_result_id)
+            else:
+                output = await asyncio.wait_for(
+                    implementation.execute(skill_input, self._services), timeout=timeout
+                )
         except TimeoutError:
             terminal, error = self._outcomes.unsuccessful(
                 status=ResultStatus.TIMED_OUT,
@@ -279,7 +394,7 @@ class SkillRuntime:
             event_type = "ExecutionAttemptTimedOut"
         except SkillDependencyFailure as failure:
             terminal, error = self._outcomes.unsuccessful(
-                status=ResultStatus.FAILED,
+                status=failure.status,
                 subject=command.execution_id,
                 producer=self.component_name,
                 tenant_id=command.tenant_id,
@@ -287,15 +402,39 @@ class SkillRuntime:
                 correlation_id=command.correlation_id,
                 causation_id=command.command_id,
                 command_id=command.command_id,
-                error_code="SKILL_DEPENDENCY_FAILURE",
+                error_code=failure.error_code,
                 category=failure.category,
                 severity=ErrorSeverity.WARNING,
                 retry=failure.retry,
                 message=str(failure),
+                metadata=(
+                    {
+                        "ai_invocation_id": failure.ai_invocation_id,
+                        "capability_id": definition.capability_id,
+                        "capability_contract_version_id": (
+                            definition.capability_contract_version_id
+                        ),
+                    }
+                    if failure.ai_invocation_id
+                    else {
+                        "ai_invocation_id_status": "not_created",
+                        "capability_id": definition.capability_id,
+                        "capability_contract_version_id": (
+                            definition.capability_contract_version_id
+                        ),
+                    }
+                ),
                 predecessor_result_id=acknowledgement.result_id,
             )
-            record.state = ExecutionState.FAILED
-            event_type = "ExecutionAttemptFailed"
+            if failure.status is ResultStatus.TIMED_OUT:
+                record.state = ExecutionState.TIMED_OUT
+                event_type = "ExecutionAttemptTimedOut"
+            elif failure.status is ResultStatus.CANCELLED:
+                record.state = ExecutionState.CANCELLED
+                event_type = "ExecutionAttemptFailed"
+            else:
+                record.state = ExecutionState.FAILED
+                event_type = "ExecutionAttemptFailed"
         except Exception:
             terminal, error = self._outcomes.unsuccessful(
                 status=ResultStatus.FAILED,
@@ -311,11 +450,56 @@ class SkillRuntime:
                 severity=ErrorSeverity.ERROR,
                 retry=RetryClassification.REQUIRES_POLICY_EVALUATION,
                 message="The execution attempt failed.",
+                metadata={
+                    "ai_invocation_id_status": "not_created",
+                    "capability_id": definition.capability_id,
+                    "capability_contract_version_id": definition.capability_contract_version_id,
+                },
                 predecessor_result_id=acknowledgement.result_id,
             )
             record.state = ExecutionState.FAILED
             event_type = "ExecutionAttemptFailed"
         else:
+            is_authoritative_bypass = reused_result_id is not None
+            terminal_metadata: dict[str, object] = {
+                "memory_id": output.memory_id,
+                "capability_id": definition.capability_id,
+                "capability_contract_version_id": definition.capability_contract_version_id,
+                "normalized_input_digest": (
+                    hashlib.sha256(
+                        self._payload_string(skill_input.payload, "statement").strip().encode()
+                    ).hexdigest()
+                    if definition.capability_id == "StructuredTaskKindClassification"
+                    else ""
+                ),
+                "reused_result_id": reused_result_id or "",
+                "execution_disposition": (
+                    "authoritative_result_bypass"
+                    if is_authoritative_bypass
+                    else "gateway_accepted_ai_execution"
+                ),
+                "avoided_model_calls": 1 if is_authoritative_bypass else 0,
+                "avoided_input_tokens": 256 if is_authoritative_bypass else 0,
+                "avoided_output_tokens": 16 if is_authoritative_bypass else 0,
+                "avoided_cost": "0.01" if is_authoritative_bypass else "0",
+            }
+            if definition.capability_id == "StructuredTaskKindClassification":
+                terminal_metadata.update(
+                    {
+                        "prompt_package_ref": capability.prompt_package_ref,
+                        "prompt_package_version_ref": capability.prompt_package_version_ref,
+                        "output_schema_ref": capability.output_schema_ref,
+                    }
+                )
+            if is_authoritative_bypass:
+                terminal_metadata.update(
+                    {
+                        "ai_invocation_id_status": "no_ai_invocation_by_design",
+                        "reuse_lineage": reused_result_id,
+                    }
+                )
+            else:
+                terminal_metadata["ai_invocation_id"] = output.ai_invocation_id
             terminal = self._outcomes.succeeded(
                 subject=command.execution_id,
                 producer=self.component_name,
@@ -325,10 +509,7 @@ class SkillRuntime:
                 causation_id=command.command_id,
                 command_id=command.command_id,
                 value_reference=output.value,
-                metadata={
-                    "memory_id": output.memory_id,
-                    "ai_invocation_id": output.ai_invocation_id,
-                },
+                metadata=terminal_metadata,
                 predecessor_result_id=acknowledgement.result_id,
             )
             error = None
@@ -358,6 +539,7 @@ class SkillRuntime:
             message=message,
         )
         self._repository.remember_completed_command(command, result, error)
+        self._observe(command, result)
         return result
 
     def _event_envelope(
@@ -406,6 +588,13 @@ class SkillRuntime:
         await self._outbox.drain()
 
     def _observe(self, command: CommandEnvelope, result: ResultEnvelope) -> None:
+        structured = (
+            result.metadata.get("capability_id") == "StructuredTaskKindClassification"
+            or command.metadata.skill_version_id == "structured-task-kind-skill-v1"
+            or command.payload.get("skill_version_id") == "structured-task-kind-skill-v1"
+        )
+        raw_invocation_id = result.metadata.get("ai_invocation_id")
+        ai_invocation_id = raw_invocation_id if isinstance(raw_invocation_id, str) else None
         context = ObservabilityContext(
             component_identity=self.component_name,
             operation_name="execute_attempt",
@@ -413,8 +602,12 @@ class SkillRuntime:
             observed_at=self._clock.now(),
             environment_identity="local",
             deployment_identity="reference",
-            data_classification=DataClassification.NON_SENSITIVE,
-            redaction_status=RedactionStatus.NOT_REQUIRED,
+            data_classification=(
+                DataClassification.INTERNAL if structured else DataClassification.NON_SENSITIVE
+            ),
+            redaction_status=RedactionStatus.APPLIED
+            if structured
+            else RedactionStatus.NOT_REQUIRED,
             tenant_id=command.tenant_id,
             workspace_id=command.workspace_id,
             correlation_id=command.correlation_id,
@@ -424,9 +617,52 @@ class SkillRuntime:
             workflow_id=command.workflow_id,
             workflow_step_id=command.workflow_step_id,
             execution_id=command.execution_id,
+            ai_invocation_id=ai_invocation_id or None,
             result_id=result.result_id,
             error_id=result.error_id,
         )
+        attributes: dict[str, object] = {}
+        if structured:
+            reused_result_id = result.metadata.get("reused_result_id")
+            bypassed = (
+                result.result_status is ResultStatus.SUCCEEDED
+                and isinstance(reused_result_id, str)
+                and bool(reused_result_id)
+            )
+            invoked = bool(ai_invocation_id)
+            rejected = result.result_status is ResultStatus.REJECTED
+            count_status = "canonical_store" if invoked else "not_exposed"
+            attributes = {
+                "capability_id": "StructuredTaskKindClassification",
+                "capability_contract_version_id": "1",
+                "prompt_package_ref": "structured-task-kind",
+                "prompt_package_version_ref": "v1",
+                "disposition": (
+                    "authoritative_result_bypass"
+                    if bypassed
+                    else "gateway_accepted_ai_execution"
+                    if invoked
+                    else "pre_acceptance_rejection"
+                    if rejected
+                    else "not_invoked"
+                ),
+                "terminal_outcome": result.result_status.value,
+                "accounting_correlation": (
+                    "no_ai_invocation_by_design"
+                    if bypassed
+                    else "ai_invocation_id"
+                    if invoked
+                    else "not_created"
+                ),
+                "bypass_reason": "authoritative_result_reuse" if bypassed else "not_applicable",
+                "avoided_input_tokens": 256 if bypassed else 0,
+                "avoided_output_tokens": 16 if bypassed else 0,
+                "avoided_cost": "0.01" if bypassed else "0",
+                "provider_attempt_count_status": count_status,
+                "repair_attempt_count_status": count_status,
+                "fallback_attempt_count_status": count_status,
+                "total_model_call_count_status": count_status,
+            }
         self._observations.record_log(
             context=context,
             severity=(
@@ -435,6 +671,7 @@ class SkillRuntime:
                 else LogSeverity.ERROR
             ),
             message=f"Execution attempt reached {result.result_status.value}.",
+            attributes=attributes,
         )
 
     @staticmethod

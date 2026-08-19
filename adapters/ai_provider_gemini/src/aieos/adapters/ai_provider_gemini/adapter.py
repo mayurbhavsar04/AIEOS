@@ -54,6 +54,17 @@ _SCHEMAS: dict[str, dict[str, object]] = {
 }
 
 
+def _provider_json(value: object) -> object:
+    """Translate canonical JSON material only; never redefine schema semantics."""
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
+        return {str(key): _provider_json(item) for key, item in mapping.items()}
+    if isinstance(value, tuple):
+        sequence = cast(tuple[object, ...], value)
+        return [_provider_json(item) for item in sequence]
+    return value
+
+
 class GeminiProviderAdapter:
     key = "gemini-generate-content"
 
@@ -208,11 +219,14 @@ class GeminiProviderAdapter:
             "temperature": 0,
         }
         if request.response_mode is ResponseMode.STRUCTURED:
-            schema = _SCHEMAS.get(request.output_schema_ref or "")
+            schema = request.output_schema or _SCHEMAS.get(request.output_schema_ref or "")
             if schema is None:
                 raise ProviderFailure("AI_SCHEMA_NOT_SUPPORTED", retryable=False)
             generation.update(
-                {"responseMimeType": "application/json", "responseJsonSchema": schema}
+                {
+                    "responseMimeType": "application/json",
+                    "responseJsonSchema": _provider_json(schema),
+                }
             )
         return {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],

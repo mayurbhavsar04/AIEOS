@@ -59,6 +59,7 @@ from aieos.ai_gateway import (
 )
 from aieos.ai_gateway.gateway import CachedContent, ExecutionOwnershipLost, ProviderFailure
 from aieos.contracts import AuthorizationContext, ResultEnvelope, ResultStatus
+from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.contracts.events import EventEnvelope, EventMetadata
 from aieos.security_support import ScopeAuthorizer
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
@@ -2410,4 +2411,157 @@ async def test_memory_terminal_checkpoint_rolls_back_and_redelivery_is_exactly_o
             )
             == 1
         )
+    await recovered.close()
+
+
+async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_zero_call(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    first = compose(settings)
+    runtime = first.reference_runtime
+    await runtime.run("seed durable workflow parents")
+    workflow = next(iter(runtime.workflow_repository.instances.values()))
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    base = CommandEnvelope(
+        command_id="command-authoritative-source",
+        command_type="DispatchExecutionAttempt",
+        command_version="1.0",
+        correlation_id="correlation-authoritative-source",
+        causation_id="workflow-authoritative-source",
+        target_component="Skill Runtime",
+        initiator="Workflow Engine",
+        timestamp=datetime(2026, 8, 15, tzinfo=UTC),
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        workflow_id=workflow.workflow_id,
+        workflow_step_id=workflow.workflow_step_id,
+        execution_id="execution-authoritative-source",
+        payload={
+            "skill_version_id": "structured-task-kind-skill-v1",
+            "statement": "What is the status?",
+        },
+        metadata=CommandMetadata(
+            request_id="request-authoritative-source",
+            idempotency_key="idem-authoritative-source",
+            attempt_number=2,
+            authorization=runtime.authorization,
+        ),
+    )
+    await runtime.run_execution_command(base)
+    source = runtime.execution_repository.records["execution-authoritative-source"].result
+    source_error = runtime.execution_repository.records["execution-authoritative-source"].error
+    assert source is not None and source.result_status is ResultStatus.SUCCEEDED, (
+        "source authoritative result was not reusable: "
+        f"{source_error.error_code if source_error else 'missing error'}: "
+        f"{source_error.message if source_error else 'missing source error'}"
+    )
+    await first.close()
+
+    recovered = compose(settings)
+    recovered_runtime = recovered.reference_runtime
+    recovered_runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    reuse = replace(
+        base,
+        command_id="command-authoritative-reuse",
+        command_version="2",
+        correlation_id="correlation-authoritative-reuse",
+        causation_id="workflow-authoritative-reuse",
+        workflow_id=workflow.workflow_id,
+        workflow_step_id=workflow.workflow_step_id,
+        execution_id="execution-authoritative-reuse",
+        payload={"statement": "What is the status?"},
+        metadata=CommandMetadata(
+            request_id="request-authoritative-reuse",
+            idempotency_key="idem-authoritative-reuse",
+            attempt_number=3,
+            authorization=recovered_runtime.authorization,
+            skill_version_id="structured-task-kind-skill-v1",
+            authoritative_result_id=source.result_id,
+        ),
+    )
+    first_delivery, duplicate = await asyncio.gather(
+        recovered_runtime.run_execution_command(reuse),
+        recovered_runtime.run_execution_command(reuse),
+    )
+    assert first_delivery == duplicate
+    result = recovered_runtime.execution_repository.records["execution-authoritative-reuse"].result
+    error = recovered_runtime.execution_repository.records["execution-authoritative-reuse"].error
+    assert result is not None and result.metadata.get("reused_result_id") == source.result_id, (
+        result,
+        error,
+    )
+    assert "ai_invocation_id" not in result.metadata
+    assert result.metadata["ai_invocation_id_status"] == "no_ai_invocation_by_design"
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+    await recovered.close()
+
+
+async def test_structured_cancellation_uses_governed_event_and_workflow_is_terminal_after_restart(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    first = compose(settings)
+    runtime = first.reference_runtime
+    adapter = runtime.reference_ai_gateway._adapters[  # pyright: ignore[reportPrivateUsage]
+        "mock-economy"
+    ]
+    assert isinstance(adapter, DeterministicMockProvider)
+    adapter._behaviors = [MockProviderBehavior.CANCELLED]  # pyright: ignore[reportPrivateUsage]
+    command_envelope = CommandEnvelope(
+        command_id="command-structured-cancellation",
+        command_type="StartWorkflow",
+        command_version="1.0",
+        correlation_id="correlation-structured-cancellation",
+        causation_id="decision-structured-cancellation",
+        target_component="Workflow Engine",
+        initiator="Manager",
+        timestamp=datetime(2026, 8, 15, tzinfo=UTC),
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        payload={
+            "workflow_definition_id": "structured-cancellation-workflow",
+            "workflow_definition_version_id": "v1",
+            "skill_version_id": "structured-task-kind-skill-v1",
+            "max_attempts": 1,
+            "statement": "What is the status?",
+            "timeout_seconds": 5,
+        },
+        metadata=CommandMetadata(
+            request_id="request-structured-cancellation",
+            idempotency_key="idem-structured-cancellation",
+            authorization=runtime.authorization,
+        ),
+    )
+    await runtime.run_workflow_command(command_envelope)
+    workflow = next(iter(runtime.workflow_repository.instances.values()))
+    execution = next(iter(runtime.execution_repository.records.values()))
+    assert execution.result is not None
+    assert execution.result.result_status is ResultStatus.FAILED
+    assert execution.terminal_event is not None
+    assert execution.terminal_event.event_type == "ExecutionAttemptFailed"
+    assert workflow.outcome is not None and workflow.outcome.result_status is ResultStatus.FAILED
+    workflow_id = workflow.workflow_id
+    await first.close()
+
+    recovered = compose(settings)
+    for participant in recovered.reference_runtime.durable_participants:
+        await participant.prepare()
+    durable_workflow = recovered.reference_runtime.workflow_repository.instances[workflow_id]
+    assert durable_workflow.outcome is not None
+    assert durable_workflow.outcome.result_status is ResultStatus.FAILED
+    async with database.transaction() as session:
+        cancelled_events = await session.scalar(
+            select(func.count())
+            .select_from(OutboxEventRow)
+            .where(OutboxEventRow.event_type == "ExecutionAttemptCancelled")
+        )
+        assert cancelled_events == 0
     await recovered.close()

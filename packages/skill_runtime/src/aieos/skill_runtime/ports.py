@@ -20,6 +20,7 @@ class SkillInput:
     causation_id: str
     authorization: AuthorizationContext
     payload: Mapping[str, object]
+    authoritative_result_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +28,7 @@ class SkillOutput:
     value: str
     memory_id: str
     ai_invocation_id: str
+    reused_result_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

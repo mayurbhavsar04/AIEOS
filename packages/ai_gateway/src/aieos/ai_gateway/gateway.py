@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import Protocol, cast
 from uuid import uuid4
 
+from aieos.ai_gateway.prompt_pipeline import PromptPackageCatalog
 from aieos.contracts import (
     AuthorizationContext,
     DataClassification,
@@ -84,6 +85,11 @@ class AIInvocationRequest:
     system_instruction_ref: str = "reference-system-v1"
     response_mode: ResponseMode = ResponseMode.TEXT
     output_schema_ref: str | None = None
+    # A governed structured request carries the immutable package-resolved schema
+    # rather than asking the Gateway or a provider adapter to look up/redefine it.
+    # It is intentionally provider-neutral JSON Schema material.
+    output_schema: Mapping[str, object] | None = None
+    output_schema_identity: str | None = None
     required_capabilities: frozenset[str] = frozenset({"text"})
     quality_tier: int = 1
     latency_tier: int = 1
@@ -704,6 +710,7 @@ class ReferenceAIGateway:
         execution_lease: timedelta = timedelta(seconds=30),
         heartbeat_interval: float = 10.0,
         health_cooldown: timedelta = timedelta(seconds=30),
+        prompt_packages: PromptPackageCatalog | None = None,
     ) -> None:
         self._clock = clock
         self._identifiers = identifiers
@@ -720,6 +727,7 @@ class ReferenceAIGateway:
         self._health_lock = threading.Lock()
         self._cooldowns: dict[str, datetime] = {}
         self._degraded: set[str] = set()
+        self._prompt_packages = prompt_packages
 
     async def _heartbeat(
         self, invocation_id: str, owner: str, generation: int, lost: asyncio.Event
@@ -1016,6 +1024,16 @@ class ReferenceAIGateway:
                         tokens, request.max_output_tokens, estimated=True
                     )
                     attempt_cost = self._usage_cost(candidate.model_key, usage)
+                    # Admission is based on the governed envelope, but the
+                    # provider's metered result remains authoritative for the
+                    # actual execution.  Never turn a post-admission output
+                    # or cost overrun into a successful terminal response.
+                    if usage.output_tokens > request.max_output_tokens:
+                        raise ProviderFailure(
+                            "AI_OUTPUT_LIMIT_EXCEEDED", retryable=False, usage=usage
+                        )
+                    if attempt_cost > request.max_total_cost - spent:
+                        raise ProviderFailure("AI_BUDGET_OVERRUN", retryable=False, usage=usage)
                     spent += attempt_cost
                     total_input += usage.input_tokens
                     total_output += usage.output_tokens
@@ -1199,9 +1217,12 @@ class ReferenceAIGateway:
             if reservation is not None:
                 with suppress(Exception):
                     await self.store.release(invocation_id)
-            code = (
-                "AI_GATEWAY_PERSISTENCE_FAILURE"
-                if "persist" in str(error).lower()
+            error_text = str(error).lower()
+            code = invocation.last_provider_failure_code or (
+                "AI_INPUT_LIMIT_EXCEEDED"
+                if "input ceiling" in error_text
+                else "AI_GATEWAY_PERSISTENCE_FAILURE"
+                if "persist" in error_text
                 else "AI_GATEWAY_FAILURE"
             )
             response = self._failure(invocation, ProviderFailure(code, retryable=False))
@@ -1549,8 +1570,35 @@ class ReferenceAIGateway:
             raise ValueError("token budgets must be positive")
         if request.max_total_cost <= 0:
             raise ValueError("coarse budget feasibility failed")
+        if (request.output_schema is None) != (request.output_schema_identity is None):
+            raise ValueError("governed schema material and identity must be bound together")
 
     def _assemble(self, request: AIInvocationRequest, *, stage: int = 0) -> tuple[str, int, str]:
+        if (
+            self._prompt_packages is not None
+            and request.prompt_template_ref == "structured-task-kind"
+        ):
+            if stage != 0 or request.context_items:
+                raise ValueError("governed Stage 1 package forbids history or context")
+            assembled = self._prompt_packages.assemble(
+                request.prompt_template_ref,
+                request.prompt_template_version_ref,
+                {"statement": request.prompt},
+            )
+            if assembled.output_schema_reference != request.output_schema_ref:
+                raise ValueError("governed schema reference does not match the prompt package")
+            if (
+                request.output_schema != assembled.output_schema
+                or request.output_schema_identity != assembled.package_identity
+            ):
+                raise ValueError(
+                    "governed schema material does not match immutable package binding"
+                )
+            content = assembled.content
+            tokens = self._estimate(content)
+            if tokens > request.max_input_tokens:
+                raise ValueError("assembled governed prompt exceeds its input ceiling")
+            return content, tokens, assembled.package_identity
         unique: dict[tuple[str, str], ContextItem] = {}
         for item in sorted(
             request.context_items,
@@ -1883,6 +1931,10 @@ class ReferenceAIGateway:
                 usage = repaired.usage or AIUsage(
                     self._estimate(repair_prompt), request.max_output_tokens, estimated=True
                 )
+                if usage.output_tokens > request.max_output_tokens:
+                    raise ProviderFailure(
+                        "AI_OUTPUT_LIMIT_EXCEEDED", retryable=False, usage=usage
+                    ) from None
                 cost = self._usage_cost(candidate.model_key, usage)
                 if cost > remaining_cost - repair_cost:
                     raise ProviderFailure(
@@ -1941,9 +1993,64 @@ class ReferenceAIGateway:
             items = cast(list[object], raw_items)
             if not all(isinstance(item, str) for item in items):
                 raise ValueError("structured items must be strings")
+        elif request.output_schema is not None:
+            ReferenceAIGateway._validate_json_schema(request.output_schema, value)
         else:
             raise ValueError("structured output schema is unresolved")
         return json.dumps(value, sort_keys=True)
+
+    @staticmethod
+    def _validate_json_schema(schema: Mapping[str, object], value: object) -> None:
+        """Small provider-neutral JSON-Schema subset used by governed packages.
+
+        Schema semantics remain owned by Prompt Pipeline; this routine merely
+        interprets the exact resolved schema at the Gateway validation boundary.
+        """
+        schema_type = schema.get("type")
+        if schema_type == "object":
+            if not isinstance(value, dict):
+                raise ValueError("structured output must be an object")
+            object_value = cast(dict[str, object], value)
+            properties = schema.get("properties")
+            required = schema.get("required")
+            # Prompt Pipeline deep-freezes governed package content, so an
+            # immutable schema's JSON-array members are tuples at this boundary.
+            if not isinstance(properties, Mapping) or not isinstance(required, list | tuple):
+                raise ValueError("governed object schema is invalid")
+            property_mapping = cast(Mapping[str, object], properties)
+            required_fields = cast(list[object] | tuple[object, ...], required)
+            if schema.get("additionalProperties") is False and set(object_value) - set(
+                property_mapping
+            ):
+                raise ValueError("structured output contains unsupported properties")
+            if not all(isinstance(key, str) and key in object_value for key in required_fields):
+                raise ValueError("structured output omits a required property")
+            for key, item in property_mapping.items():
+                if key in object_value:
+                    if not isinstance(item, Mapping):
+                        raise ValueError("governed object schema is invalid")
+                    ReferenceAIGateway._validate_json_schema(
+                        cast(Mapping[str, object], item), object_value[key]
+                    )
+            return
+        if schema_type == "string":
+            if not isinstance(value, str):
+                raise ValueError("structured output value must be a string")
+            enum = schema.get("enum")
+            if enum is not None and (not isinstance(enum, list | tuple) or value not in enum):
+                raise ValueError("structured output value is outside the governed enum")
+            return
+        if schema_type == "array":
+            if not isinstance(value, list):
+                raise ValueError("structured output value must be an array")
+            items = schema.get("items")
+            if not isinstance(items, Mapping):
+                raise ValueError("governed array schema is invalid")
+            array_value = cast(list[object], value)
+            for item in array_value:
+                ReferenceAIGateway._validate_json_schema(cast(Mapping[str, object], items), item)
+            return
+        raise ValueError("governed structured output schema is unsupported")
 
     def _transition(self, invocation: GatewayInvocation, state: InvocationState) -> None:
         invocation.state = state
@@ -2005,9 +2112,26 @@ class ReferenceAIGateway:
             "ai.invocation.succeeded",
             {
                 "result_id": result.result_id,
+                "capability_id": invocation.request.capability_id,
+                "capability_contract_version_id": (
+                    invocation.request.capability_contract_version_id
+                ),
+                "prompt_package_ref": invocation.request.prompt_template_ref,
+                "prompt_package_version_ref": invocation.request.prompt_template_version_ref,
+                "disposition": "invoked",
                 "cache_hit": cache_hit,
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
+                "cached_tokens": usage.cached_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
+                "token_measurement_status": "estimated" if usage.estimated else "measured",
+                "estimated_cost": str(route.estimated_cost),
+                "actual_cost_status": "canonical_store",
+                "budget_outcome": "within_ceiling",
+                "provider_attempt_count_status": "canonical_store",
+                "repair_attempt_count_status": "canonical_store",
+                "fallback_attempt_count_status": "canonical_store",
+                "total_model_call_count_status": "canonical_store",
                 "model_key": route.model_key,
             },
         )
@@ -2055,6 +2179,13 @@ class ReferenceAIGateway:
             "ai.invocation.failed",
             {
                 "result_id": result.result_id,
+                "capability_id": invocation.request.capability_id,
+                "capability_contract_version_id": (
+                    invocation.request.capability_contract_version_id
+                ),
+                "prompt_package_ref": invocation.request.prompt_template_ref,
+                "prompt_package_version_ref": invocation.request.prompt_template_version_ref,
+                "disposition": "invoked",
                 "error_id": error.error_id,
                 "error_code": failure.code,
                 "retryable": failure.retryable,

@@ -14,8 +14,24 @@ from aieos.skill_runtime.runtime import (
     SkillDependencyFailure,
     SkillRuntime,
 )
+from aieos.skill_runtime.structured_task_kind import (
+    STRUCTURED_TASK_KIND_PACKAGE,
+    CapabilityExecutionEvidence,
+    CapabilityPolicyContext,
+    EvaluationResult,
+    StructuredTaskKindClassification,
+    StructuredTaskKindInput,
+    StructuredTaskKindResult,
+    TaskKind,
+    evaluate_predictions,
+    exact_accuracy,
+)
 
 __all__ = (
+    "STRUCTURED_TASK_KIND_PACKAGE",
+    "CapabilityExecutionEvidence",
+    "CapabilityPolicyContext",
+    "EvaluationResult",
     "ExecutionAttemptRunner",
     "ExecutionRecord",
     "ExecutionState",
@@ -26,4 +42,10 @@ __all__ = (
     "SkillOutput",
     "SkillRuntime",
     "SkillServices",
+    "StructuredTaskKindClassification",
+    "StructuredTaskKindInput",
+    "StructuredTaskKindResult",
+    "TaskKind",
+    "evaluate_predictions",
+    "exact_accuracy",
 )

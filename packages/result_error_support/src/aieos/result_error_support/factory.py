@@ -102,6 +102,7 @@ class OutcomeFactory:
         command_id: str | None = None,
         event_id: str | None = None,
         predecessor_result_id: str | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> tuple[ResultEnvelope, ErrorEnvelope]:
         if status not in {
             ResultStatus.REJECTED,
@@ -147,6 +148,7 @@ class OutcomeFactory:
             started_at=now if status is not ResultStatus.REJECTED else None,
             completed_at=now,
             error_id=error.error_id,
+            metadata=metadata or {},
             predecessor_result_id=predecessor_result_id,
         )
         return result, error

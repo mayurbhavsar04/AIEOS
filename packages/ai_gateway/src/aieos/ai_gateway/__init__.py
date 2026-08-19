@@ -20,16 +20,28 @@ from aieos.ai_gateway.gateway import (
     RouteDecision,
     StreamChunk,
 )
+from aieos.ai_gateway.prompt_pipeline import (
+    STRUCTURED_TASK_KIND_SCHEMA,
+    AssembledPrompt,
+    PackageState,
+    PromptPackage,
+    PromptPackageCatalog,
+)
 
 __all__ = (
+    "STRUCTURED_TASK_KIND_SCHEMA",
     "AIGateway",
     "AIInvocationRequest",
     "AIInvocationResponse",
     "AIUsage",
     "Acceptance",
+    "AssembledPrompt",
     "ContextItem",
     "InvocationState",
     "ModelCatalogEntry",
+    "PackageState",
+    "PromptPackage",
+    "PromptPackageCatalog",
     "ProviderAdapter",
     "ProviderEffectBoundary",
     "ProviderFailure",
