@@ -1,9 +1,9 @@
 ---
 title: Runtime Technology Decision Records
-version: 1.0
+version: 1.1
 status: Draft
 owner: CTO / Architect
-last_updated: 2026-07-21
+last_updated: 2026-08-20
 ---
 
 # Runtime Technology Decision Records
@@ -36,6 +36,7 @@ These TDRs apply the repository's ADR discipline to implementation choices witho
 | [TDR-022](TDR-022-AI-Usage-and-Cost-Accounting.md) | AI usage and cost accounting |
 | [TDR-023](TDR-023-First-Real-AI-Provider.md) | OpenAI as the first, non-exclusive real provider adapter |
 | [TDR-024](TDR-024-Second-Provider-and-Failover.md) | Gemini as provider #2 and bounded cross-provider failover |
+| [TDR-025](TDR-025-Workflow-AI-Budget-and-Recovery.md) | Workflow AI budget envelope and recovery semantics |
 
 Every record includes context, drivers, options, rationale, consequences, frozen-baseline compatibility, and revisit triggers. Changes to a frozen baseline require the higher governance path, not a TDR alone.
 
