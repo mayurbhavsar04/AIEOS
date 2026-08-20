@@ -1,9 +1,9 @@
 ---
 title: Engineering Specifications
-version: 1.5
+version: 1.6
 status: Approved
 owner: Founding Team
-last_updated: 2026-08-15
+last_updated: 2026-08-20
 ---
 
 # Engineering Specifications
@@ -210,6 +210,7 @@ Changes to canonical domain concepts, aggregate ownership, identities, commands,
 | [ES-014](ES-014-First-Real-AI-Provider-Adapter.md) | First Real AI Provider Adapter | Implemented |
 | [ES-015](ES-015-Multi-Provider-Routing-and-Failover.md) | Multi-Provider Routing and Failover | Frozen Phase 4 baseline (source status: Proposed) |
 | [ES-016](ES-016-Governed-Structured-AI-Capability-Execution.md) | Governed Structured AI Capability Execution | Approved |
+| [ES-017](ES-017-Governed-AI-Workflow-Execution.md) | Governed AI Workflow Execution | Draft |
 
 ES-015's source header remains `Proposed`; the immutable Phase 4 merge/tag nevertheless freezes its
 implemented governance baseline. The index records both facts rather than treating `Proposed` as an
@@ -219,6 +220,7 @@ unfrozen Phase 4 deliverable.
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.6 | 2026-08-20 | CTO / Architect | Added ES-017 as a Phase 6 governance Draft; no implementation is authorized. |
 | 1.5 | 2026-08-15 | CTO / Architect | Recorded approval of ES-004 v1.2, ES-006 v1.2, and ES-016 v0.7 after focused CTO review of `210df6491397b57875edf9942da009341c8161e1`. |
 | 1.4 | 2026-08-14 | CTO / Architect | Returned ES-004, ES-006, and ES-016 to In Review for `DispatchExecutionAttempt` v2 authoritative-result reuse governance. |
 | 1.3 | 2026-08-13 | CTO / Architect | Recorded approval of ES-016's first-release rollback clarification. |
