@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aieos.dev/contracts/workflow-ai-budget-envelope/v1",
+  "title": "Workflow AI Budget Envelope v1",
+  "description": "Normative typed, immutable, provider-neutral AI-budget member of one immutable WorkflowDefinitionVersion. The Workflow Engine durably snapshots this exact value when it accepts the Workflow; this schema creates no identity and no accounting ledger.",
+  "type": "object",
+  "required": [
+    "ContractVersion",
+    "WorkflowDefinitionVersionId",
+    "PolicyId",
+    "PolicyVersionId",
+    "TenantId",
+    "WorkspaceId",
+    "BudgetCeiling"
+  ],
+  "properties": {
+    "ContractVersion": {
+      "const": 1,
+      "description": "The complete interpretation version of this envelope. Unknown versions are rejected before an AI-capable step is dispatched."
+    },
+    "WorkflowDefinitionVersionId": {
+      "$ref": "#/$defs/opaqueId",
+      "description": "The exact immutable Workflow Definition version that contains this envelope."
+    },
+    "PolicyId": {
+      "$ref": "#/$defs/opaqueId",
+      "description": "The existing logical Policy identity governing this envelope; it is not a budget identity."
+    },
+    "PolicyVersionId": {
+      "$ref": "#/$defs/opaqueId",
+      "description": "The exact immutable Policy Version that authorizes the ceiling and admission semantics."
+    },
+    "TenantId": {
+      "$ref": "#/$defs/opaqueId",
+      "description": "The exact Tenant scope; it must match the accepted Workflow and Gateway accounting allocation."
+    },
+    "WorkspaceId": {
+      "$ref": "#/$defs/opaqueId",
+      "description": "The exact Workspace scope; it must match the accepted Workflow and Gateway accounting allocation."
+    },
+    "BudgetCeiling": {
+      "type": "object",
+      "required": ["Amount", "CurrencyOrReferenceUnit"],
+      "properties": {
+        "Amount": {
+          "type": "string",
+          "pattern": "^(?:0\\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\\.[0-9]+)?)$",
+          "description": "Positive base-10 decimal normalized cost ceiling. Floating-point values, negative amounts, zero, and an implicit unlimited amount are not valid."
+        },
+        "CurrencyOrReferenceUnit": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "The controlled normalized currency or reference unit used by AI Gateway ActualCost, EstimatedCost, reservations, and reconciliation for this Workflow allocation."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    }
+  },
+  "$comment": "This is a Workflow Definition/policy member, not Command metadata, a PolicyRef-only selector, an identity, a result reference, an idempotency key, or a Gateway-owned cost record. The accepted Workflow stores the exact validated member with its WorkflowId as durable admission/audit evidence."
+}
