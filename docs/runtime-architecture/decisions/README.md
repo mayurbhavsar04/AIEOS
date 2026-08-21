@@ -1,9 +1,9 @@
 ---
 title: Runtime Technology Decision Records
-version: 1.1
+version: 1.2
 status: Draft
 owner: CTO / Architect
-last_updated: 2026-08-20
+last_updated: 2026-08-21
 ---
 
 # Runtime Technology Decision Records
@@ -36,9 +36,16 @@ These TDRs apply the repository's ADR discipline to implementation choices witho
 | [TDR-022](TDR-022-AI-Usage-and-Cost-Accounting.md) | AI usage and cost accounting |
 | [TDR-023](TDR-023-First-Real-AI-Provider.md) | OpenAI as the first, non-exclusive real provider adapter |
 | [TDR-024](TDR-024-Second-Provider-and-Failover.md) | Gemini as provider #2 and bounded cross-provider failover |
-| [TDR-025](TDR-025-Workflow-AI-Budget-and-Recovery.md) | Workflow AI budget envelope and recovery semantics |
+| [TDR-025](TDR-025-Workflow-AI-Budget-and-Recovery.md) | Workflow AI budget envelope and recovery semantics (Accepted) |
 
 Every record includes context, drivers, options, rationale, consequences, frozen-baseline compatibility, and revisit triggers. Changes to a frozen baseline require the higher governance path, not a TDR alone.
+
+## Version history
+
+| Version | Date | Author | Notes |
+| --- | --- | --- | --- |
+| 1.2 | 2026-08-21 | CTO / Architect | Recorded TDR-025 as Accepted after governance review of `8e7f09bd7a036dd8935781dba6c960b196afcfef`; the mandatory separate contract-governance dependency remains in force. |
+| 1.1 | 2026-08-20 | CTO / Architect | Added TDR-025 as a Phase 6 governance proposal; no implementation is authorized. |
 
 ## Revisit-gate standard
 

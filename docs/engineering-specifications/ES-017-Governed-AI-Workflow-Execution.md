@@ -1,11 +1,11 @@
 ---
 title: ES-017 — Governed AI Workflow Execution
-version: 0.1
-status: Draft
+version: 0.2
+status: Approved
 owner: CTO / Architect
 implementer: Engineer (Codex)
 milestone: 6 Phase 6
-last_updated: 2026-08-20
+last_updated: 2026-08-21
 ---
 
 # ES-017 — Governed AI Workflow Execution
@@ -48,6 +48,7 @@ that review records a later status change.
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 0.2 | 2026-08-21 | CTO / Architect | Approved governance direction after review of `8e7f09bd7a036dd8935781dba6c960b196afcfef` with Blocking 0 / Major 0 / Minor 0; implementation remains prohibited until the separate contract-governance amendment is approved and merged. |
 | 0.1 | 2026-08-20 | CTO / Architect | Initial Phase 6 governance Draft; implementation is not authorized. |
 
 ## Scope and reference workflow

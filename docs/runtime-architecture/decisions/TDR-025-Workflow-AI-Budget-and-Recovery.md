@@ -1,7 +1,14 @@
 # TDR-025 — Workflow AI Budget Envelope and Recovery Semantics
 
-- **Status:** Proposed
+- **Version:** 1.0
+- **Status:** Accepted
 - **Date:** 2026-08-20
+
+## Decision history
+
+| Version | Date | Author | Notes |
+| --- | --- | --- | --- |
+| 1.0 | 2026-08-21 | CTO / Architect | Accepted after governance review of `8e7f09bd7a036dd8935781dba6c960b196afcfef`; implementation remains dependent on approval and merge of the mandatory separate contract-governance amendment. |
 
 ## Context
 
