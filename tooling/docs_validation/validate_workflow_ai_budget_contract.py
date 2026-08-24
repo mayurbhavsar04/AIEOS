@@ -1,3 +1,4 @@
+# pyright: basic
 """Focused Draft 2020-12 and compatibility assertions for Workflow AI budget governance."""
 
 from __future__ import annotations
