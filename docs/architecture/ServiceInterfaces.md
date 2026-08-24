@@ -134,13 +134,32 @@ inconsistent, stale, cross-scope, non-monotonic, or unit-incompatible evidence f
 dispatch. This admission projection is not a second accounting ledger and creates no
 `AIInvocationId`; Gateway retains all provider accounting and recovery authority.
 
-The serialization key is exact Tenant/Workspace/Workflow scope. One atomic Workflow transition
-checks capacity and commits the conservative maximum exposure for the immutable
-step/Command/Execution admission before any Gateway call. The fixed Gateway idempotency context then
-resolves to at most one `AIInvocationId`; acceptance-before-checkpoint is recovered through that same
-context. Release requires positive Gateway proof of non-acceptance/no effect or authoritative
-release/expiry evidence. Missing or ambiguous handoff evidence retains exposure and prohibits a new
-dispatch. The complete state and crash-window rules are normative in the envelope contract.
+The serialization key is exact Tenant/Workspace/Workflow scope. The durable logical admission key is
+the existing Tenant/Workspace/Workflow/WorkflowStep/Command/Execution tuple. One atomic Workflow
+transition checks capacity and commits the conservative maximum exposure, exact immutable
+Skill/Capability route, fixed Gateway idempotency key, and existing Workflow state-transition version
+before any Gateway call. The state-transition version is a fence, not a new identity. Workflow
+records the normative [Workflow AI Budget Admission Binding v1](schemas/workflow-ai-budget-admission-binding-v1.schema.json)
+with that commitment and puts the exact value in the directed `DispatchExecutionAttempt`.
+
+Skill Runtime revalidates the exact immutable Skill/Capability route before Gateway use. For an AI
+Gateway route it MUST require a valid binding that matches the Command's Tenant, Workspace,
+Workflow, step, Command, Execution, Skill Version, and Gateway idempotency context; it propagates
+that exact value to Gateway and cannot synthesize or substitute it. A worker without a committed or
+reusable matching admission MUST NOT call Gateway. Gateway atomically accepts/replays the fixed key
+with the exact binding and creates at most one `AIInvocationId`; it rejects missing, stale,
+released, cross-scope, mismatched, or unknown-version binding/request/evidence before provider
+preparation. The Workflow checkpoint may lag acceptance, so recovery uses the same binding and key
+and can never create a fresh dispatch.
+
+Workflow retains its committed exposure through Gateway acceptance. It replaces that contribution
+only when Gateway evidence for the same binding, Tenant/Workspace/Workflow allocation, and unit is
+sufficient: before terminal reconciliation the counted value is the greater of the committed
+conservative exposure and Gateway reservation/provider-effect exposure; terminal Gateway
+reconciliation alone may replace it with settled actual cost. Release requires positive Gateway proof
+of non-acceptance/no effect or authoritative release/expiry evidence. Missing or ambiguous handoff
+evidence retains exposure and prohibits a new dispatch. The complete state and crash-window rules are
+normative in the envelope contract.
 
 Legacy Workflow definitions without this envelope remain compatible only for steps proven non-AI
 from their immutable Skill Version/Capability Contract route. A route to AI Gateway, or a route that
@@ -198,15 +217,32 @@ replay/idempotency and returns the existing outcome. A distinct execution receiv
 `ExecutionId`, `CommandId`, idempotency scope, and terminal Result even when it reuses the
 classification.
 
+### 5.1.2 Workflow AI-budget admission binding (In Review)
+
+When the exact immutable Skill Version and Capability Contract route resolves to AI Gateway, Skill
+Runtime MUST obtain the `WorkflowAIBudgetAdmissionBinding` carried by the dispatched
+`DispatchExecutionAttempt`. It validates every common lineage/scope field against the Command,
+the Skill Version against the resolved execution, and the Capability binding against the authoritative
+catalog. It then carries the unchanged binding and same Gateway idempotency key to `InvokeAI`.
+It MUST NOT create an admission, recompute conservative exposure, issue another idempotency key,
+reuse a binding for another command/execution, or call Gateway without a matching durable committed
+admission. A resolved non-AI route does not call Gateway and has no binding requirement.
+
+Same-command replay and worker takeover load the existing execution and binding. They either reuse
+the recorded Gateway acceptance/recovery evidence for that same key or reconcile its absence; they
+never issue a second Gateway request. A binding mismatch, missing committed state, unknown route,
+current authorization/policy failure, or missing/mismatched Gateway evidence fails closed before
+Gateway/provider dispatch.
+
 ### 5.2 Public operations
 
 | Operation | Caller → target | Input and outcome | Messages | Preconditions and postconditions | Idempotency, scope, trace, cancellation, timeout, version |
 | --- | --- | --- | --- | --- | --- |
-| `DispatchExecutionAttempt` | Workflow Engine → Skill Runtime | v1: `ExecutionId`, `AttemptNumber`, `SkillVersionId`, input Context, allowed Capabilities/Tools, policy, deadline. v2 additionally permits typed metadata `AuthoritativeResultId: ResultId | absent`; it propagates only as `SkillInput.authoritative_result_id: str | None`. | Accepts directed Command; produces attempt lifecycle Events. | New immutable Execution identity, compatible Skill version, authorized scope; v2 reference checks are completed fail-closed before Gateway invocation. Success registers exactly one attempt. | Same-command replay returns its existing disposition under normal replay/idempotency semantics. A distinct execution always has a new `ExecutionId`, `CommandId`, idempotency scope, and terminal Result even when it reuses a classification. |
+| `DispatchExecutionAttempt` | Workflow Engine → Skill Runtime | v1: `ExecutionId`, `AttemptNumber`, `SkillVersionId`, input Context, allowed Capabilities/Tools, policy, deadline. v2 additionally permits typed metadata `AuthoritativeResultId: ResultId or absent` and `WorkflowAIBudgetAdmissionBinding v1 or absent`. The admission binding is required only for a route the authoritative catalog resolves to AI Gateway and is propagated unchanged to Gateway. | Accepts directed Command; produces attempt lifecycle Events. | New immutable Execution identity, compatible Skill version, authorized scope; v2 reference and AI-binding checks are completed fail-closed before Gateway invocation. Success registers exactly one attempt. | Same-command replay returns its existing disposition under normal replay/idempotency semantics and reuses its binding/Gateway evidence. A distinct execution always has a new `ExecutionId`, `CommandId`, idempotency scope, and terminal Result even when it reuses a classification. |
 | `ExecuteSkill` | Skill Runtime execution controller → Skill Runtime | Registered attempt and resolved Skill contract; returns normalized attempt outcome. | May call Capability Registry, AI Gateway, Memory Service, or Tools under declared permissions; produces terminal attempt Event. | Inputs validated and execution context restricted. Success means output contract validated. | Never reruns terminal attempt. Timeout yields `TimedOut`; cancellation yields `Cancelled`. Contract versions remain fixed. |
 | `CancelExecutionAttempt` | Workflow Engine cancellation path → Skill Runtime | Active `ExecutionId`, authority, cause; returns accepted, already terminal, or unsupported stage. | Accepts directed cancellation Command; produces an approved attempt-cancellation fact when the Event catalog defines it. | Attempt exists and scope matches. Success prevents further accepted effects where supported. | Duplicate cancellation safe. Late result cannot replace terminal outcome; reconciliation remains explicit. |
 | `GetExecutionStatus` | Authorized Workflow Engine or operator path → Skill Runtime | `ExecutionId` and scope; returns current attempt state and safe evidence. | Query only; emits no domain Event merely for reading. | Caller authorized; attempt exists. No state change. | Repeated reads safe. Query timeout has no lifecycle effect. Interface version required. |
-| `InvokeApprovedCapability` | Active Skill execution → Skill Runtime | `CapabilityId`, `CapabilityContractVersionId`, approved implementation reference, validated input; returns normalized Capability result. | Uses Capability Registry metadata; invokes approved non-AI boundary or AI Gateway where applicable. | Capability declared by Skill and policy permits it. Success does not alter Workflow state. | Bound to `ExecutionId`; duplicate external effects require capability-specific idempotency. Cancellation/deadline propagate. |
+| `InvokeApprovedCapability` | Active Skill execution → Skill Runtime | `CapabilityId`, `CapabilityContractVersionId`, approved implementation reference, validated input; returns normalized Capability result. | Uses authoritative Capability Registry metadata; invokes approved non-AI boundary or AI Gateway where applicable. | Capability declared by Skill and policy permits it. The exact immutable route, not caller metadata, determines AI capability. An AI route requires matching committed Workflow admission binding before Gateway invocation. Success does not alter Workflow state. | Bound to `ExecutionId`; duplicate external effects require capability-specific idempotency. Cancellation/deadline propagate. |
 
 ## 6. AI Gateway Interface
 
@@ -220,7 +256,7 @@ AI Gateway MUST NOT execute Skills, own Workflow retry decisions, choose product
 
 | Operation | Caller → target | Input and outcome | Messages | Preconditions and postconditions | Idempotency, scope, trace, cancellation, timeout, version |
 | --- | --- | --- | --- | --- | --- |
-| `InvokeAI` | Skill Runtime → AI Gateway | `ExecutionId`, Capability contract/version, prompt/config version, validated Context, output schema, policy and budget. An asynchronous binding returns acceptance with `AIInvocationId`; a synchronous binding returns the terminal normalized result or failure and MUST NOT label that outcome an acknowledgement. | Direct interface call or directed Command as future binding decides. For asynchronous acceptance, the terminal outcome is supplied later through the approved completion contract. Produces AI Invocation Events only after authoritative facts exist. | Caller and Capability authorized; inputs safe; provider policy available. Acceptance means receipt for processing, not completion. Terminal success means normalized output has been validated. | One logical invocation has one immutable `AIInvocationId`; bounded provider retries remain beneath it. Deadline and cancellation propagate where supported. |
+| `InvokeAI` | Skill Runtime → AI Gateway | `ExecutionId`, Capability contract/version, prompt/config version, validated Context, output schema, policy and budget. For an AI-capable Workflow route, the exact `WorkflowAIBudgetAdmissionBinding v1` and same Gateway idempotency key are also required. An asynchronous binding returns acceptance with `AIInvocationId`; a synchronous binding returns the terminal normalized result or failure and MUST NOT label that outcome an acknowledgement. | Direct interface call or directed Command as future binding decides. For asynchronous acceptance, the terminal outcome is supplied later through the approved completion contract. Produces AI Invocation Events only after authoritative facts exist. | Caller and Capability authorized; inputs safe; provider policy available. For a Workflow route, Gateway validates the binding against the durable committed admission, current fence, request lineage/scope, resolved Capability binding, and idempotency context before it accepts. Missing/mismatched evidence rejects before provider preparation. Acceptance atomically records the exact binding with one `AIInvocationId`; it is not completion or a reservation. Terminal success means normalized output has been validated. | One logical invocation has one immutable `AIInvocationId`; same-key replay/takeover returns that existing acceptance and cannot cause a second dispatch. Gateway alone owns its later reservation, effect, reconciliation, release, and repair. Deadline and cancellation propagate where supported. |
 | `CancelAIInvocation` | Skill Runtime cancellation path → AI Gateway | Active `AIInvocationId`, authority, cause; returns accepted, unsupported, or terminal. | Produces cancellation Event only when fact confirmed. | Invocation exists and scope matches. Success stops further provider work where supported. | Duplicate safe; late provider result cannot replace terminal outcome without reconciliation. |
 | `GetAIInvocationOutcome` | Authorized Skill Runtime or operator path → AI Gateway | `AIInvocationId`; returns safe normalized state, usage, and outcome metadata. | Query only. | Caller authorized; identity and scope valid. No state mutation. | Repeated reads safe; query timeout does not alter invocation. |
 
@@ -231,8 +267,8 @@ sequenceDiagram
     participant Runtime as Skill Runtime
     participant Gateway as AI Gateway
     participant Provider as Approved provider adapter
-    Runtime->>Gateway: InvokeAI with CapabilityContractVersionId
-    Gateway->>Gateway: Validate policy and create AIInvocationId
+    Runtime->>Gateway: InvokeAI with exact admission binding and CapabilityContractVersionId
+    Gateway->>Gateway: Validate committed admission, fence, policy, scope, and idempotency; create or replay AIInvocationId
     alt asynchronous binding
         Gateway-->>Runtime: Acceptance with AIInvocationId
         Gateway->>Provider: Provider-specific invocation

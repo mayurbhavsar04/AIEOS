@@ -75,6 +75,41 @@ for that logical admission in the envelope unit. It is not provider repricing or
 reservation. Once Gateway acceptance exists, the commitment points to the resulting
 `AIInvocationId` and Gateway reservation evidence; the same exposure is never counted twice.
 
+### Admission-to-Gateway binding and fenced handoff
+
+The durable logical admission key is the existing tuple
+`(TenantId, WorkspaceId, WorkflowId, WorkflowStepId, CommandId, ExecutionId)`; no admission,
+budget, reservation, or digest identity is introduced. The committed Workflow transition records
+this tuple, exact definition/policy/scope, exact immutable Skill/Capability binding, conservative
+committed exposure, the existing scoped Gateway idempotency key, and the Workflow's existing durable
+transition version. That transition version is a fence only, not an identity. The normative
+serialized value is [Workflow AI Budget Admission Binding v1](schemas/workflow-ai-budget-admission-binding-v1.schema.json).
+
+Workflow Engine creates the binding in the same atomic transition that changes the admission to
+`Committed`. Skill Runtime may only propagate the exact validated binding from the dispatched
+`DispatchExecutionAttempt`; it MUST NOT create, replace, downgrade, or use generic metadata as a
+substitute. Before calling Gateway, Skill Runtime resolves the exact immutable Skill/Capability
+route. A resolved AI Gateway route without a matching committed binding fails closed. A resolved
+non-AI route never calls Gateway and does not require a binding.
+
+Gateway atomically accepts or replays the existing scoped idempotency key together with the exact
+binding and either records one `AIInvocationId` or a rejection/no-acceptance outcome. Gateway
+validates that the binding matches the durable committed Workflow admission, current fence, request
+scope/lineage, exact Capability binding, and its idempotency context. A missing, stale, released,
+rejected, cross-scope, malformed, unknown-version, or mismatched binding/request/evidence is
+rejected before acceptance and provider preparation. This is a fenced composition of two local
+atomic transitions, not a distributed replacement of ownership: Workflow owns the commitment;
+Gateway owns acceptance, reservation, provider effect, and accounting.
+
+The Workflow commitment remains counted after acceptance. It is replaced only by matching,
+same-Tenant/Workspace/Workflow, same-unit Gateway evidence under that one `AIInvocationId`. Before
+terminal reconciliation, the counted contribution is the greater of the committed conservative
+exposure and Gateway's durable reservation or provider-effect exposure; a smaller reservation never
+creates an undercount. Only Gateway terminal reconciliation proving the remaining effect is closed
+may replace that contribution with settled actual cost and release the difference. Missing,
+mismatched, non-monotonic, ambiguous, or unit-incompatible evidence retains the conservative
+commitment and fails closed for later admissions.
+
 The durable state machine is:
 
 1. `Requested`: logical lineage and conservative maximum exposure recorded; provider dispatch is prohibited.
@@ -86,13 +121,14 @@ The durable state machine is:
 7. `Released`: permitted only when Gateway idempotency recovery proves no acceptance/provider effect, or after Gateway authoritative release/expiry evidence. A timeout or missing response alone cannot release exposure.
 8. `Rejected`: no commitment and no provider dispatch occurred.
 
-Only `Committed` may initiate the idempotent Gateway handoff. Gateway must atomically resolve the
-fixed idempotency context to either rejection/no acceptance or one existing/new `AIInvocationId`.
-The Workflow checkpoint may lag that acceptance; recovery therefore queries the same Gateway
-idempotency context and never creates a fresh logical invocation. Missing or ambiguous handoff
-evidence retains conservative exposure and prohibits new dispatch. This invariant bounds every
-dispatch by either one Workflow commitment or its corresponding Gateway evidence and prevents two
-workers from jointly exceeding the remaining ceiling.
+Only `Committed` may initiate the idempotent Gateway handoff. The binding, the dispatch request,
+and Gateway acceptance must agree on the fixed idempotency context and every logical-admission field.
+Gateway must atomically resolve that context to either rejection/no acceptance or one existing/new
+`AIInvocationId`. The Workflow checkpoint may lag that acceptance; recovery therefore queries the
+same Gateway idempotency context and binding and never creates a fresh logical invocation. Missing or
+ambiguous handoff evidence retains conservative exposure and prohibits new dispatch. This invariant
+bounds every dispatch by one committed admission or its corresponding sufficient Gateway evidence and
+prevents two workers from jointly exceeding the remaining ceiling.
 
 Missing, stale, cross-scope, non-monotonic, inconsistent, or unit-incompatible Gateway evidence
 fails closed before another AI dispatch. A budget exhaustion decision also fails closed before
@@ -106,13 +142,13 @@ accounting semantics.
 | Same logical command/replay | Reuse the recorded Workflow admission/terminal disposition. It does not double-admit, reserve, charge, create an `AIInvocationId`, or dispatch a provider call. |
 | Concurrent workers | Workflow Engine durable concurrency control serializes admission for the exact `WorkflowId`; competitors observe the recorded decision/conflict and cannot oversubscribe the ceiling. |
 | Crash before admission commit | Provider dispatch is prohibited. `Requested`/`PendingAdmission` may be retried under Workflow rules; no exposure is released because none was committed. |
-| Crash after commit, before Gateway call | Provider dispatch has not occurred. Takeover reuses the same committed admission and fixed Gateway idempotency context; it may perform that one handoff under Workflow rules. It must not create another commitment. |
-| Crash during Gateway acceptance / `AIInvocationId` creation | Outcome is ambiguous to Workflow. Commitment remains conservative; recovery resolves the same Gateway idempotency context. New dispatch is prohibited until Gateway proves rejection/no effect or returns the one accepted `AIInvocationId`. |
-| Crash after Gateway acceptance, before Workflow checkpoint | Recovery obtains the existing `AIInvocationId` and reservation/effect evidence through the same idempotency context, advances to `GatewayAccepted`/`Settling`, and never dispatches again. |
+| Crash after commit, before Gateway call | Provider dispatch has not occurred. Takeover reuses the same committed admission, binding, fence, and fixed Gateway idempotency context; it may perform that one handoff under Workflow rules. It must not create another commitment or binding. |
+| Crash during Gateway acceptance / `AIInvocationId` creation | Outcome is ambiguous to Workflow. Commitment remains conservative; recovery resolves the same idempotency context and exact binding. New dispatch is prohibited until Gateway proves rejection/no acceptance or returns the one accepted `AIInvocationId` with matching evidence. |
+| Crash after Gateway acceptance, before Workflow checkpoint | Recovery obtains the existing `AIInvocationId` and matching reservation/effect evidence through the same idempotency context and binding, advances to `GatewayAccepted`/`Settling`, and never dispatches again. |
 | Crash after provider completion, before Workflow reconciliation | Recovery reuses existing `AIInvocationId`, provider-effect, usage, reservation/reconciliation, and terminal-intent evidence. Conservative exposure remains until Gateway settlement; no new dispatch. |
 | Ambiguous provider effect | Preserve frozen `AI_PROVIDER_EFFECT_AMBIGUOUS`; do not permit an unsafe Workflow retry, Gateway failover, or additional spend while effect/accounting is ambiguous. |
-| Same-command replay | Reuse the exact admission and Gateway idempotency/recovery evidence. It cannot create a second commitment, `AIInvocationId`, reservation, charge, or dispatch. |
-| Worker takeover | Acquire serialization for the same scope key, load the durable admission, and follow its state. It cannot infer release from lease loss, timeout, or missing checkpoint. |
+| Same-command replay | Reuse the exact committed admission, binding, fence, and Gateway idempotency/recovery evidence. It cannot create a second commitment, `AIInvocationId`, reservation, charge, acceptance, or provider dispatch. |
+| Worker takeover | Acquire serialization for the same scope key, load the durable admission, and follow its state. It reuses the exact binding and idempotency context; it cannot infer release from lease loss, timeout, or missing checkpoint. |
 | Repair/failover cumulative accounting | Gateway owns all repair/failover reservation and actual-cost accumulation under the existing invocation semantics. Workflow retains conservative exposure and admits no new step until monotonic same-unit Gateway evidence proves safe remaining capacity. |
 | Deterministic bypass or valid `AuthoritativeResultId` reuse | Zero Gateway/provider cost, no fabricated `AIInvocationId`, and bounded avoided-call evidence only. |
 

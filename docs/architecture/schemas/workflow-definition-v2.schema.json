@@ -21,27 +21,33 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["WorkflowStepDefinitionId", "ExecutionBoundary"],
+        "required": ["WorkflowStepDefinitionId", "CapabilityBinding"],
         "properties": {
           "WorkflowStepDefinitionId": { "$ref": "#/$defs/opaqueId" },
-          "ExecutionBoundary": {
-            "enum": ["NON_AI", "AI_GATEWAY"],
-            "description": "Normative pre-dispatch classification. AI_GATEWAY is AI-capable; classification may not be inferred from runtime output, provider metadata, or free text."
+          "CapabilityBinding": {
+            "type": "object",
+            "required": ["SkillVersionId", "CapabilityId", "CapabilityContractVersionId"],
+            "properties": {
+              "SkillVersionId": { "$ref": "#/$defs/opaqueId" },
+              "CapabilityId": { "$ref": "#/$defs/opaqueId" },
+              "CapabilityContractVersionId": { "$ref": "#/$defs/opaqueId" }
+            },
+            "additionalProperties": false,
+            "description": "The exact immutable Skill Version and Capability Contract route. Its AI/non-AI classification is derived only from the authoritative Capability Registry catalog at definition acceptance and again before Gateway dispatch."
           }
         },
         "additionalProperties": true
       }
     }
   },
-  "allOf": [
-    {
-      "if": { "properties": { "Steps": { "contains": { "properties": { "ExecutionBoundary": { "const": "AI_GATEWAY" } }, "required": ["ExecutionBoundary"] } } }, "required": ["Steps"] },
-      "then": { "required": ["WorkflowAIBudgetEnvelope"] }
-    }
-  ],
   "additionalProperties": true,
   "$defs": {
-    "opaqueId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[!-~]+$" }
+    "opaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?![\\s\\S]*[^!-~])[!-~]+$"
+    }
   },
-  "$comment": "The envelope's WorkflowDefinitionVersionId, PolicyId, PolicyVersionId, TenantId, and WorkspaceId MUST equal the enclosing values; JSON Schema cannot express cross-field equality, so the compatibility validator enforces it. Unknown DefinitionContractVersion values are rejected and never downgraded."
+  "$comment": "The envelope's WorkflowDefinitionVersionId, PolicyId, PolicyVersionId, TenantId, and WorkspaceId MUST equal the enclosing values. Exact immutable CapabilityBinding route resolution determines AI capability, so JSON Schema alone cannot decide whether the envelope is mandatory; the required hosted compatibility validator enforces both rules. Unknown DefinitionContractVersion values are rejected and never downgraded."
 }

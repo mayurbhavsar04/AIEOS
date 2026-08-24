@@ -1,9 +1,9 @@
 ---
 title: ES-004 — Command Contract Model
-version: 1.2
-status: Approved
+version: 1.3
+status: In Review
 owner: CTO / Architect
-last_updated: 2026-08-15
+last_updated: 2026-08-24
 ---
 
 # ES-004 — Command Contract Model
@@ -18,7 +18,7 @@ last_updated: 2026-08-15
 | **Implementer** | Engineer (Codex) |
 | **Architecture baseline** | Architecture v1.0, frozen at tag `architecture-v1.0` |
 | **Domain baseline** | Domain v1.0, frozen at tag `domain-v1.0` plus governance commit on `main` |
-| **Architecture status** | Approved; governed additive Command version with a focused accepted ADR. No Domain identity, Result semantic, or component ownership changes. |
+| **Architecture status** | In Review only for the focused ADR-002 Workflow-admission binding carried by DispatchExecutionAttempt v2. The approved v1/v2 authoritative-result baseline, Domain identities, Result semantics, and component ownership remain unchanged. |
 
 ## Related Documents
 
@@ -30,7 +30,7 @@ last_updated: 2026-08-15
 | **Canonical domain reference** | [Domain Model](../architecture/DomainModel.md) |
 | **Prior specifications** | [ES-001 — Execution Core](ES-001-Execution-Core.md), [ES-002 — Execution Flow Architecture](ES-002-Execution-Flow-Architecture.md), and [ES-003 — Domain Model and Ubiquitous Language](ES-003-Domain-Model-and-Ubiquitous-Language.md) |
 | **Canonical deliverable** | [Command Contract Model](../architecture/CommandContract.md) |
-| **ADRs** | [ADR-001 — Authoritative Result Reuse](../architecture/decisions/ADR-001-Authoritative-Result-Reuse.md) records the new supported `DispatchExecutionAttempt` version and its authority rules. |
+| **ADRs** | [ADR-001 — Authoritative Result Reuse](../architecture/decisions/ADR-001-Authoritative-Result-Reuse.md) and [ADR-002 — Workflow AI Budget Envelope Contract](../architecture/decisions/ADR-002-Workflow-AI-Budget-Envelope-Contract.md). |
 | **Future specifications** | Event, Error, Idempotency, Policy, authorization, and component service-interface contracts remain pending. |
 | **Related Pull Requests** | Pending — update after Draft Pull Request creation. |
 
@@ -38,6 +38,7 @@ last_updated: 2026-08-15
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.3 | 2026-08-24 | CTO / Architect | Returned to In Review only for ADR-002's typed, fenced Workflow-admission binding on AI-capable DispatchExecutionAttempt v2; no implementation is authorized. |
 | 1.2 | 2026-08-15 | CTO / Architect | Approved after focused CTO review of `210df6491397b57875edf9942da009341c8161e1` with Blocking 0 / Major 0 / Minor 0. |
 | 1.1 | 2026-08-14 | CTO / Architect | Returned to In Review to govern `DispatchExecutionAttempt` v2 and optional authoritative-result reuse metadata. |
 | 1.0 | 2026-07-21 | CTO / Architect | Initial Milestone 4 Phase 1 specification. |
@@ -111,26 +112,28 @@ The contract SHALL define conditional presence, field relationships, immutabilit
 ### 4.1 `DispatchExecutionAttempt` v2 metadata
 
 `DispatchExecutionAttempt` v1 remains supported and has no authoritative-result-reuse request.
-`DispatchExecutionAttempt` v2 is a new, separately supported Command version. It adds exactly one
-typed metadata member:
+`DispatchExecutionAttempt` v2 is a new, separately supported Command version. The original
+approved member and the focused In Review Workflow AI Budget Envelope amendment are:
 
 | Metadata member | Presence | Type | Meaning |
 | --- | --- | --- | --- |
 | `AuthoritativeResultId` | Optional; absent preserves v1 behavior | `ResultId` | A request to reuse one immutable, terminal `Succeeded` Result for the current capability execution. It is not an outcome, a policy reference, or a claim that the caller may self-authorize. |
+| `WorkflowAIBudgetAdmissionBinding` | Required only when the immutable Skill/Capability route resolves AI Gateway; absent for proven non-AI | [Workflow AI Budget Admission Binding v1](../architecture/schemas/workflow-ai-budget-admission-binding-v1.schema.json) | Exact Workflow-owned committed-admission evidence propagated unchanged through Skill Runtime to Gateway. It reuses existing scope, Workflow/step/Command/Execution lineage, state-version fence, Capability route, conservative exposure, and Gateway idempotency key; it is not an identity, reservation, or generic metadata. |
 
-`AuthoritativeResultId` is metadata and MUST NOT be placed in the business payload. The
-`StructuredTaskKindClassification` business payload remains exactly `{statement}`. A target
-MUST NOT treat unknown or free-form metadata as an authoritative-result request. The normative
-v2 shape is [DispatchExecutionAttempt v2 schema](../architecture/schemas/dispatch-execution-attempt-v2.schema.json).
+`AuthoritativeResultId` and `WorkflowAIBudgetAdmissionBinding` are typed metadata and MUST NOT
+be placed in the business payload. The `StructuredTaskKindClassification` business payload remains
+exactly `{statement}`. A target MUST NOT treat unknown or free-form metadata as an
+authoritative-result request or Workflow admission. The normative v2 shape is
+[DispatchExecutionAttempt v2 schema](../architecture/schemas/dispatch-execution-attempt-v2.schema.json).
 
 ### 4.2 `DispatchExecutionAttempt` version compatibility matrix
 
-| Producer version | Skill Runtime support | `AuthoritativeResultId` | Compatibility rule |
+| Producer version | Skill Runtime support | Authority-sensitive metadata | Compatibility rule |
 | --- | --- | --- | --- |
 | v1 | v1 or v2 target | Absent | Normal existing execution. A v2 target accepts v1 only under the unchanged v1 interpretation. |
-| v2 | v2 target | Absent | Normal existing execution; optional-field absence preserves current behavior. |
-| v2 | v2 target | Present and valid | Skill Runtime applies the governed authoritative-result path before Gateway invocation. |
-| v2 | v1-only target | Present or absent | Reject as unsupported version; no silent downgrade or field stripping. |
+| v2, proven non-AI route | v2 target | `AuthoritativeResultId` absent or valid; admission binding absent | Normal existing execution or governed reuse; no Gateway call. |
+| v2, AI Gateway route | v2 target with ADR-002 amendment support | Exact valid admission binding; `AuthoritativeResultId` absent or valid | Skill Runtime applies governed reuse first; otherwise validates and propagates the committed admission binding before Gateway invocation. |
+| v2 | v1-only or pre-amendment v2 target | Binding present | Reject as unsupported authority-sensitive shape; no silent downgrade, field stripping, or Gateway dispatch. |
 | Unknown version or member shape | Any target | Any | Fail closed before execution. |
 
 The new member changes the authorization, validation, and execution interpretation of a Command
@@ -302,16 +305,16 @@ Reviewers SHALL verify:
 
 ## 16. Definition of Done
 
-- [ ] The original two-file ES-004 baseline remains intact except for the focused ADR-001 governance artifacts and directly required index/schema updates.
+- [ ] The original two-file ES-004 baseline remains intact except for the focused ADR-001 and ADR-002 governance artifacts and directly required index/schema updates.
 - [ ] All acceptance criteria and review checks are satisfied.
-- [ ] ADR-001 authorizes only `DispatchExecutionAttempt` v2 and its optional `AuthoritativeResultId` metadata; no other architecture or domain conflict is introduced.
+- [ ] ADR-001 and the focused ADR-002 amendment govern the supported `DispatchExecutionAttempt` v2 authority-sensitive metadata without introducing a new architecture, domain identity, or ownership conflict.
 - [ ] Validation evidence is recorded in the Draft Pull Request.
 - [ ] A Draft Pull Request is opened against `main` and is not merged.
 
 ## 17. Implementation Instructions
 
 The original ES-004 implementation used its dedicated branch and two-file scope. The focused
-ADR-001 amendment MAY additionally update the governed v2 schema, ADR/index records, and the
+ADR-001/ADR-002 amendments MAY additionally update the governed v2 schema, ADR/index records, and the
 directly affected ES-004, ES-006, and ES-016 contracts; it MUST remain documentation/schema-only.
 
 If implementation would alter an Architecture v1.0 boundary or Domain v1.0 semantic beyond the

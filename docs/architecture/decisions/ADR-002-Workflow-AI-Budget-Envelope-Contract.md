@@ -30,6 +30,24 @@ reservation, reconciliation, provider failover, structured repair, and ambiguous
 under existing `AIInvocationId` semantics. The Workflow projection only references Gateway evidence;
 it is not a new identity, reservation, or second ledger.
 
+For an AI-capable exact immutable Skill/Capability route, Workflow Engine's atomic committed
+admission also records [Workflow AI Budget Admission Binding v1](../schemas/workflow-ai-budget-admission-binding-v1.schema.json).
+The binding's durable logical key is the existing
+`(TenantId, WorkspaceId, WorkflowId, WorkflowStepId, CommandId, ExecutionId)` tuple. It carries the
+existing Workflow transition version only as a fence, plus exact definition/policy/scope/capability
+source, conservative committed exposure, and existing scoped Gateway idempotency key. Skill Runtime
+validates and propagates this provider-neutral value unchanged; Gateway atomically accepts/replays it
+with the same key and creates at most one `AIInvocationId`. It is not a new canonical identity,
+digest, reservation, or accounting record.
+
+Workflow's conservative commitment survives Gateway acceptance. It is substituted only by matching
+same-scope/same-unit evidence for that binding: before terminal reconciliation Workflow counts the
+greater of its committed exposure and Gateway reservation/provider-effect exposure; only Gateway
+terminal reconciliation may replace it with settled actual cost and release any difference. Missing,
+mismatched, stale, non-monotonic, ambiguous, or unit-incompatible evidence fails closed. The
+composition preserves Workflow admission ownership and Gateway accounting ownership without a
+distributed transaction or a second ledger.
+
 An envelope is mandatory for an AI-capable Workflow step. Legacy absence, unsupported version,
 scope/source mismatch, unit mismatch, or incomplete/inconsistent accounting evidence fails closed
 before Gateway/provider dispatch. Deterministic bypass and valid authoritative-result reuse consume
@@ -55,6 +73,13 @@ authority blocks dispatch without replacing that snapshot.
 - **A Workflow-owned cost/reservation ledger:** rejected because Gateway already owns reservation,
   provider usage/cost, reconciliation, failover, repair, and ambiguity accounting. Workflow owns
   only serialized conservative commitment and an evidence-referencing projection.
+- **An unbound Skill Runtime to Gateway call:** rejected because an AI-capable route must carry one
+  committed Workflow admission binding matching its exact Command/Execution/Capability lineage and
+  existing scoped Gateway idempotency key. Missing or mismatched evidence must fail closed rather
+  than become an implicit later admission.
+- **Caller-declared AI/non-AI metadata:** rejected because only the authoritative immutable
+  Skill/Capability catalog can classify a route. Workflow Definition v2 binds that route exactly and
+  the hosted behavioral validator derives the envelope requirement from it.
 - **Generic metadata:** rejected because ignorable/free-form metadata cannot activate authoritative
   security and budget behavior.
 - **Policy-only representation:** rejected because it could let an immutable definition adopt a
@@ -62,12 +87,12 @@ authority blocks dispatch without replacing that snapshot.
 
 ## Consequences and review boundary
 
-The focused frozen-artifact amendments are the Workflow Definition v2 contract/schema and
+The focused frozen-artifact amendments are the Workflow Definition v2 contract/schema,
+the governed `DispatchExecutionAttempt` v2 schema/metadata interpretation, and
 [Service Interfaces](../ServiceInterfaces.md), which remains In Review for `StartWorkflow` and
-AI-admission binding semantics only. ES-017 and TDR-025 remain
-approved upstream governance and are not reopened. Runtime implementation remains prohibited until
-this ADR, schema, and interface amendment are approved and merged, followed by a separate
-implementation Draft PR.
+AI-admission binding semantics only. ES-017 and TDR-025 remain approved upstream governance and are
+not reopened. Runtime implementation remains prohibited until this ADR, schema, and interface
+amendment are approved and merged, followed by a separate implementation Draft PR.
 
 ## Revisit evidence
 
