@@ -212,11 +212,16 @@ def dispatch(binding: dict | None = None) -> dict:
 
 
 def resolve_route(capability_binding: dict) -> CapabilityRoute:
-    key = (
-        capability_binding.get("SkillVersionId"),
-        capability_binding.get("CapabilityId"),
-        capability_binding.get("CapabilityContractVersionId"),
-    )
+    skill_version_id = capability_binding.get("SkillVersionId")
+    capability_id = capability_binding.get("CapabilityId")
+    capability_contract_version_id = capability_binding.get("CapabilityContractVersionId")
+    if not (
+        isinstance(skill_version_id, str)
+        and isinstance(capability_id, str)
+        and isinstance(capability_contract_version_id, str)
+    ):
+        raise Rejected("immutable Skill/Capability route is malformed")
+    key = (skill_version_id, capability_id, capability_contract_version_id)
     route = CATALOG.get(key)
     if route is None:
         raise Rejected("immutable Skill/Capability route is unknown")
