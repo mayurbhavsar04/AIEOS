@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aieos.dev/contracts/workflow-definition/v2",
+  "title": "WorkflowDefinitionVersion v2",
+  "description": "Normative enclosing Workflow Definition version that activates WorkflowAIBudgetEnvelope v1 without changing any legacy definition format.",
+  "type": "object",
+  "required": ["DefinitionContractVersion", "WorkflowDefinitionId", "WorkflowDefinitionVersionId", "TenantId", "WorkspaceId", "PolicyId", "PolicyVersionId", "Steps"],
+  "properties": {
+    "DefinitionContractVersion": { "const": 2 },
+    "WorkflowDefinitionId": { "$ref": "#/$defs/opaqueId" },
+    "WorkflowDefinitionVersionId": { "$ref": "#/$defs/opaqueId" },
+    "TenantId": { "$ref": "#/$defs/opaqueId" },
+    "WorkspaceId": { "$ref": "#/$defs/opaqueId" },
+    "PolicyId": { "$ref": "#/$defs/opaqueId" },
+    "PolicyVersionId": { "$ref": "#/$defs/opaqueId" },
+    "WorkflowAIBudgetEnvelope": {
+      "$ref": "workflow-ai-budget-envelope-v1.schema.json"
+    },
+    "Steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["WorkflowStepDefinitionId", "ExecutionBoundary"],
+        "properties": {
+          "WorkflowStepDefinitionId": { "$ref": "#/$defs/opaqueId" },
+          "ExecutionBoundary": {
+            "enum": ["NON_AI", "AI_GATEWAY"],
+            "description": "Normative pre-dispatch classification. AI_GATEWAY is AI-capable; classification may not be inferred from runtime output, provider metadata, or free text."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "Steps": { "contains": { "properties": { "ExecutionBoundary": { "const": "AI_GATEWAY" } }, "required": ["ExecutionBoundary"] } } }, "required": ["Steps"] },
+      "then": { "required": ["WorkflowAIBudgetEnvelope"] }
+    }
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "opaqueId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[!-~]+$" }
+  },
+  "$comment": "The envelope's WorkflowDefinitionVersionId, PolicyId, PolicyVersionId, TenantId, and WorkspaceId MUST equal the enclosing values; JSON Schema cannot express cross-field equality, so the compatibility validator enforces it. Unknown DefinitionContractVersion values are rejected and never downgraded."
+}

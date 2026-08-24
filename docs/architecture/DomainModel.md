@@ -46,7 +46,7 @@ An Aggregate is not a service, process, table, or deployment unit. A component m
 | --- | --- | --- |
 | **Request** | Entity | Caller intent submitted at the platform boundary and tracked independently from Workflow state. Manager owns interpretation and acceptance or rejection; an accepted Request may cause a distinct `StartWorkflow` Command. |
 | **Manager** | Platform component | Interprets goals, initiates approved Workflows, manages interaction, and presents outcomes. It does not execute Skills or own Workflow state. |
-| **Workflow Definition** | Aggregate Root, Entity | Stable logical definition identified by `WorkflowDefinitionId` and composed of immutable versions identified by `WorkflowDefinitionVersionId`. Workflow Engine governs use and compatibility. |
+| **Workflow Definition** | Aggregate Root, Entity | Stable logical definition identified by `WorkflowDefinitionId` and composed of immutable versions identified by `WorkflowDefinitionVersionId`. Workflow Engine governs use and compatibility. The normative v2 enclosing shape and AI-capable activation boundary are defined by [Workflow Definition Contract](WorkflowDefinitionContract.md). |
 | **Workflow Instance** | Aggregate Root, Entity | One durable execution of a specific Workflow Definition version. Workflow Engine is its sole state owner. |
 | **Workflow Step** | Entity inside Workflow Aggregate | One defined unit of orchestration within a Workflow Instance. Workflow Engine owns its state and disposition. |
 | **Command** | Immutable directed message record | A request for one accountable target to perform an action. It may be accepted or rejected and never passes through Event Bus. |

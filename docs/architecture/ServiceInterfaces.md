@@ -1,9 +1,9 @@
 ---
 title: Service Interface Contracts
-version: 1.1
+version: 1.2
 status: In Review
 owner: Founding Team
-last_updated: 2026-08-21
+last_updated: 2026-08-24
 ---
 
 # Service Interface Contracts
@@ -116,7 +116,7 @@ Workflow Engine MUST NOT execute Skills, call AI Gateway or Tools, transport Com
 
 | Operation | Caller → target | Input and outcome | Messages | Preconditions and postconditions | Idempotency, scope, trace, cancellation, timeout, version |
 | --- | --- | --- | --- | --- | --- |
-| `StartWorkflow` | Manager or approved Scheduler path → Workflow Engine | `WorkflowDefinitionVersionId`, accepted decision causation, scope, policy; returns `WorkflowId` acknowledgement or rejection. | Accepts `StartWorkflow`; produces Workflow lifecycle Events. | Definition and policy versions compatible; caller authorized. An AI-capable definition must carry a valid [Workflow AI Budget Envelope v1](schemas/workflow-ai-budget-envelope-v1.schema.json) whose scope and source exactly match the accepted Workflow. Success snapshots that envelope with exactly one Workflow Instance in `Created` or `Running`. | Redelivery preserves logical instance and its existing envelope snapshot. Scope and correlation fixed. Cancellation uses `CancelWorkflow`. Definition/interface versions and the accepted envelope are immutable for the instance. |
+| `StartWorkflow` | Manager or approved Scheduler path → Workflow Engine | `WorkflowDefinitionVersionId`, accepted decision causation, scope, policy; returns `WorkflowId` acknowledgement or rejection. | Accepts `StartWorkflow`; produces Workflow lifecycle Events. | Definition and policy versions compatible; caller currently authorized. Enclosing shape and AI classification follow [Workflow Definition Contract v2](WorkflowDefinitionContract.md). An AI-capable definition must carry a valid [Workflow AI Budget Envelope v1](schemas/workflow-ai-budget-envelope-v1.schema.json) whose scope and source exactly match the accepted Workflow. Success snapshots the immutable definition/envelope with exactly one Workflow Instance in `Created` or `Running`. | Redelivery preserves logical instance and its existing envelope snapshot. Scope and correlation fixed. Cancellation uses `CancelWorkflow`. Definition/interface versions and accepted budget meaning are immutable; authorization and exact policy revocation/disablement are revalidated before every AI admission/dispatch. |
 | `AdvanceWorkflow` | Workflow Engine decision path → Workflow Engine | `WorkflowId`, current state/version, triggering Event or decision; returns transition outcome. | May dispatch a directed `DispatchExecutionAttempt` Command to Skill Runtime. Separately, may produce authoritative waiting, completion, or failure Workflow lifecycle Events after the corresponding facts exist. | Current state and trigger valid. Success records one valid transition and next action. | Optimistic duplicate transition is rejected or treated as already applied. Workflow timeout policies are explicit. Commands remain outside Event Bus. |
 | `PauseWorkflow` | Authorized Manager, human-control, or policy path → Workflow Engine | `WorkflowId`, reason, authority; returns paused or rejected. | Accepts directed pause Command; produces `WorkflowPaused`. | Workflow is pausable and no terminal state exists. Success persists pause checkpoint. | Duplicate pause is safe. Correlation retained. It does not cancel an active attempt unless policy separately commands cancellation. |
 | `ResumeWorkflow` | Authorized human or Manager path → Workflow Engine | `WorkflowId`, approval/input evidence, expected checkpoint; returns resumed or rejected. | Accepts resume Command; produces `WorkflowResumed`; may dispatch next attempt. | Workflow is waiting or paused and evidence is correlated and valid. Success resumes from persisted state. | Duplicate response cannot advance twice. Waiting expiry is separate from caller timeout. |
@@ -134,8 +134,19 @@ inconsistent, stale, cross-scope, non-monotonic, or unit-incompatible evidence f
 dispatch. This admission projection is not a second accounting ledger and creates no
 `AIInvocationId`; Gateway retains all provider accounting and recovery authority.
 
-Legacy Workflow definitions without this envelope remain compatible for non-AI behavior, but an
-AI-capable step is rejected before Gateway/provider dispatch. Absence never means unlimited spend.
+The serialization key is exact Tenant/Workspace/Workflow scope. One atomic Workflow transition
+checks capacity and commits the conservative maximum exposure for the immutable
+step/Command/Execution admission before any Gateway call. The fixed Gateway idempotency context then
+resolves to at most one `AIInvocationId`; acceptance-before-checkpoint is recovered through that same
+context. Release requires positive Gateway proof of non-acceptance/no effect or authoritative
+release/expiry evidence. Missing or ambiguous handoff evidence retains exposure and prohibits a new
+dispatch. The complete state and crash-window rules are normative in the envelope contract.
+
+Legacy Workflow definitions without this envelope remain compatible only for steps proven non-AI
+from their immutable Skill Version/Capability Contract route. A route to AI Gateway, or a route that
+cannot be proved non-AI, is rejected before Gateway/provider dispatch. Absence never means unlimited
+spend. Current authorization, scope, and exact policy active/not-revoked state are validated at
+admission and dispatch without replacing the immutable snapshot.
 Same-command replay, cross-worker contention, restart, provider-effect ambiguity, deterministic
 bypass, and authoritative-result reuse follow the governing envelope contract; bypass/reuse has
 zero provider cost and no fabricated `AIInvocationId`.

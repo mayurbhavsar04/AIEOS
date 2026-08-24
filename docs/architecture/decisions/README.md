@@ -1,9 +1,9 @@
 ---
 title: Architecture Decision Records
-version: 1.2
+version: 1.3
 status: In Review
 owner: CTO / Architect
-last_updated: 2026-08-21
+last_updated: 2026-08-24
 ---
 
 # Architecture Decision Records
@@ -24,5 +24,6 @@ The Runtime Technology Decision Records remain separately indexed in
 
 | Version | Date | Author | Notes |
 | --- | --- | --- |
+| 1.3 | 2026-08-24 | CTO / Architect | Completed ADR-002 alternatives/consequences and linked the canonical Workflow Definition v2 activation boundary; status remains In Review. |
 | 1.2 | 2026-08-21 | CTO / Architect | Added ADR-002 and moved the index to In Review for the focused Workflow AI-budget contract amendment. |
 | 1.1 | 2026-08-15 | CTO / Architect | Indexed accepted ADR-001 authoritative-result reuse governance. |
