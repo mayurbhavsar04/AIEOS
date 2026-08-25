@@ -8,6 +8,7 @@ from aieos.workflow_engine.engine import (
     WorkflowState,
 )
 from aieos.workflow_engine.ports import RetryDecisionOwner, WorkflowClient
+from aieos.workflow_engine.governance import WorkflowAIBudgetEnvelope
 
 __all__ = (
     "InMemoryWorkflowRepository",
@@ -17,4 +18,5 @@ __all__ = (
     "WorkflowEngine",
     "WorkflowInstance",
     "WorkflowState",
+    "WorkflowAIBudgetEnvelope",
 )

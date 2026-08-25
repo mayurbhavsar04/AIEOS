@@ -32,6 +32,11 @@ from aieos.event_bus import EventOutbox
 from aieos.observability import ObservationRecorder
 from aieos.result_error_support import OutcomeFactory
 from aieos.security_support import AuthorizationFailure, ScopeAuthorizer
+from aieos.workflow_engine.governance import (
+    WorkflowAIBudgetEnvelope,
+    admission_binding,
+    scale6,
+)
 
 
 class WorkflowState(StrEnum):
@@ -53,6 +58,8 @@ class WorkflowDefinition:
     workflow_definition_version_id: str
     skill_version_id: str
     max_attempts: int = 2
+    workflow_kind: str = ""
+    ai_budget_envelope: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
@@ -80,12 +87,16 @@ class WorkflowInstance:
     retry_commands: dict[str, CommandEnvelope] | None = None
     outcome: ResultEnvelope | None = None
     error: ErrorEnvelope | None = None
+    ai_budget_envelope: WorkflowAIBudgetEnvelope | None = None
+    ai_admissions: dict[str, Mapping[str, object]] | None = None
 
     def __post_init__(self) -> None:
         if self.workflow_events is None:
             self.workflow_events = {}
         if self.retry_commands is None:
             self.retry_commands = {}
+        if self.ai_admissions is None:
+            self.ai_admissions = {}
 
 
 @dataclass(slots=True)
@@ -255,7 +266,28 @@ class WorkflowEngine:
             ),
             skill_version_id=self._payload_string(command.payload, "skill_version_id"),
             max_attempts=self._payload_int(command.payload, "max_attempts", 2),
+            workflow_kind=str(command.payload.get("workflow_kind", "")),
+            ai_budget_envelope=(
+                command.payload.get("workflow_ai_budget_envelope")
+                if isinstance(command.payload.get("workflow_ai_budget_envelope"), Mapping)
+                else None
+            ),
         )
+        envelope: WorkflowAIBudgetEnvelope | None = None
+        if definition.workflow_kind == "ClassifyAndRouteTask":
+            # This is deliberately before instance creation and dispatch: malformed
+            # reference-workflow input never reaches Skill Runtime or Gateway.
+            statement = command.payload.get("statement")
+            if not isinstance(statement, str) or not 1 <= len(statement.strip()) <= 512:
+                return self._reject(command, "CLASSIFY_AND_ROUTE_INPUT_INVALID", "statement must contain 1..512 characters")
+            if definition.ai_budget_envelope is None:
+                return self._reject(command, "WORKFLOW_AI_BUDGET_ENVELOPE_REQUIRED", "AI-capable workflow requires an envelope")
+            try:
+                envelope = WorkflowAIBudgetEnvelope.parse(definition.ai_budget_envelope)
+            except ValueError:
+                return self._reject(command, "WORKFLOW_AI_BUDGET_ENVELOPE_INVALID", "unsupported AI budget envelope")
+            if (envelope.definition_version_id != definition.workflow_definition_version_id or envelope.tenant_id != command.tenant_id or envelope.workspace_id != command.workspace_id or envelope.policy_id != command.metadata.authorization.policy_id or envelope.policy_version_id != command.metadata.authorization.policy_version_id):
+                return self._reject(command, "WORKFLOW_AI_BUDGET_ENVELOPE_SCOPE_MISMATCH", "AI budget envelope binding mismatch")
         workflow_id = self._identifiers.new("workflow")
         instance = WorkflowInstance(
             workflow_id=workflow_id,
@@ -269,6 +301,7 @@ class WorkflowEngine:
             input_payload=command.payload,
             timeout_seconds=self._payload_float(command.payload, "timeout_seconds", 1.0),
             state=WorkflowState.RUNNING,
+            ai_budget_envelope=envelope,
         )
         self._repository.add(instance)
         acknowledgement = self._outcomes.accepted(
@@ -358,10 +391,31 @@ class WorkflowEngine:
         instance.attempt_number += 1
         execution_id = self._identifiers.new("execution")
         instance.execution_ids = (*instance.execution_ids, execution_id)
+        command_id = self._identifiers.new("command")
+        admission: Mapping[str, object] | None = None
+        if instance.ai_budget_envelope is not None and instance.definition.workflow_kind == "ClassifyAndRouteTask":
+            # Reuse/bypass is deliberately zero-cost and does not fabricate an AI id.
+            if instance.authorization and instance.input_payload.get("authoritative_result_id") is None:
+                committed = 10_000  # approved structured package maximum: USD 0.01
+                admissions = instance.ai_admissions
+                assert admissions is not None
+                if sum(
+                    scale6(str(item["CommittedExposure"]["Amount"]))
+                    for item in admissions.values()
+                ) + committed > instance.ai_budget_envelope.ceiling_microusd:
+                    raise ValueError("WORKFLOW_AI_BUDGET_EXHAUSTED")
+                admission = admission_binding(
+                    envelope=instance.ai_budget_envelope, workflow_id=instance.workflow_id,
+                    workflow_step_id=instance.workflow_step_id, command_id=command_id,
+                    execution_id=execution_id, skill_version_id=instance.definition.skill_version_id,
+                    capability_id="StructuredTaskKindClassification", capability_contract_version_id="1",
+                    state_version=len(admissions) + 1, committed_microusd=committed,
+                )
+                admissions[command_id] = admission
         return CommandEnvelope(
-            command_id=self._identifiers.new("command"),
+            command_id=command_id,
             command_type="DispatchExecutionAttempt",
-            command_version="1.0",
+            command_version="2.0" if admission is not None else "1.0",
             correlation_id=instance.correlation_id,
             causation_id=causation_id,
             workflow_id=instance.workflow_id,
@@ -372,22 +426,32 @@ class WorkflowEngine:
             timestamp=self._clock.now(),
             tenant_id=instance.tenant_id,
             workspace_id=instance.workspace_id,
-            payload={
-                **instance.input_payload,
-                "skill_version_id": instance.definition.skill_version_id,
-                "timeout_seconds": instance.timeout_seconds,
-            },
+            payload=(
+                {"statement": str(instance.input_payload["statement"]).strip()}
+                if admission is not None else {**instance.input_payload, "skill_version_id": instance.definition.skill_version_id, "timeout_seconds": instance.timeout_seconds}
+            ),
             metadata=CommandMetadata(
                 request_id=instance.request_id,
                 idempotency_key=f"{instance.workflow_step_id}:{instance.attempt_number}",
                 authorization=instance.authorization,
                 attempt_number=instance.attempt_number,
+                skill_version_id=instance.definition.skill_version_id if admission is not None else None,
+                authoritative_result_id=(str(instance.input_payload["authoritative_result_id"]) if instance.input_payload.get("authoritative_result_id") else None),
+                workflow_ai_budget_admission=admission,
             ),
         )
 
     async def _complete(self, instance: WorkflowInstance, event: EventEnvelope) -> None:
         instance.state = WorkflowState.COMPLETED
         value = event.payload.get("value_reference")
+        if instance.definition.workflow_kind == "ClassifyAndRouteTask":
+            routes = {"Question": "question_queue", "Instruction": "instruction_queue", "Statement": "information_queue"}
+            try:
+                import json
+                value = routes[json.loads(str(value))["task_kind"]]
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                await self._fail(instance, event)
+                return
         instance.outcome = self._outcomes.succeeded(
             subject=instance.workflow_id,
             producer=self.component_name,

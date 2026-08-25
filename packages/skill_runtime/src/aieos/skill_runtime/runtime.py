@@ -33,6 +33,7 @@ from aieos.result_error_support import OutcomeFactory
 from aieos.security_support import AuthorizationFailure, ScopeAuthorizer
 from aieos.skill_registry import SkillRegistry
 from aieos.skill_runtime.ports import Skill, SkillInput, SkillOutput, SkillServices
+from aieos.workflow_engine.governance import validate_binding
 
 
 class ExecutionState(StrEnum):
@@ -260,6 +261,28 @@ class SkillRuntime:
                 "CAPABILITY_IMPLEMENTATION_MISMATCH",
                 "Skill and Capability resolution evidence disagree",
             )
+        # A v2 Workflow dispatch is an AI-capable governed route.  The Runtime
+        # can only relay the immutable Workflow Engine binding; it cannot mint
+        # or repair one from generic command metadata.
+        if command.command_version in {"2", "2.0"}:
+            binding = command.metadata.workflow_ai_budget_admission
+            if binding is None:
+                return self._reject(command, "WORKFLOW_AI_ADMISSION_REQUIRED", "governed AI execution requires committed admission")
+            try:
+                validate_binding(
+                    binding,
+                    workflow_id=command.workflow_id,
+                    workflow_step_id=command.workflow_step_id,
+                    command_id=command.command_id,
+                    execution_id=command.execution_id,
+                    tenant_id=command.tenant_id,
+                    workspace_id=command.workspace_id,
+                    skill_version_id=definition.skill_version_id,
+                    capability_id=definition.capability_id,
+                    capability_contract_version_id=definition.capability_contract_version_id,
+                )
+            except ValueError:
+                return self._reject(command, "WORKFLOW_AI_ADMISSION_INVALID", "governed AI admission binding mismatch")
         try:
             implementation = self._skill_implementations[definition.implementation_reference]
         except KeyError:
