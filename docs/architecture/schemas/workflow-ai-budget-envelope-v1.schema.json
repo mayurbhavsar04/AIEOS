@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aieos.dev/contracts/workflow-ai-budget-envelope/v1",
+  "title": "Workflow AI Budget Envelope v1",
+  "description": "Normative typed, immutable, provider-neutral AI-budget member of one immutable WorkflowDefinitionVersion. The Workflow Engine durably snapshots this exact value when it accepts the Workflow; this schema creates no identity and no accounting ledger.",
+  "type": "object",
+  "required": [
+    "ContractVersion",
+    "GatewayNormalizedCostUnitRegistryVersion",
+    "WorkflowDefinitionVersionId",
+    "PolicyId",
+    "PolicyVersionId",
+    "TenantId",
+    "WorkspaceId",
+    "BudgetCeiling"
+  ],
+  "properties": {
+    "ContractVersion": {
+      "const": 1,
+      "description": "The complete interpretation version of this envelope. Unknown versions are rejected before an AI-capable step is dispatched."
+    },
+    "GatewayNormalizedCostUnitRegistryVersion": {
+      "const": 1,
+      "description": "Exact closed normalized-cost unit registry used by this envelope. Version 1 contains only USD; unknown registry versions are rejected without downgrade."
+    },
+    "WorkflowDefinitionVersionId": {
+      "$ref": "#/$defs/opaqueId",
+      "description": "The exact immutable Workflow Definition version that contains this envelope."
+    },
+    "PolicyId": {
+      "$ref": "#/$defs/opaqueId",
+      "description": "The existing logical Policy identity governing this envelope; it is not a budget identity."
+    },
+    "PolicyVersionId": {
+      "$ref": "#/$defs/opaqueId",
+      "description": "The exact immutable Policy Version that authorizes the ceiling and admission semantics."
+    },
+    "TenantId": {
+      "$ref": "#/$defs/opaqueId",
+      "description": "The exact Tenant scope; it must match the accepted Workflow and Gateway accounting allocation."
+    },
+    "WorkspaceId": {
+      "$ref": "#/$defs/opaqueId",
+      "description": "The exact Workspace scope; it must match the accepted Workflow and Gateway accounting allocation."
+    },
+    "BudgetCeiling": {
+      "type": "object",
+      "required": ["Amount", "CurrencyOrReferenceUnit"],
+      "properties": {
+        "Amount": {
+          "type": "string",
+          "pattern": "^(?![\\s\\S]*[^0-9.])(?:[1-9][0-9]{0,17}|0\\.(?:[1-9]|[0-9][1-9]|[0-9]{2}[1-9]|[0-9]{3}[1-9]|[0-9]{4}[1-9]|[0-9]{5}[1-9])|[1-9][0-9]{0,16}\\.[1-9]|[1-9][0-9]{0,15}\\.[0-9][1-9]|[1-9][0-9]{0,14}\\.[0-9]{2}[1-9]|[1-9][0-9]{0,13}\\.[0-9]{3}[1-9]|[1-9][0-9]{0,12}\\.[0-9]{4}[1-9]|[1-9][0-9]{0,11}\\.[0-9]{5}[1-9])$",
+          "description": "Canonical positive base-10 decimal with at most 18 total digits and at most 6 fractional digits. It has no sign, exponent, leading integer zero, decimal point for an integer, or trailing fractional zero. Minimum is 0.000001 and maximum is 999999999999999999. Values are parsed and compared as exact decimal integers at scale 6, never binary floating point; no rounding is permitted."
+        },
+        "CurrencyOrReferenceUnit": {
+          "type": "string",
+          "enum": ["USD"],
+          "description": "Exact case-sensitive member of GatewayNormalizedCostUnitRegistryVersion 1. Mixed or unknown units fail closed."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?![\\s\\S]*[^!-~])[!-~]+$",
+      "description": "Opaque printable ASCII identifier with no whitespace or control characters, including terminal CR or LF."
+    }
+  },
+  "$comment": "This is a Workflow Definition/policy member, not Command metadata, a PolicyRef-only selector, an identity, a result reference, an idempotency key, or a Gateway-owned cost record. The accepted Workflow stores the exact validated member with its WorkflowId as durable admission/audit evidence."
+}

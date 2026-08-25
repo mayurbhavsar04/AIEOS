@@ -1,9 +1,9 @@
 ---
 title: Engineering Specifications
-version: 1.7
+version: 1.9
 status: Approved
 owner: Founding Team
-last_updated: 2026-08-21
+last_updated: 2026-08-25
 ---
 
 # Engineering Specifications
@@ -24,7 +24,7 @@ Codex implements approved Engineering Specifications. Codex does not invent arch
 | **Engineering Governance** | [Engineering Handbook](../02-engineering-handbook/README.md) |
 | **Architecture** | [Architecture v1.0](../03-architecture/README.md) |
 | **First Specification** | [ES-001 — Execution Core](ES-001-Execution-Core.md) |
-| **Current review** | [ES-016 — Governed Structured AI Capability Execution](ES-016-Governed-Structured-AI-Capability-Execution.md) with authoritative-result reuse governance |
+| **Current review** | None. ES-004 and ES-006 are Approved, including the ADR-002 Workflow-admission binding governance. |
 | **Related Pull Request** | [PR #3 — Establish Engineering Specification process](https://github.com/mayurbhavsar04/AIEOS/pull/3) |
 
 ## Engineering Lifecycle
@@ -220,6 +220,8 @@ unfrozen Phase 4 deliverable.
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.9 | 2026-08-25 | CTO / Architect | Recorded approval of ES-004 v1.4 and ES-006 v1.4 after exact-SHA governance review of `8d7e55317818a4c4491dd985d1d639f6a7d956a5` with Blocking 0 / Major 0 / Minor 0 / Notes 0; ES-017 remains Approved and Phase 6 implementation remains prohibited until PR #32 is merged and a separate implementation PR is explicitly authorized. |
+| 1.8 | 2026-08-24 | CTO / Architect | Returned ES-004 and ES-006 to In Review only for PR #32's ADR-002 Workflow admission-binding correction; ES-017 remains Approved and no runtime implementation is authorized. |
 | 1.7 | 2026-08-21 | CTO / Architect | Recorded approval of ES-017 v0.2 after governance review of `8e7f09bd7a036dd8935781dba6c960b196afcfef`; the separate contract-amendment implementation gate remains in force. |
 | 1.6 | 2026-08-20 | CTO / Architect | Added ES-017 as a Phase 6 governance Draft; no implementation is authorized. |
 | 1.5 | 2026-08-15 | CTO / Architect | Recorded approval of ES-004 v1.2, ES-006 v1.2, and ES-016 v0.7 after focused CTO review of `210df6491397b57875edf9942da009341c8161e1`. |

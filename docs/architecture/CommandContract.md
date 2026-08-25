@@ -1,12 +1,19 @@
 ---
 title: Command Contract Model
-version: 1.2
+version: 1.4
 status: Approved
 owner: Founding Team
-last_updated: 2026-08-15
+last_updated: 2026-08-25
 ---
 
 # Command Contract Model
+
+## Version history
+
+| Version | Date | Author | Notes |
+| --- | --- | --- | --- |
+| 1.4 | 2026-08-25 | CTO / Architect | Approved the ADR-002 typed Workflow admission-binding amendment after exact-SHA governance review of `8d7e55317818a4c4491dd985d1d639f6a7d956a5` with Blocking 0 / Major 0 / Minor 0 / Notes 0; no implementation is authorized. |
+| 1.3 | 2026-08-24 | CTO / Architect | Returned to In Review only for ADR-002's typed Workflow admission-binding amendment; no implementation was authorized. |
 
 ## 1. Purpose
 
@@ -76,7 +83,7 @@ Metadata keys are versioned with the Command contract. Extension metadata MAY be
 - `Initiator`, authorization metadata, `TenantId`, and `WorkspaceId` MUST agree; mismatch is an authorization or invariant failure.
 - `TargetComponent` MUST name an existing accountable target defined by the governing architecture or domain contract.
 
-### 3.3 `DispatchExecutionAttempt` v2: authoritative-result metadata
+### 3.3 `DispatchExecutionAttempt` v2: authoritative-result and Workflow-admission metadata
 
 `DispatchExecutionAttempt` v2 adds optional, typed metadata `AuthoritativeResultId: ResultId`.
 Absence preserves the existing no-reuse path. Presence asks Skill Runtime to resolve an existing
@@ -87,14 +94,25 @@ enter that payload or `CapabilityPolicyContext`.
 The governed schema is [DispatchExecutionAttempt v2](schemas/dispatch-execution-attempt-v2.schema.json).
 The v1/v2 matrix is below; a v1 consumer MUST reject v2 rather than silently ignore the member.
 
-| Command version | `AuthoritativeResultId` | Target handling |
-| --- | --- | --- |
-| v1 | Not defined | Existing behavior only. |
-| v2 | Absent | Existing behavior exactly; no result lookup is required. |
-| v2 | Present | Resolve and validate before Gateway invocation; any invalid reference fails closed. |
+The approved Workflow AI Budget Envelope amendment additionally defines typed
+[WorkflowAIBudgetAdmissionBinding v1](schemas/workflow-ai-budget-admission-binding-v1.schema.json)
+metadata. It is not generic metadata and does not create an identity, reservation, or second ledger.
+It is absent for a route proven non-AI; it is mandatory when the exact immutable Skill/Capability
+route resolves to AI Gateway. The binding carries the existing logical admission tuple, current
+Workflow transition fence, exact source/scope/capability binding, committed conservative exposure,
+and existing scoped Gateway idempotency key. Skill Runtime and Gateway must reject missing or
+mismatched binding before Gateway/provider dispatch. An older v2 consumer rejects this unknown
+authority-sensitive member under the schema and therefore cannot silently dispatch an AI route.
 
-This is a new supported version because the member is authority-sensitive. It is not a v1
-extension, and neither an idempotency key nor an ordinary metadata extension may substitute for it.
+| Command version | `AuthoritativeResultId` | `WorkflowAIBudgetAdmissionBinding` | Target handling |
+| --- | --- | --- | --- |
+| v1 | Not defined | Not defined | Existing behavior only. |
+| v2, proven non-AI route | Absent or present | Absent | Existing behavior/reuse rules; no Gateway call. |
+| v2, AI Gateway route | Absent or present | Required, exact valid v1 | Resolve/validate reuse first; otherwise validate and propagate the binding before Gateway invocation. Any invalid or absent authority-sensitive value fails closed. |
+
+Version 2 remains a supported, authority-sensitive Command version. Neither an idempotency key nor
+an ordinary metadata extension may substitute for the typed binding; the binding references the
+existing key but does not redefine it.
 
 ## 4. Command Lifecycle
 

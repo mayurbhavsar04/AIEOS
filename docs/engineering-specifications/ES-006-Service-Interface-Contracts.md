@@ -1,9 +1,9 @@
 ---
 title: ES-006 — Service Interface Contracts
-version: 1.2
+version: 1.4
 status: Approved
 owner: CTO / Architect
-last_updated: 2026-08-15
+last_updated: 2026-08-25
 ---
 
 # ES-006 — Service Interface Contracts
@@ -20,7 +20,7 @@ last_updated: 2026-08-15
 | **Domain baseline** | Domain v1.0, frozen at tag `domain-v1.0` |
 | **Command baseline** | ES-004, frozen at tag `contracts-v1.0-es004` |
 | **Event baseline** | ES-005, frozen at tag `contracts-v1.0-es005` |
-| **Architecture status** | Approved; adds governed v2 propagation and Skill Runtime-owned durable lookup without changing component ownership, canonical identities, Result semantics, or provider boundaries. |
+| **Architecture status** | Approved, including ADR-002's Workflow admission to Skill Runtime to Gateway binding. The approved v2 result-reuse baseline, component ownership, canonical identities, Result semantics, and provider boundaries remain unchanged. |
 
 ## Related Documents
 
@@ -33,7 +33,7 @@ last_updated: 2026-08-15
 | **Prior specifications** | [ES-001](ES-001-Execution-Core.md), [ES-002](ES-002-Execution-Flow-Architecture.md), [ES-003](ES-003-Domain-Model-and-Ubiquitous-Language.md), [ES-004](ES-004-Command-Contract-Model.md), and [ES-005](ES-005-Event-Contract-Model.md) |
 | **Messaging contracts** | [Command Contract](../architecture/CommandContract.md) and [Event Contract](../architecture/EventContract.md) |
 | **Canonical deliverable** | [Service Interface Contracts](../architecture/ServiceInterfaces.md) |
-| **ADRs** | [ADR-001 — Authoritative Result Reuse](../architecture/decisions/ADR-001-Authoritative-Result-Reuse.md). |
+| **ADRs** | [ADR-001 — Authoritative Result Reuse](../architecture/decisions/ADR-001-Authoritative-Result-Reuse.md) and [ADR-002 — Workflow AI Budget Envelope Contract](../architecture/decisions/ADR-002-Workflow-AI-Budget-Envelope-Contract.md). |
 | **Future specifications** | ES-007 Error & Result Model and ES-008 Observability Model are pending. |
 | **Related Pull Requests** | Pending — update after Draft Pull Request creation. |
 
@@ -41,6 +41,8 @@ last_updated: 2026-08-15
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.4 | 2026-08-25 | CTO / Architect | Approved the ADR-002 admission-binding propagation and Gateway validation contract after exact-SHA governance review of `8d7e55317818a4c4491dd985d1d639f6a7d956a5` with Blocking 0 / Major 0 / Minor 0 / Notes 0; no implementation is authorized. |
+| 1.3 | 2026-08-24 | CTO / Architect | Returned to In Review only for the ADR-002 admission-binding propagation and Gateway validation contract; no implementation is authorized. |
 | 1.2 | 2026-08-15 | CTO / Architect | Approved after focused CTO review of `210df6491397b57875edf9942da009341c8161e1` with Blocking 0 / Major 0 / Minor 0. |
 | 1.1 | 2026-08-14 | CTO / Architect | Returned to In Review to define v2 authoritative-result propagation and Skill Runtime resolution ownership. |
 | 1.0 | 2026-07-21 | CTO / Architect | Initial Milestone 4 Phase 3 specification. |
@@ -130,6 +132,15 @@ payload, and MUST NOT be placed in `CapabilityPolicyContext`. Skill Runtime owns
 durable execution/result-repository lookup, validation, authorization, isolation checks, reuse
 lineage, and avoided-cost evidence. It does not delegate those decisions to Memory, Capability
 Registry, AI Gateway, a provider, or a new persistence/ledger subsystem.
+
+The approved Workflow AI Budget Envelope amendment additionally permits typed
+`WorkflowAIBudgetAdmissionBinding v1` only for an exact immutable Skill/Capability route that
+resolves to AI Gateway. Workflow Engine owns its atomic committed-admission transition; Skill
+Runtime validates the binding against the Command and resolved route and propagates it unchanged to
+Gateway; Gateway validates it before acceptance/provider preparation and retains its own reservation,
+effect, and reconciliation authority. Missing, stale, mismatched, or unknown binding/evidence fails
+closed. Same-command replay or worker takeover reuses the exact binding and Gateway idempotency
+context and cannot create a second dispatch, reservation, or charge.
 
 Before Gateway invocation, Skill Runtime MUST fail closed if the reference is unauthorized,
 cross-scope, nonterminal, incompatible, malformed, or input-mismatched. A valid reference must
@@ -275,7 +286,7 @@ Changes to component ownership, authoritative decisions, canonical identities, C
 - [ ] Versioning, compatibility, deprecation, and security requirements are testable.
 - [ ] All nine Mermaid diagrams are valid and consistent with prose.
 - [ ] Relative links resolve and `git diff --check` passes.
-- [ ] Frozen baselines remain unchanged except for the focused `DispatchExecutionAttempt` v2 interpretation authorized by ADR-001; no additional ADR or boundary change is required.
+- [ ] Frozen baselines remain unchanged except for the focused `DispatchExecutionAttempt` v2 interpretations authorized by ADR-001 and the approved ADR-002 admission-binding amendment; no additional component, identity, accounting owner, or boundary change is introduced.
 
 ## 15. Review Checklist
 
@@ -297,7 +308,7 @@ Reviewers SHALL verify:
 
 ## 16. Definition of Done
 
-- [ ] The original two-file ES-006 baseline remains intact except for the focused ADR-001 governance artifacts and directly required index/schema updates.
+- [ ] The original two-file ES-006 baseline remains intact except for the focused ADR-001 and ADR-002 governance artifacts and directly required index/schema updates.
 - [ ] Acceptance criteria and review checks pass.
 - [ ] ADR-001 authorizes only v2 metadata propagation into `SkillInput.authoritative_result_id`; no other frozen-boundary conflict is introduced.
 - [ ] Validation evidence is recorded in a Draft Pull Request.
@@ -306,7 +317,7 @@ Reviewers SHALL verify:
 ## 17. Implementation Instructions
 
 The original ES-006 implementation used its dedicated branch and two-file scope. The focused
-ADR-001 amendment MAY additionally update the governed v2 schema, ADR/index records, and the
+ADR-001/ADR-002 amendments MAY additionally update the governed v2 schema, ADR/index records, and the
 directly affected ES-004, ES-006, and ES-016 contracts; it MUST remain documentation/schema-only.
 
 If implementation would alter a frozen component name, ownership boundary, domain identity,

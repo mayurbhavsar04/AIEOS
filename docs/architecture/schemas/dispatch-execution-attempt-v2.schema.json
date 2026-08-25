@@ -71,6 +71,10 @@
         "AuthoritativeResultId": {
           "$ref": "#/$defs/resultId",
           "description": "Optional opaque ResultId. Skill Runtime must verify authority, authorization, scope, terminality, provenance, input match, and output validity; this value is not self-authenticating."
+        },
+        "WorkflowAIBudgetAdmissionBinding": {
+          "$ref": "https://aieos.dev/contracts/workflow-ai-budget-admission-binding/v1",
+          "description": "Required by the Service Interfaces amendment only when the exact resolved CapabilityBinding route is AI Gateway. It is immutable Workflow admission evidence, not generic metadata, a Gateway reservation, or a new identity."
         }
       },
       "additionalProperties": false
@@ -81,12 +85,12 @@
     "opaqueId": {
       "type": "string",
       "minLength": 1,
-      "pattern": "\\S"
+      "pattern": "^(?![\\s\\S]*[\\r\\n]$)[\\s\\S]*\\S[\\s\\S]*$"
     },
     "resultId": {
       "type": "string",
       "minLength": 1,
-      "pattern": "\\S",
+      "pattern": "^(?![\\s\\S]*[\\r\\n]$)[\\s\\S]*\\S[\\s\\S]*$",
       "$comment": "ResultId is the existing opaque canonical Result identity; this schema does not create or impose a replacement identity format."
     },
     "nonEmptyContext": {
@@ -94,5 +98,5 @@
       "minProperties": 1
     }
   },
-  "$comment": "AuthoritativeResultId is optional v2 metadata only. Absence preserves the existing execution path. It is propagated only as SkillInput.authoritative_result_id: str | None, never as the exact {statement} payload or CapabilityPolicyContext."
+  "$comment": "AuthoritativeResultId is optional v2 metadata only. WorkflowAIBudgetAdmissionBinding is optional only for a proven non-AI route; for an AI Gateway route the Service Interfaces amendment makes it mandatory and validation is fail-closed. Neither value enters the exact {statement} payload or CapabilityPolicyContext."
 }

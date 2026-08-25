@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aieos.dev/contracts/workflow-definition/v2",
+  "title": "WorkflowDefinitionVersion v2",
+  "description": "Normative enclosing Workflow Definition version that activates WorkflowAIBudgetEnvelope v1 without changing any legacy definition format.",
+  "type": "object",
+  "required": ["DefinitionContractVersion", "WorkflowDefinitionId", "WorkflowDefinitionVersionId", "TenantId", "WorkspaceId", "PolicyId", "PolicyVersionId", "Steps"],
+  "properties": {
+    "DefinitionContractVersion": { "const": 2 },
+    "WorkflowDefinitionId": { "$ref": "#/$defs/opaqueId" },
+    "WorkflowDefinitionVersionId": { "$ref": "#/$defs/opaqueId" },
+    "TenantId": { "$ref": "#/$defs/opaqueId" },
+    "WorkspaceId": { "$ref": "#/$defs/opaqueId" },
+    "PolicyId": { "$ref": "#/$defs/opaqueId" },
+    "PolicyVersionId": { "$ref": "#/$defs/opaqueId" },
+    "WorkflowAIBudgetEnvelope": {
+      "$ref": "workflow-ai-budget-envelope-v1.schema.json"
+    },
+    "Steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["WorkflowStepDefinitionId", "CapabilityBinding"],
+        "properties": {
+          "WorkflowStepDefinitionId": { "$ref": "#/$defs/opaqueId" },
+          "CapabilityBinding": {
+            "type": "object",
+            "required": ["SkillVersionId", "CapabilityId", "CapabilityContractVersionId"],
+            "properties": {
+              "SkillVersionId": { "$ref": "#/$defs/opaqueId" },
+              "CapabilityId": { "$ref": "#/$defs/opaqueId" },
+              "CapabilityContractVersionId": { "$ref": "#/$defs/opaqueId" }
+            },
+            "additionalProperties": false,
+            "description": "The exact immutable Skill Version and Capability Contract route. Its AI/non-AI classification is derived only from the authoritative Capability Registry catalog at definition acceptance and again before Gateway dispatch."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?![\\s\\S]*[^!-~])[!-~]+$"
+    }
+  },
+  "$comment": "The envelope's WorkflowDefinitionVersionId, PolicyId, PolicyVersionId, TenantId, and WorkspaceId MUST equal the enclosing values. Exact immutable CapabilityBinding route resolution determines AI capability, so JSON Schema alone cannot decide whether the envelope is mandatory; the required hosted compatibility validator enforces both rules. Unknown DefinitionContractVersion values are rejected and never downgraded."
+}
