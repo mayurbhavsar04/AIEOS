@@ -1,12 +1,19 @@
 ---
 title: Service Interface Contracts
-version: 1.2
-status: In Review
+version: 1.3
+status: Approved
 owner: Founding Team
-last_updated: 2026-08-24
+last_updated: 2026-08-25
 ---
 
 # Service Interface Contracts
+
+## Version history
+
+| Version | Date | Author | Notes |
+| --- | --- | --- | --- |
+| 1.3 | 2026-08-25 | CTO / Architect | Approved the ADR-002 Workflow admission-to-Gateway binding amendment after exact-SHA governance review of `8d7e55317818a4c4491dd985d1d639f6a7d956a5` with Blocking 0 / Major 0 / Minor 0 / Notes 0; no implementation is authorized. |
+| 1.2 | 2026-08-24 | CTO / Architect | Returned to In Review only for ADR-002's Workflow admission-to-Gateway binding amendment; no implementation was authorized. |
 
 ## 1. Purpose
 
@@ -108,7 +115,7 @@ sequenceDiagram
 
 ### 4.1 Boundary
 
-Workflow Engine owns Workflow Definition interpretation, Workflow Instance and Workflow Step state, transition validation, checkpoints, retry policy and decisions, pause, resume, cancellation, compensation decisions, and terminal outcome. It consumes validated result Events and authoritatively produces Workflow lifecycle Events. This In Review amendment additionally makes it the owner of durable, serialized admission against the exact immutable `WorkflowAIBudgetEnvelope` v1 snapshot accepted with an AI-capable Workflow; AI Gateway remains the authoritative owner of provider cost, usage, reservation, reconciliation, failover, repair, and `AIInvocationId` accounting.
+Workflow Engine owns Workflow Definition interpretation, Workflow Instance and Workflow Step state, transition validation, checkpoints, retry policy and decisions, pause, resume, cancellation, compensation decisions, and terminal outcome. It consumes validated result Events and authoritatively produces Workflow lifecycle Events. This approved amendment additionally makes it the owner of durable, serialized admission against the exact immutable `WorkflowAIBudgetEnvelope` v1 snapshot accepted with an AI-capable Workflow; AI Gateway remains the authoritative owner of provider cost, usage, reservation, reconciliation, failover, repair, and `AIInvocationId` accounting.
 
 Workflow Engine MUST NOT execute Skills, call AI Gateway or Tools, transport Commands through Event Bus, or mutate an Execution Attempt after dispatch.
 
@@ -124,7 +131,7 @@ Workflow Engine MUST NOT execute Skills, call AI Gateway or Tools, transport Com
 | `ProcessResultEvent` | Event Bus delivery → Workflow Engine | Valid Execution, approval, or dependency Event envelope; returns consumer acknowledgement or isolation outcome. | Consumes Event only; may create next directed Command or Workflow Event. | Producer, version, scope, causation, identity, and current state valid. Success applies fact once. | Duplicate Event safe by `EventId`. Consumer timeout/redelivery does not create a Workflow retry by itself. |
 | `EvaluateRetry` | Workflow Engine decision path → Workflow Engine | Failed/timed-out attempt Event, retry policy, attempt history; returns retry, fail, compensate, pause, or escalate decision. | If retry allowed, creates new `DispatchExecutionAttempt` Command. | Prior attempt is terminal and immutable. Success records the retry decision. | New attempt receives new `CommandId`, new `ExecutionId`, incremented `AttemptNumber`; correlation and `WorkflowId` remain stable. |
 
-### 4.2.1 Workflow AI-budget admission amendment (In Review)
+### 4.2.1 Workflow AI-budget admission amendment (Approved)
 
 Before dispatching an AI-capable step, Workflow Engine serializes its durable admission for the exact
 `WorkflowId` against the [Workflow AI Budget Envelope Contract](WorkflowAIBudgetEnvelopeContract.md).
@@ -217,7 +224,7 @@ replay/idempotency and returns the existing outcome. A distinct execution receiv
 `ExecutionId`, `CommandId`, idempotency scope, and terminal Result even when it reuses the
 classification.
 
-### 5.1.2 Workflow AI-budget admission binding (In Review)
+### 5.1.2 Workflow AI-budget admission binding (Approved)
 
 When the exact immutable Skill Version and Capability Contract route resolves to AI Gateway, Skill
 Runtime MUST obtain the `WorkflowAIBudgetAdmissionBinding` carried by the dispatched

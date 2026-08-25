@@ -1,12 +1,19 @@
 ---
 title: Workflow AI Budget Envelope Contract
-version: 0.2
-status: In Review
+version: 0.3
+status: Approved
 owner: CTO / Architect
-last_updated: 2026-08-24
+last_updated: 2026-08-25
 ---
 
 # Workflow AI Budget Envelope Contract
+
+## Version history
+
+| Version | Date | Author | Notes |
+| --- | --- | --- | --- |
+| 0.3 | 2026-08-25 | CTO / Architect | Approved after exact-SHA governance review of `8d7e55317818a4c4491dd985d1d639f6a7d956a5` with Blocking 0 / Major 0 / Minor 0 / Notes 0; activation remains bounded by PR #32 merge and no Phase 6 implementation is authorized. |
+| 0.2 | 2026-08-24 | CTO / Architect | Added the In Review admission binding, conservative exposure, exact-decimal comparison, compatibility, and hosted behavioral validation requirements; no implementation was authorized. |
 
 ## Purpose and governed boundary
 
@@ -184,7 +191,7 @@ provider cost, reservation, reconciliation, failover, and repair accounting.
 | v1 envelope with malformed, mismatched, or unsupported source/version/unit | Reject before Gateway/provider dispatch | Unchanged | No field stripping, fallback, metadata substitution, or silent downgrade. |
 | Future envelope version | Reject before Gateway/provider dispatch | Unchanged | A future version requires separate governed compatibility and implementation support. |
 
-This contract is proposed/In Review only and is not activated. It changes no historical Workflow,
+This approved contract activates only when PR #32 is merged. It changes no historical Workflow,
 does not make a legacy Workflow spend-capable, and does not authorize Phase 6 implementation.
 
 The accepted envelope and definition snapshot freeze budget meaning, not authorization. Current
@@ -195,9 +202,9 @@ fails closed without mutating, substituting, or silently upgrading the accepted 
 
 ## Review gate and non-goals
 
-The frozen [Service Interfaces](ServiceInterfaces.md) artifact is In Review solely for the
-`StartWorkflow` acceptance/binding amendment below. ES-017 and TDR-025 remain the approved upstream
-governance direction and are not reopened by this PR.
+The [Service Interfaces](ServiceInterfaces.md) artifact is approved for the `StartWorkflow`
+acceptance/binding amendment below. ES-017 and TDR-025 remain the approved upstream governance
+direction and are not reopened by this PR.
 
 Out of scope: runtime or persistence implementation; Workflow Engine, Skill Runtime, Gateway, or
 provider changes; product Workflows; a new ledger or identity; merge/release/tag/freeze; and any

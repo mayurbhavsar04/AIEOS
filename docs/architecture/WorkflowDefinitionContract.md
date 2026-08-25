@@ -1,12 +1,19 @@
 ---
 title: Workflow Definition Contract
-version: 2.0
-status: In Review
+version: 2.1
+status: Approved
 owner: CTO / Architect
-last_updated: 2026-08-24
+last_updated: 2026-08-25
 ---
 
 # Workflow Definition Contract
+
+## Version history
+
+| Version | Date | Author | Notes |
+| --- | --- | --- | --- |
+| 2.1 | 2026-08-25 | CTO / Architect | Approved v2 activation under the documented compatibility and activation matrix after exact-SHA governance review of `8d7e55317818a4c4491dd985d1d639f6a7d956a5` with Blocking 0 / Major 0 / Minor 0 / Notes 0; Phase 6 implementation remains prohibited until PR #32 is merged and a separate implementation PR is explicitly authorized. |
+| 2.0 | 2026-08-24 | CTO / Architect | Added the In Review v2 enclosing shape, catalog-derived AI classification, and Workflow AI budget envelope activation boundary; no implementation was authorized. |
 
 ## Authoritative boundary
 

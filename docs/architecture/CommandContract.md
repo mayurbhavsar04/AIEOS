@@ -1,12 +1,19 @@
 ---
 title: Command Contract Model
-version: 1.3
-status: In Review
+version: 1.4
+status: Approved
 owner: Founding Team
-last_updated: 2026-08-24
+last_updated: 2026-08-25
 ---
 
 # Command Contract Model
+
+## Version history
+
+| Version | Date | Author | Notes |
+| --- | --- | --- | --- |
+| 1.4 | 2026-08-25 | CTO / Architect | Approved the ADR-002 typed Workflow admission-binding amendment after exact-SHA governance review of `8d7e55317818a4c4491dd985d1d639f6a7d956a5` with Blocking 0 / Major 0 / Minor 0 / Notes 0; no implementation is authorized. |
+| 1.3 | 2026-08-24 | CTO / Architect | Returned to In Review only for ADR-002's typed Workflow admission-binding amendment; no implementation was authorized. |
 
 ## 1. Purpose
 
@@ -87,7 +94,7 @@ enter that payload or `CapabilityPolicyContext`.
 The governed schema is [DispatchExecutionAttempt v2](schemas/dispatch-execution-attempt-v2.schema.json).
 The v1/v2 matrix is below; a v1 consumer MUST reject v2 rather than silently ignore the member.
 
-The focused In Review Workflow AI Budget Envelope amendment additionally defines typed
+The approved Workflow AI Budget Envelope amendment additionally defines typed
 [WorkflowAIBudgetAdmissionBinding v1](schemas/workflow-ai-budget-admission-binding-v1.schema.json)
 metadata. It is not generic metadata and does not create an identity, reservation, or second ledger.
 It is absent for a route proven non-AI; it is mandatory when the exact immutable Skill/Capability

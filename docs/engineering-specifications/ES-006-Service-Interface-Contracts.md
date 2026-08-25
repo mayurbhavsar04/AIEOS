@@ -1,9 +1,9 @@
 ---
 title: ES-006 — Service Interface Contracts
-version: 1.3
-status: In Review
+version: 1.4
+status: Approved
 owner: CTO / Architect
-last_updated: 2026-08-24
+last_updated: 2026-08-25
 ---
 
 # ES-006 — Service Interface Contracts
@@ -20,7 +20,7 @@ last_updated: 2026-08-24
 | **Domain baseline** | Domain v1.0, frozen at tag `domain-v1.0` |
 | **Command baseline** | ES-004, frozen at tag `contracts-v1.0-es004` |
 | **Event baseline** | ES-005, frozen at tag `contracts-v1.0-es005` |
-| **Architecture status** | In Review only for ADR-002's Workflow admission to Skill Runtime to Gateway binding. The approved v2 result-reuse baseline, component ownership, canonical identities, Result semantics, and provider boundaries remain unchanged. |
+| **Architecture status** | Approved, including ADR-002's Workflow admission to Skill Runtime to Gateway binding. The approved v2 result-reuse baseline, component ownership, canonical identities, Result semantics, and provider boundaries remain unchanged. |
 
 ## Related Documents
 
@@ -41,6 +41,7 @@ last_updated: 2026-08-24
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.4 | 2026-08-25 | CTO / Architect | Approved the ADR-002 admission-binding propagation and Gateway validation contract after exact-SHA governance review of `8d7e55317818a4c4491dd985d1d639f6a7d956a5` with Blocking 0 / Major 0 / Minor 0 / Notes 0; no implementation is authorized. |
 | 1.3 | 2026-08-24 | CTO / Architect | Returned to In Review only for the ADR-002 admission-binding propagation and Gateway validation contract; no implementation is authorized. |
 | 1.2 | 2026-08-15 | CTO / Architect | Approved after focused CTO review of `210df6491397b57875edf9942da009341c8161e1` with Blocking 0 / Major 0 / Minor 0. |
 | 1.1 | 2026-08-14 | CTO / Architect | Returned to In Review to define v2 authoritative-result propagation and Skill Runtime resolution ownership. |
@@ -132,7 +133,7 @@ durable execution/result-repository lookup, validation, authorization, isolation
 lineage, and avoided-cost evidence. It does not delegate those decisions to Memory, Capability
 Registry, AI Gateway, a provider, or a new persistence/ledger subsystem.
 
-The focused In Review Workflow AI Budget Envelope amendment additionally permits typed
+The approved Workflow AI Budget Envelope amendment additionally permits typed
 `WorkflowAIBudgetAdmissionBinding v1` only for an exact immutable Skill/Capability route that
 resolves to AI Gateway. Workflow Engine owns its atomic committed-admission transition; Skill
 Runtime validates the binding against the Command and resolved route and propagates it unchanged to
@@ -285,7 +286,7 @@ Changes to component ownership, authoritative decisions, canonical identities, C
 - [ ] Versioning, compatibility, deprecation, and security requirements are testable.
 - [ ] All nine Mermaid diagrams are valid and consistent with prose.
 - [ ] Relative links resolve and `git diff --check` passes.
-- [ ] Frozen baselines remain unchanged except for the focused `DispatchExecutionAttempt` v2 interpretations authorized by ADR-001 and the In Review ADR-002 admission-binding amendment; no additional component, identity, accounting owner, or boundary change is introduced.
+- [ ] Frozen baselines remain unchanged except for the focused `DispatchExecutionAttempt` v2 interpretations authorized by ADR-001 and the approved ADR-002 admission-binding amendment; no additional component, identity, accounting owner, or boundary change is introduced.
 
 ## 15. Review Checklist
 

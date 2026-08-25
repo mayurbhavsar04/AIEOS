@@ -1,9 +1,9 @@
 ---
 title: ES-004 — Command Contract Model
-version: 1.3
-status: In Review
+version: 1.4
+status: Approved
 owner: CTO / Architect
-last_updated: 2026-08-24
+last_updated: 2026-08-25
 ---
 
 # ES-004 — Command Contract Model
@@ -18,7 +18,7 @@ last_updated: 2026-08-24
 | **Implementer** | Engineer (Codex) |
 | **Architecture baseline** | Architecture v1.0, frozen at tag `architecture-v1.0` |
 | **Domain baseline** | Domain v1.0, frozen at tag `domain-v1.0` plus governance commit on `main` |
-| **Architecture status** | In Review only for the focused ADR-002 Workflow-admission binding carried by DispatchExecutionAttempt v2. The approved v1/v2 authoritative-result baseline, Domain identities, Result semantics, and component ownership remain unchanged. |
+| **Architecture status** | Approved, including the focused ADR-002 Workflow-admission binding carried by DispatchExecutionAttempt v2. The approved v1/v2 authoritative-result baseline, Domain identities, Result semantics, and component ownership remain unchanged. |
 
 ## Related Documents
 
@@ -38,6 +38,7 @@ last_updated: 2026-08-24
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.4 | 2026-08-25 | CTO / Architect | Approved the ADR-002 typed, fenced Workflow-admission binding after exact-SHA governance review of `8d7e55317818a4c4491dd985d1d639f6a7d956a5` with Blocking 0 / Major 0 / Minor 0 / Notes 0; no implementation is authorized. |
 | 1.3 | 2026-08-24 | CTO / Architect | Returned to In Review only for ADR-002's typed, fenced Workflow-admission binding on AI-capable DispatchExecutionAttempt v2; no implementation is authorized. |
 | 1.2 | 2026-08-15 | CTO / Architect | Approved after focused CTO review of `210df6491397b57875edf9942da009341c8161e1` with Blocking 0 / Major 0 / Minor 0. |
 | 1.1 | 2026-08-14 | CTO / Architect | Returned to In Review to govern `DispatchExecutionAttempt` v2 and optional authoritative-result reuse metadata. |
@@ -113,7 +114,7 @@ The contract SHALL define conditional presence, field relationships, immutabilit
 
 `DispatchExecutionAttempt` v1 remains supported and has no authoritative-result-reuse request.
 `DispatchExecutionAttempt` v2 is a new, separately supported Command version. The original
-approved member and the focused In Review Workflow AI Budget Envelope amendment are:
+approved member and the approved Workflow AI Budget Envelope amendment are:
 
 | Metadata member | Presence | Type | Meaning |
 | --- | --- | --- | --- |

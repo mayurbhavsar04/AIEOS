@@ -1,6 +1,6 @@
 ---
 title: ADR-002 — Workflow AI Budget Envelope Contract
-status: In Review
+status: Accepted
 owner: CTO / Architect
 date: 2026-08-21
 ---
@@ -18,7 +18,7 @@ either discard typed authority semantics or alter a frozen identity/contract mea
 
 ## Decision
 
-Introduce, subject to approval, [Workflow AI Budget Envelope v1](../schemas/workflow-ai-budget-envelope-v1.schema.json)
+Introduce [Workflow AI Budget Envelope v1](../schemas/workflow-ai-budget-envelope-v1.schema.json)
 as an additive member of the versioned [Workflow Definition Contract v2](../WorkflowDefinitionContract.md),
 contained by an immutable `WorkflowDefinitionVersionId` and governed by exact
 `PolicyId`/`PolicyVersionId` and exact Tenant/Workspace scope. Its governing prose and compatibility
@@ -89,10 +89,10 @@ authority blocks dispatch without replacing that snapshot.
 
 The focused frozen-artifact amendments are the Workflow Definition v2 contract/schema,
 the governed `DispatchExecutionAttempt` v2 schema/metadata interpretation, and
-[Service Interfaces](../ServiceInterfaces.md), which remains In Review for `StartWorkflow` and
-AI-admission binding semantics only. ES-017 and TDR-025 remain approved upstream governance and are
-not reopened. Runtime implementation remains prohibited until this ADR, schema, and interface
-amendment are approved and merged, followed by a separate implementation Draft PR.
+[Service Interfaces](../ServiceInterfaces.md), approved for `StartWorkflow` and AI-admission binding
+semantics only. ES-017 and TDR-025 remain approved upstream governance and are not reopened. Runtime
+implementation remains prohibited until PR #32 is merged, followed by a separately authorized
+implementation Draft PR.
 
 ## Revisit evidence
 

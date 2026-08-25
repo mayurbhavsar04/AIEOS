@@ -1,9 +1,9 @@
 ---
 title: Engineering Specifications
-version: 1.8
-status: In Review
+version: 1.9
+status: Approved
 owner: Founding Team
-last_updated: 2026-08-24
+last_updated: 2026-08-25
 ---
 
 # Engineering Specifications
@@ -24,7 +24,7 @@ Codex implements approved Engineering Specifications. Codex does not invent arch
 | **Engineering Governance** | [Engineering Handbook](../02-engineering-handbook/README.md) |
 | **Architecture** | [Architecture v1.0](../03-architecture/README.md) |
 | **First Specification** | [ES-001 — Execution Core](ES-001-Execution-Core.md) |
-| **Current review** | [ES-004 — Command Contract Model](ES-004-Command-Contract-Model.md) and [ES-006 — Service Interface Contracts](ES-006-Service-Interface-Contracts.md), limited to ADR-002 Workflow-admission binding governance. |
+| **Current review** | None. ES-004 and ES-006 are Approved, including the ADR-002 Workflow-admission binding governance. |
 | **Related Pull Request** | [PR #3 — Establish Engineering Specification process](https://github.com/mayurbhavsar04/AIEOS/pull/3) |
 
 ## Engineering Lifecycle
@@ -201,8 +201,8 @@ Changes to canonical domain concepts, aggregate ownership, identities, commands,
 | Specification | Title | Status |
 | --- | --- | --- |
 | [ES-001](ES-001-Execution-Core.md) | Execution Core | Draft |
-| [ES-004](ES-004-Command-Contract-Model.md) | Command Contract Model | In Review — ADR-002 admission-binding amendment only |
-| [ES-006](ES-006-Service-Interface-Contracts.md) | Service Interface Contracts | In Review — ADR-002 admission-binding amendment only |
+| [ES-004](ES-004-Command-Contract-Model.md) | Command Contract Model | Approved |
+| [ES-006](ES-006-Service-Interface-Contracts.md) | Service Interface Contracts | Approved |
 | [ES-010](ES-010-Executable-Reference-Workflow.md) | Executable Reference Workflow | Implemented |
 | [ES-011](ES-011-Durable-Runtime-Infrastructure.md) | Durable Runtime Infrastructure | Implemented |
 | [ES-012](ES-012-AI-Gateway-and-Token-Governance.md) | AI Gateway and Token Governance | Implemented |
@@ -220,6 +220,7 @@ unfrozen Phase 4 deliverable.
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 1.9 | 2026-08-25 | CTO / Architect | Recorded approval of ES-004 v1.4 and ES-006 v1.4 after exact-SHA governance review of `8d7e55317818a4c4491dd985d1d639f6a7d956a5` with Blocking 0 / Major 0 / Minor 0 / Notes 0; ES-017 remains Approved and Phase 6 implementation remains prohibited until PR #32 is merged and a separate implementation PR is explicitly authorized. |
 | 1.8 | 2026-08-24 | CTO / Architect | Returned ES-004 and ES-006 to In Review only for PR #32's ADR-002 Workflow admission-binding correction; ES-017 remains Approved and no runtime implementation is authorized. |
 | 1.7 | 2026-08-21 | CTO / Architect | Recorded approval of ES-017 v0.2 after governance review of `8e7f09bd7a036dd8935781dba6c960b196afcfef`; the separate contract-amendment implementation gate remains in force. |
 | 1.6 | 2026-08-20 | CTO / Architect | Added ES-017 as a Phase 6 governance Draft; no implementation is authorized. |
