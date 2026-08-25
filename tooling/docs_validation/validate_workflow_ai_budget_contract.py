@@ -50,10 +50,20 @@ DISPATCH = Draft202012Validator(
 
 NON_AI = "NON_AI"
 AI_GATEWAY = "AI_GATEWAY"
+DECIMAL_SCALE = 6
 
 
 class Rejected(ValueError):
     """A governed pre-dispatch rejection."""
+
+
+def scale_6_minor_units(amount: str) -> int:
+    """Convert a schema-validated canonical decimal to exact scale-6 minor units."""
+
+    integer, separator, fractional = amount.partition(".")
+    if not separator:
+        fractional = ""
+    return int(integer) * 10**DECIMAL_SCALE + int(fractional.ljust(DECIMAL_SCALE, "0") or "0")
 
 
 @dataclass(frozen=True)
@@ -348,8 +358,22 @@ def workflow_exposure(binding: dict, evidence: dict | None) -> str:
     return max(
         committed["Amount"],
         gateway["Amount"],
-        key=lambda amount: int(amount.replace(".", "").ljust(7, "0")),
+        key=scale_6_minor_units,
     )
+
+
+def require_budget_capacity(
+    binding: dict,
+    evidence: dict | None,
+    *,
+    ceiling: str,
+    requested: str,
+) -> None:
+    """Behaviorally enforce exact remaining capacity for a new admission."""
+
+    exposed = workflow_exposure(binding, evidence)
+    if scale_6_minor_units(exposed) + scale_6_minor_units(requested) > scale_6_minor_units(ceiling):
+        raise Rejected("requested exposure exceeds the Workflow AI budget ceiling")
 
 
 def assert_rejected(function: object, *args: object, **kwargs: object) -> None:
@@ -568,6 +592,53 @@ def test_admission_binding_behavior() -> None:
     assert workflow_exposure(committed_binding, reserved) == "1"
     reserved["ReservationOrEffectEvidence"]["Amount"] = "2"
     assert workflow_exposure(committed_binding, reserved) == "2"
+
+    cross_width = deepcopy(first)
+    cross_width["ReservationOrEffectEvidence"] = {
+        "State": "RESERVED",
+        "TenantId": "tenant-1",
+        "WorkspaceId": "workspace-1",
+        "Amount": "10.5",
+        "CurrencyOrReferenceUnit": "USD",
+    }
+    committed_binding["CommittedExposure"]["Amount"] = "2"
+    cross_width["Binding"] = deepcopy(committed_binding)
+    assert workflow_exposure(committed_binding, cross_width) == "10.5"
+    committed_binding["CommittedExposure"]["Amount"] = "10.5"
+    cross_width["Binding"] = deepcopy(committed_binding)
+    cross_width["ReservationOrEffectEvidence"]["Amount"] = "2"
+    assert workflow_exposure(committed_binding, cross_width) == "10.5"
+    committed_binding["CommittedExposure"]["Amount"] = "10.000001"
+    cross_width["Binding"] = deepcopy(committed_binding)
+    cross_width["ReservationOrEffectEvidence"]["Amount"] = "9.999999"
+    assert workflow_exposure(committed_binding, cross_width) == "10.000001"
+    committed_binding["CommittedExposure"]["Amount"] = "100"
+    cross_width["Binding"] = deepcopy(committed_binding)
+    cross_width["ReservationOrEffectEvidence"]["Amount"] = "99.999999"
+    assert workflow_exposure(committed_binding, cross_width) == "100"
+    committed_binding["CommittedExposure"]["Amount"] = "10.5"
+    cross_width["Binding"] = deepcopy(committed_binding)
+    cross_width["ReservationOrEffectEvidence"]["Amount"] = "10.5"
+    assert workflow_exposure(committed_binding, cross_width) == "10.5"
+
+    committed_binding["CommittedExposure"]["Amount"] = "2"
+    cross_width["Binding"] = deepcopy(committed_binding)
+    cross_width["ReservationOrEffectEvidence"]["Amount"] = "10.5"
+    assert_rejected(
+        require_budget_capacity,
+        committed_binding,
+        cross_width,
+        ceiling="11",
+        requested="0.500001",
+    )
+    require_budget_capacity(
+        committed_binding,
+        cross_width,
+        ceiling="11",
+        requested="0.5",
+    )
+
+    committed_binding["CommittedExposure"]["Amount"] = "1"
     terminal = deepcopy(reserved)
     terminal["ReservationOrEffectEvidence"] = {
         "State": "TERMINAL_RECONCILED",
