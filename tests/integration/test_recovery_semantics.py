@@ -8,9 +8,9 @@ from typing import Any, cast
 import pytest
 
 from aieos.contracts import ResultStatus
-from aieos.contracts.commands import CommandEnvelope
-from aieos.contracts.events import EventEnvelope
-from aieos.workflow_engine import WorkflowState
+from aieos.contracts.commands import CommandEnvelope, CommandMetadata
+from aieos.contracts.events import EventEnvelope, EventMetadata
+from aieos.workflow_engine import WorkflowDefinition, WorkflowInstance, WorkflowState
 from aieos_api.composition import compose
 from aieos_api.settings import HostSettings
 
@@ -214,6 +214,78 @@ async def test_completed_and_scoped_idempotency_remain_authoritative() -> None:
             payload=command.payload,
             metadata=command.metadata,
         )
+
+
+@pytest.mark.anyio
+async def test_cancelled_workflow_keeps_its_terminal_result_when_a_late_success_arrives() -> None:
+    root = compose()
+    runtime = root.reference_runtime
+    instance = WorkflowInstance(
+        workflow_id="workflow-cancelled",
+        workflow_step_id="step-cancelled",
+        definition=WorkflowDefinition("definition", "v1", "hello-aieos-skill-v1"),
+        tenant_id=runtime.settings.tenant_id,
+        workspace_id=runtime.settings.workspace_id,
+        request_id="request-cancelled",
+        correlation_id="correlation-cancelled",
+        authorization=runtime.authorization,
+        input_payload={"message": "late event"},
+        timeout_seconds=1,
+        state=WorkflowState.RUNNING,
+    )
+    runtime.workflow_repository.add(instance)
+    cancel = CommandEnvelope(
+        command_id="command-cancelled",
+        command_type="CancelWorkflow",
+        command_version="1.0",
+        correlation_id=instance.correlation_id,
+        causation_id="request-cancelled",
+        workflow_id=instance.workflow_id,
+        target_component="Workflow Engine",
+        initiator="test",
+        timestamp=runtime.clock.now(),
+        tenant_id=instance.tenant_id,
+        workspace_id=instance.workspace_id,
+        payload={},
+        metadata=CommandMetadata(
+            request_id=instance.request_id,
+            idempotency_key="cancel-workflow",
+            authorization=runtime.authorization,
+        ),
+    )
+
+    cancelled = await runtime.workflow_engine.handle(cancel)
+    del runtime.workflow_repository.command_receipts[cancel.command_id]
+    late_success = EventEnvelope(
+        event_id="event-late-success",
+        event_type="ExecutionAttemptSucceeded",
+        event_version="1.0",
+        occurred_at=runtime.clock.now(),
+        recorded_at=runtime.clock.now(),
+        producer="Skill Runtime",
+        tenant_id=instance.tenant_id,
+        workspace_id=instance.workspace_id,
+        correlation_id=instance.correlation_id,
+        causation_id="command-execution",
+        request_id=instance.request_id,
+        workflow_id=instance.workflow_id,
+        workflow_step_id=instance.workflow_step_id,
+        subject="execution-late",
+        payload={"value_reference": "unexpected-success"},
+        metadata=EventMetadata(),
+    )
+    await runtime.workflow_engine.consume(late_success)
+    replayed_cancel = await runtime.workflow_engine.handle(cancel)
+
+    assert cancelled == replayed_cancel
+    assert instance.state is WorkflowState.CANCELLED
+    assert instance.outcome == cancelled
+    assert late_success.event_id in instance.processed_event_ids
+    assert not [
+        event.event_type
+        for event in runtime.event_bus.published
+        if event.workflow_id == instance.workflow_id and event.event_type.startswith("Workflow")
+    ]
 
 
 @pytest.mark.anyio

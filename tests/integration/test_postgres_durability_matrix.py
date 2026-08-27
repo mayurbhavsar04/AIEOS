@@ -63,6 +63,7 @@ from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.contracts.events import EventEnvelope, EventMetadata
 from aieos.security_support import ScopeAuthorizer
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
+from aieos.workflow_engine import WorkflowDefinition, WorkflowInstance, WorkflowState
 from aieos_api.composition import CompositionRoot, compose
 from aieos_api.settings import HostSettings, RuntimeAdapter
 
@@ -2565,3 +2566,112 @@ async def test_structured_cancellation_uses_governed_event_and_workflow_is_termi
         )
         assert cancelled_events == 0
     await recovered.close()
+
+
+async def test_cancelled_workflow_result_is_immutable_across_restart_and_late_delivery(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    first = compose(settings)
+    runtime = first.reference_runtime
+    instance = WorkflowInstance(
+        workflow_id="workflow-durable-cancelled",
+        workflow_step_id="step-durable-cancelled",
+        definition=WorkflowDefinition("durable-cancel", "v1", "hello-aieos-skill-v1"),
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        request_id="request-durable-cancelled",
+        correlation_id="correlation-durable-cancelled",
+        authorization=runtime.authorization,
+        input_payload={"message": "late delivery"},
+        timeout_seconds=1,
+        state=WorkflowState.RUNNING,
+    )
+    runtime.workflow_repository.add(instance)
+    cancel = CommandEnvelope(
+        command_id="command-durable-cancelled",
+        command_type="CancelWorkflow",
+        command_version="1.0",
+        correlation_id=instance.correlation_id,
+        causation_id=instance.request_id,
+        workflow_id=instance.workflow_id,
+        target_component="Workflow Engine",
+        initiator="test",
+        timestamp=runtime.clock.now(),
+        tenant_id=instance.tenant_id,
+        workspace_id=instance.workspace_id,
+        payload={},
+        metadata=CommandMetadata(
+            request_id=instance.request_id,
+            idempotency_key="durable-cancelled",
+            authorization=runtime.authorization,
+        ),
+    )
+    cancelled = await runtime.run_workflow_command(cancel)
+    await first.close()
+
+    restarted = compose(settings)
+    recovered = restarted.reference_runtime
+    for participant in recovered.durable_participants:
+        await participant.prepare()
+    late_success = EventEnvelope(
+        event_id="event-durable-late-success",
+        event_type="ExecutionAttemptSucceeded",
+        event_version="1.0",
+        occurred_at=recovered.clock.now(),
+        recorded_at=recovered.clock.now(),
+        producer="Skill Runtime",
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        correlation_id=instance.correlation_id,
+        causation_id="command-durable-execution",
+        request_id=instance.request_id,
+        workflow_id=instance.workflow_id,
+        workflow_step_id=instance.workflow_step_id,
+        subject="execution-durable-late",
+        payload={"value_reference": "must-not-replace-cancelled"},
+        metadata=EventMetadata(),
+    )
+    await recovered.workflow_engine.consume(late_success)
+    replayed_cancel = replace(
+        cancel,
+        command_id="command-durable-cancelled-replay",
+        causation_id="request-durable-cancelled-replay",
+        metadata=CommandMetadata(
+            request_id=instance.request_id,
+            idempotency_key="durable-cancelled-replay",
+            authorization=recovered.authorization,
+        ),
+    )
+    assert await recovered.run_workflow_command(replayed_cancel) == cancelled
+
+    durable = recovered.workflow_repository.instances[instance.workflow_id]
+    assert durable.state is WorkflowState.CANCELLED
+    assert durable.outcome == cancelled
+    assert late_success.event_id in durable.processed_event_ids
+    async with database.transaction() as session:
+        terminal_results = tuple(
+            await session.scalars(
+                select(OutcomeRow).where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == instance.workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+        )
+        terminal_events = tuple(
+            await session.scalars(
+                select(OutboxEventRow).where(
+                    OutboxEventRow.workflow_id == instance.workflow_id,
+                    OutboxEventRow.event_type.in_(
+                        ("WorkflowCompleted", "WorkflowFailed")
+                    ),
+                )
+            )
+        )
+    assert [result.outcome_id for result in terminal_results] == [cancelled.result_id]
+    assert not terminal_events
+    await restarted.close()

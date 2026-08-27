@@ -232,6 +232,17 @@ class WorkflowEngine:
             return
         if event.tenant_id != instance.tenant_id or event.workspace_id != instance.workspace_id:
             raise PermissionError("cross-scope Event delivery denied")
+        # A terminal Workflow outcome is immutable.  Late redelivery of a
+        # different attempt terminal event is expected after cancellation,
+        # failover, or a process crash; it must not replace the authoritative
+        # result selected by the first terminal transition.
+        if instance.state in {
+            WorkflowState.COMPLETED,
+            WorkflowState.FAILED,
+            WorkflowState.CANCELLED,
+        }:
+            instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
+            return
         if event.event_type == "ExecutionAttemptSucceeded":
             await self._complete(instance, event)
             instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
@@ -404,6 +415,20 @@ class WorkflowEngine:
                 "WORKFLOW_SCOPE_MISMATCH",
                 "Workflow does not belong to the command scope",
             )
+        if instance.state is WorkflowState.CANCELLED:
+            # A crash may occur after the authoritative cancellation outcome
+            # commits but before this command receipt does.  Rebuild that
+            # receipt from the immutable terminal outcome rather than minting
+            # a second cancellation result on recovery.
+            if instance.outcome is None:
+                raise RuntimeError("cancelled Workflow is missing its terminal outcome")
+            self._repository.remember_completed_command(
+                command,
+                instance.outcome,
+                instance.workflow_id,
+                instance.error,
+            )
+            return instance.outcome
         if instance.state in {WorkflowState.COMPLETED, WorkflowState.FAILED}:
             return self._reject(
                 command, "WORKFLOW_ALREADY_TERMINAL", "terminal Workflow cannot be cancelled"

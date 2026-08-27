@@ -995,6 +995,18 @@ class ReferenceAIGateway:
                         invocation_id, effect_key=effect_key
                     )
                     if provider_result is None:
+                        # Make the provider crossing recoverable before it starts.
+                        # A restarted worker can now distinguish a never-started
+                        # attempt from one whose provider-side completion must be
+                        # recovered through the adapter's durable effect boundary.
+                        await self.store.reserve_provider_effect(
+                            invocation_id,
+                            effect_key=effect_key,
+                            attempt_number=attempts,
+                            model_key=candidate.model_key,
+                            owner=owner,
+                            generation=generation,
+                        )
                         invocation_call = adapter.invoke(
                             model_key=candidate.model_key,
                             prompt=prompt,
