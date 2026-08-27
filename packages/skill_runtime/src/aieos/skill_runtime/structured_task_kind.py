@@ -249,6 +249,20 @@ class StructuredTaskKindClassification:
                 repair_attempts=1,
                 cache_allowed=False,
                 workflow_ai_budget_admission=admission,
+                workflow_id=(str(admission["WorkflowId"]) if admission is not None else None),
+                workflow_step_id=(
+                    str(admission["WorkflowStepId"]) if admission is not None else None
+                ),
+                workflow_definition_version_id=(
+                    str(admission["WorkflowDefinitionVersionId"]) if admission is not None else None
+                ),
+                skill_version_id=(
+                    str(
+                        cast(Mapping[str, object], admission["CapabilityBinding"])["SkillVersionId"]
+                    )
+                    if admission is not None
+                    else None
+                ),
             )
         )
         return self._complete_ai_path(skill_input, package, response, classification)

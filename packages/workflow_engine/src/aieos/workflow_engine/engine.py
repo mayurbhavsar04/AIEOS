@@ -208,6 +208,12 @@ class WorkflowEngine:
                 return await self._resume_start(receipt)
         if command.target_component != self.component_name:
             raise ValueError("Command target does not match Workflow Engine")
+        if command.command_version not in {"1", "1.0", "2", "2.0"}:
+            return self._reject(
+                command,
+                "WORKFLOW_COMMAND_VERSION_UNSUPPORTED",
+                "unknown Workflow command version cannot use compatibility fallback",
+            )
         if command.command_type == "StartWorkflow":
             return await self._start(command)
         if command.command_type == "CancelWorkflow":
@@ -306,7 +312,8 @@ class WorkflowEngine:
             ai_budget_envelope=budget_envelope,
         )
         envelope: WorkflowAIBudgetEnvelope | None = None
-        if definition.workflow_kind == "ClassifyAndRouteTask":
+        ai_capable_definition = definition.skill_version_id == "structured-task-kind-skill-v1"
+        if ai_capable_definition:
             # This is deliberately before instance creation and dispatch: malformed
             # reference-workflow input never reaches Skill Runtime or Gateway.
             statement = command.payload.get("statement")
@@ -492,9 +499,7 @@ class WorkflowEngine:
         self, instance: WorkflowInstance, causation_id: str
     ) -> CommandEnvelope:
         envelope = instance.ai_budget_envelope
-        governed_ai_route = (
-            envelope is not None and instance.definition.workflow_kind == "ClassifyAndRouteTask"
-        )
+        governed_ai_route = instance.definition.skill_version_id == "structured-task-kind-skill-v1"
         if governed_ai_route and instance.input_payload.get("authoritative_result_id") is None:
             try:
                 self._authorizer.require(

@@ -52,6 +52,8 @@ def _validate_workflow_admission_binding(
     capability_contract_version_id: str,
     policy_id: str,
     policy_version_id: str,
+    workflow_definition_version_id: str,
+    gateway_idempotency_key: str,
 ) -> None:
     raw_committed = value.get("CommittedExposure")
     if not isinstance(raw_committed, Mapping):
@@ -68,6 +70,10 @@ def _validate_workflow_admission_binding(
         or value.get("WorkspaceId") != workspace_id
         or value.get("PolicyId") != policy_id
         or value.get("PolicyVersionId") != policy_version_id
+        or value.get("WorkflowDefinitionVersionId") != workflow_definition_version_id
+        or value.get("GatewayIdempotencyKey") != gateway_idempotency_key
+        or not isinstance(value.get("WorkflowAdmissionStateVersion"), int)
+        or cast(int, value.get("WorkflowAdmissionStateVersion")) < 1
         or value.get("CapabilityBinding")
         != {
             "SkillVersionId": skill_version_id,
@@ -313,13 +319,11 @@ class SkillRuntime:
                 "CAPABILITY_IMPLEMENTATION_MISMATCH",
                 "Skill and Capability resolution evidence disagree",
             )
-        # A v2 Workflow dispatch is an AI-capable governed route.  The Runtime
-        # can only relay the immutable Workflow Engine binding; it cannot mint
-        # or repair one from generic command metadata.
-        if (
-            command.command_version in {"2", "2.0"}
-            and command.metadata.authoritative_result_id is None
-        ):
+        ai_capable_route = capability.boundary == "AI Gateway"
+        workflow_owned = command.initiator == "Workflow Engine"
+        # Capability resolution, not caller-selected command version, activates
+        # the governed admission boundary for every Workflow-owned AI route.
+        if ai_capable_route and workflow_owned and command.metadata.authoritative_result_id is None:
             binding = command.metadata.workflow_ai_budget_admission
             if binding is None:
                 return self._reject(
@@ -341,6 +345,9 @@ class SkillRuntime:
                     capability_contract_version_id=definition.capability_contract_version_id,
                     policy_id=command.metadata.authorization.policy_id,
                     policy_version_id=command.metadata.authorization.policy_version_id,
+                    workflow_definition_version_id="classify-and-route-task-v1",
+                    gateway_idempotency_key=f"{command.workflow_id}:{command.workflow_step_id}:"
+                    f"{command.command_id}:{command.execution_id}",
                 )
             except ValueError:
                 return self._reject(

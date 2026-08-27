@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
@@ -114,6 +115,10 @@ class AIInvocationRequest:
     cache_allowed: bool = True
     deterministic_parameters: tuple[tuple[str, str], ...] = ()
     workflow_ai_budget_admission: Mapping[str, object] | None = None
+    workflow_id: str | None = None
+    workflow_step_id: str | None = None
+    workflow_definition_version_id: str | None = None
+    skill_version_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1621,6 +1626,9 @@ class ReferenceAIGateway:
             binding.get("BindingContractVersion") != 1
             or binding.get("TenantId") != request.tenant_id
             or binding.get("WorkspaceId") != request.workspace_id
+            or binding.get("WorkflowId") != request.workflow_id
+            or binding.get("WorkflowStepId") != request.workflow_step_id
+            or binding.get("WorkflowDefinitionVersionId") != request.workflow_definition_version_id
             or binding.get("CommandId") != request.command_id
             or binding.get("ExecutionId") != request.execution_id
             or binding.get("PolicyId") != request.authorization.policy_id
@@ -1630,12 +1638,22 @@ class ReferenceAIGateway:
             or state_version < 1
             or capability
             != {
-                "SkillVersionId": "structured-task-kind-skill-v1",
+                "SkillVersionId": request.skill_version_id,
                 "CapabilityId": request.capability_id,
                 "CapabilityContractVersionId": request.capability_contract_version_id,
             }
             or set(exposure) != {"Amount", "CurrencyOrReferenceUnit"}
             or exposure.get("CurrencyOrReferenceUnit") != "USD"
+            or not isinstance(exposure.get("Amount"), str)
+        ):
+            raise ValueError("Workflow AI admission binding does not match Gateway request")
+        scale6_amount = cast(str, exposure["Amount"])
+        if (
+            re.fullmatch(
+                r"^(?:0\.[0-9]{0,5}[1-9]|[1-9][0-9]*(?:\.[0-9]{0,5}[1-9])?)$",
+                scale6_amount,
+            )
+            is None
         ):
             raise ValueError("Workflow AI admission binding does not match Gateway request")
 

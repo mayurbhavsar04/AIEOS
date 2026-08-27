@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 
@@ -180,6 +181,50 @@ async def test_stale_policy_version_fails_closed_before_gateway():
     result = await runtime_.run_workflow_command(workflow_command(root, authorization=stale))
     assert result.result_status is ResultStatus.REJECTED
     assert not runtime_.reference_ai_gateway.store.invocations
+
+
+@pytest.mark.anyio
+async def test_legacy_workflow_ai_activation_is_envelope_governed_but_non_ai_remains_valid() -> (
+    None
+):
+    root = runtime()
+    ai_command = workflow_command(root)
+    legacy_ai = replace(
+        ai_command,
+        command_version="1.0",
+        payload={
+            key: value
+            for key, value in ai_command.payload.items()
+            if key not in {"workflow_ai_budget_envelope", "workflow_kind"}
+        },
+    )
+    rejected = await root.reference_runtime.run_workflow_command(legacy_ai)
+    assert rejected.result_status is ResultStatus.REJECTED
+    assert not root.reference_runtime.reference_ai_gateway.store.invocations
+
+    non_ai = replace(
+        workflow_command(root),
+        command_id=root.reference_runtime.identifiers.new("command"),
+        command_version="1.0",
+        payload={
+            "workflow_definition_id": "HelloAIEOSWorkflow",
+            "workflow_definition_version_id": "hello-aieos-workflow-v1",
+            "skill_version_id": "hello-aieos-skill-v1",
+            "message": "hello",
+            "max_attempts": 1,
+        },
+    )
+    accepted = await root.reference_runtime.run_workflow_command(non_ai)
+    assert accepted.result_status is ResultStatus.ACCEPTED
+
+
+@pytest.mark.anyio
+async def test_unknown_workflow_command_version_fails_closed() -> None:
+    root = runtime()
+    command = replace(workflow_command(root), command_version="99.0")
+    result = await root.reference_runtime.run_workflow_command(command)
+    assert result.result_status is ResultStatus.REJECTED
+    assert not root.reference_runtime.reference_ai_gateway.store.invocations
 
 
 @pytest.mark.anyio

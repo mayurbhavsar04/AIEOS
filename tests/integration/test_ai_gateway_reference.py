@@ -97,6 +97,73 @@ def _request(**overrides: object) -> AIInvocationRequest:
     return AIInvocationRequest(**values)  # type: ignore[arg-type]
 
 
+def _workflow_binding() -> dict[str, object]:
+    return {
+        "BindingContractVersion": 1,
+        "TenantId": "tenant-a",
+        "WorkspaceId": "workspace-a",
+        "WorkflowId": "workflow-1",
+        "WorkflowStepId": "step-1",
+        "CommandId": "command-1",
+        "ExecutionId": "execution-1",
+        "WorkflowDefinitionVersionId": "definition-v1",
+        "PolicyId": "policy",
+        "PolicyVersionId": "v1",
+        "WorkflowAdmissionStateVersion": 1,
+        "GatewayIdempotencyKey": "idem-1",
+        "CommittedExposure": {"Amount": "0.01", "CurrencyOrReferenceUnit": "USD"},
+        "CapabilityBinding": {
+            "SkillVersionId": "skill-v1",
+            "CapabilityId": "text-generation",
+            "CapabilityContractVersionId": "text-v1",
+        },
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("field", "mutated"),
+    (
+        ("TenantId", "tenant-b"),
+        ("WorkspaceId", "workspace-b"),
+        ("WorkflowId", "workflow-b"),
+        ("WorkflowStepId", "step-b"),
+        ("CommandId", "command-b"),
+        ("ExecutionId", "execution-b"),
+        ("WorkflowDefinitionVersionId", "definition-b"),
+        ("PolicyId", "policy-b"),
+        ("PolicyVersionId", "v2"),
+        ("WorkflowAdmissionStateVersion", 0),
+        ("GatewayIdempotencyKey", "idem-b"),
+        ("CommittedExposure", {"Amount": "0.010000", "CurrencyOrReferenceUnit": "USD"}),
+        (
+            "CapabilityBinding",
+            {
+                "SkillVersionId": "skill-b",
+                "CapabilityId": "text-generation",
+                "CapabilityContractVersionId": "text-v1",
+            },
+        ),
+    ),
+)
+async def test_gateway_rejects_every_mutated_workflow_admission_binding_before_provider(
+    field: str, mutated: object
+) -> None:
+    gateway, economy, quality = _gateway()
+    binding = _workflow_binding()
+    binding[field] = mutated
+    request = _request(
+        workflow_ai_budget_admission=binding,
+        workflow_id="workflow-1",
+        workflow_step_id="step-1",
+        workflow_definition_version_id="definition-v1",
+        skill_version_id="skill-v1",
+    )
+    with pytest.raises(ValueError, match="Workflow AI admission"):
+        await gateway.accept(request)
+    assert economy.calls == quality.calls == 0
+
+
 @pytest.mark.anyio
 async def test_acceptance_owns_identity_and_lifecycle_order() -> None:
     gateway, _, _ = _gateway()

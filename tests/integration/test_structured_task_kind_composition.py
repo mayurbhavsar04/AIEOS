@@ -63,7 +63,7 @@ def command(
         correlation_id="structured-correlation",
         causation_id="workflow-command",
         target_component="Skill Runtime",
-        initiator="Workflow Engine",
+        initiator="Reference Host",
         timestamp=datetime(2026, 8, 13, tzinfo=UTC),
         tenant_id=root.settings.tenant_id,
         workspace_id=root.settings.workspace_id,
@@ -127,6 +127,21 @@ async def test_composed_capability_resolves_schema_and_uses_real_gateway() -> No
 
 
 @pytest.mark.anyio
+async def test_legacy_workflow_owned_ai_route_without_admission_fails_before_gateway() -> None:
+    root = compose()
+    runtime = root.reference_runtime
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    workflow_owned = replace(command(root), initiator="Workflow Engine")
+    result = await runtime.skill_runtime.handle(workflow_owned)
+    assert result.result_status is ResultStatus.REJECTED
+    assert not runtime.reference_ai_gateway.store.invocations
+    adapter = runtime.reference_ai_gateway._adapters[  # pyright: ignore[reportPrivateUsage]
+        "mock-economy"
+    ]
+    assert isinstance(adapter, DeterministicMockProvider) and adapter.calls == 0
+
+
+@pytest.mark.anyio
 async def test_governed_v2_without_admission_fails_before_gateway() -> None:
     root = compose()
     runtime = root.reference_runtime
@@ -135,6 +150,7 @@ async def test_governed_v2_without_admission_fails_before_gateway() -> None:
     governed = replace(
         legacy,
         command_version="2.0",
+        initiator="Workflow Engine",
         payload={"statement": "What is the status?"},
         metadata=replace(
             legacy.metadata,
