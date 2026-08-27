@@ -243,6 +243,12 @@ class SkillRuntime:
             or command.metadata.attempt_number is None
         ):
             return self._reject(command, "SKILL_CONTEXT_INVALID", "execution context is incomplete")
+        if command.command_version not in {"1", "1.0", "2", "2.0"}:
+            return self._reject(
+                command,
+                "SKILL_COMMAND_VERSION_UNSUPPORTED",
+                "unknown execution command version cannot use a legacy compatibility path",
+            )
 
         skill_version_id = (
             command.metadata.skill_version_id
@@ -264,10 +270,17 @@ class SkillRuntime:
         # A v2 Workflow dispatch is an AI-capable governed route.  The Runtime
         # can only relay the immutable Workflow Engine binding; it cannot mint
         # or repair one from generic command metadata.
-        if command.command_version in {"2", "2.0"}:
+        if (
+            command.command_version in {"2", "2.0"}
+            and command.metadata.authoritative_result_id is None
+        ):
             binding = command.metadata.workflow_ai_budget_admission
             if binding is None:
-                return self._reject(command, "WORKFLOW_AI_ADMISSION_REQUIRED", "governed AI execution requires committed admission")
+                return self._reject(
+                    command,
+                    "WORKFLOW_AI_ADMISSION_REQUIRED",
+                    "governed AI execution requires committed admission",
+                )
             try:
                 validate_binding(
                     binding,
@@ -282,7 +295,11 @@ class SkillRuntime:
                     capability_contract_version_id=definition.capability_contract_version_id,
                 )
             except ValueError:
-                return self._reject(command, "WORKFLOW_AI_ADMISSION_INVALID", "governed AI admission binding mismatch")
+                return self._reject(
+                    command,
+                    "WORKFLOW_AI_ADMISSION_INVALID",
+                    "governed AI admission binding mismatch",
+                )
         try:
             implementation = self._skill_implementations[definition.implementation_reference]
         except KeyError:
@@ -353,6 +370,7 @@ class SkillRuntime:
                 if key not in {"skill_version_id", "timeout_seconds"}
             },
             authoritative_result_id=command.metadata.authoritative_result_id,
+            workflow_ai_budget_admission=command.metadata.workflow_ai_budget_admission,
         )
         reused_result_id: str | None = None
         try:

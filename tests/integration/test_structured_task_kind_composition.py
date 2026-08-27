@@ -96,6 +96,8 @@ async def test_composed_capability_resolves_schema_and_uses_real_gateway() -> No
     assert record.result is not None and record.result.result_status is ResultStatus.SUCCEEDED
     assert record.result.value_reference == '{"task_kind":"Question"}'
     invocation = next(iter(runtime.reference_ai_gateway.store.invocations.values()))
+    assert invocation.request.idempotency_key == "execution-structured"
+    assert invocation.request.workflow_ai_budget_admission is None
     assert invocation.request.output_schema_ref == "structured-task-kind-schema-v1"
     assert invocation.request.output_schema is STRUCTURED_TASK_KIND_PACKAGE.output_schema
     assert invocation.request.output_schema_identity == STRUCTURED_TASK_KIND_PACKAGE.identity
@@ -122,6 +124,41 @@ async def test_composed_capability_resolves_schema_and_uses_real_gateway() -> No
     assert capability_record.context.ai_invocation_id == invocation.invocation_id
     assert capability_record.attributes["accounting_correlation"] == "ai_invocation_id"
     assert capability_record.attributes["provider_attempt_count_status"] == "canonical_store"
+
+
+@pytest.mark.anyio
+async def test_governed_v2_without_admission_fails_before_gateway() -> None:
+    root = compose()
+    runtime = root.reference_runtime
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    legacy = command(root)
+    governed = replace(
+        legacy,
+        command_version="2.0",
+        payload={"statement": "What is the status?"},
+        metadata=replace(
+            legacy.metadata,
+            skill_version_id="structured-task-kind-skill-v1",
+        ),
+    )
+
+    result = await runtime.skill_runtime.handle(governed)
+
+    assert result.result_status is ResultStatus.REJECTED
+    assert not runtime.reference_ai_gateway.store.invocations
+
+
+@pytest.mark.anyio
+async def test_unknown_workflow_dispatch_version_cannot_use_legacy_fallback() -> None:
+    root = compose()
+    runtime = root.reference_runtime
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    unknown = replace(command(root), command_version="3.0")
+
+    result = await runtime.skill_runtime.handle(unknown)
+
+    assert result.result_status is ResultStatus.REJECTED
+    assert not runtime.reference_ai_gateway.store.invocations
 
 
 @pytest.mark.anyio

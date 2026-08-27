@@ -113,6 +113,7 @@ class AIInvocationRequest:
     repair_attempts: int = 1
     cache_allowed: bool = True
     deterministic_parameters: tuple[tuple[str, str], ...] = ()
+    workflow_ai_budget_admission: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +392,7 @@ class ReferenceGatewayStore:
             "repair_attempts": request.repair_attempts,
             "cache_allowed": request.cache_allowed,
             "parameters": sorted(request.deterministic_parameters),
+            "workflow_ai_budget_admission": request.workflow_ai_budget_admission,
         }
         return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -1572,6 +1574,54 @@ class ReferenceAIGateway:
             raise ValueError("coarse budget feasibility failed")
         if (request.output_schema is None) != (request.output_schema_identity is None):
             raise ValueError("governed schema material and identity must be bound together")
+        if request.workflow_ai_budget_admission is not None:
+            self._validate_workflow_admission(request)
+
+    @staticmethod
+    def _validate_workflow_admission(request: AIInvocationRequest) -> None:
+        binding = request.workflow_ai_budget_admission
+        required = {
+            "BindingContractVersion",
+            "TenantId",
+            "WorkspaceId",
+            "WorkflowId",
+            "WorkflowStepId",
+            "CommandId",
+            "ExecutionId",
+            "WorkflowDefinitionVersionId",
+            "PolicyId",
+            "PolicyVersionId",
+            "WorkflowAdmissionStateVersion",
+            "GatewayIdempotencyKey",
+            "CommittedExposure",
+            "CapabilityBinding",
+        }
+        if not isinstance(binding, Mapping) or set(binding) != required:
+            raise ValueError("committed Workflow AI admission binding is required")
+        capability = binding.get("CapabilityBinding")
+        exposure = binding.get("CommittedExposure")
+        if (
+            binding.get("BindingContractVersion") != 1
+            or binding.get("TenantId") != request.tenant_id
+            or binding.get("WorkspaceId") != request.workspace_id
+            or binding.get("CommandId") != request.command_id
+            or binding.get("ExecutionId") != request.execution_id
+            or binding.get("PolicyId") != request.authorization.policy_id
+            or binding.get("PolicyVersionId") != request.authorization.policy_version_id
+            or binding.get("GatewayIdempotencyKey") != request.idempotency_key
+            or not isinstance(binding.get("WorkflowAdmissionStateVersion"), int)
+            or int(binding["WorkflowAdmissionStateVersion"]) < 1
+            or capability
+            != {
+                "SkillVersionId": "structured-task-kind-skill-v1",
+                "CapabilityId": request.capability_id,
+                "CapabilityContractVersionId": request.capability_contract_version_id,
+            }
+            or not isinstance(exposure, Mapping)
+            or set(exposure) != {"Amount", "CurrencyOrReferenceUnit"}
+            or exposure.get("CurrencyOrReferenceUnit") != "USD"
+        ):
+            raise ValueError("Workflow AI admission binding does not match Gateway request")
 
     def _assemble(self, request: AIInvocationRequest, *, stage: int = 0) -> tuple[str, int, str]:
         if (

@@ -21,6 +21,7 @@ class SkillInput:
     authorization: AuthorizationContext
     payload: Mapping[str, object]
     authoritative_result_id: str | None = None
+    workflow_ai_budget_admission: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

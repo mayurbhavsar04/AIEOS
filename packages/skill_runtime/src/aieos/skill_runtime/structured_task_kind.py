@@ -203,6 +203,15 @@ class StructuredTaskKindClassification:
             result = StructuredTaskKindResult(authoritative)
             return SkillOutput(result.canonical_json(), "", "")
 
+        admission = skill_input.workflow_ai_budget_admission
+        gateway_idempotency_key = (
+            admission.get("GatewayIdempotencyKey")
+            if admission is not None
+            else skill_input.execution_id
+        )
+        if not isinstance(gateway_idempotency_key, str):
+            raise ValueError("governed AI execution requires a Gateway admission binding")
+
         response = await services.ai_gateway.invoke(
             AIInvocationRequest(
                 execution_id=skill_input.execution_id,
@@ -215,7 +224,7 @@ class StructuredTaskKindClassification:
                 causation_id=skill_input.causation_id,
                 authorization=skill_input.authorization,
                 command_id=skill_input.causation_id,
-                idempotency_key=skill_input.execution_id,
+                idempotency_key=gateway_idempotency_key,
                 prompt_template_ref=package.reference,
                 prompt_template_version_ref=package.version_reference,
                 system_instruction_ref=package.system_instruction_reference,
@@ -239,6 +248,7 @@ class StructuredTaskKindClassification:
                 max_provider_attempts=2,
                 repair_attempts=1,
                 cache_allowed=False,
+                workflow_ai_budget_admission=admission,
             )
         )
         return self._complete_ai_path(skill_input, package, response, classification)

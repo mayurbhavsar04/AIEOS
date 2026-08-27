@@ -34,6 +34,12 @@ async def test_classify_and_route_task_has_one_deterministic_terminal_route(stat
     assert accepted.result_status is ResultStatus.ACCEPTED
     assert instance.outcome is not None and instance.outcome.value_reference == route
     assert instance.outcome.result_status is ResultStatus.SUCCEEDED
+    invocation = next(iter(root.reference_runtime.reference_ai_gateway.store.invocations.values()))
+    admission = invocation.request.workflow_ai_budget_admission
+    assert admission is not None
+    assert invocation.request.idempotency_key == admission["GatewayIdempotencyKey"]
+    assert admission["CommandId"] == invocation.request.command_id
+    assert admission["ExecutionId"] == invocation.request.execution_id
 
 
 @pytest.mark.anyio
@@ -50,5 +56,6 @@ async def test_exhausted_budget_rejects_before_gateway():
     result = await root.reference_runtime.classify_and_route_task(
         "What is this?", budget_ceiling="0.000001"
     )
-    assert result.result_status is ResultStatus.ACCEPTED
+    assert result.result_status is ResultStatus.REJECTED
+    assert result.metadata == {}
     assert not root.reference_runtime.reference_ai_gateway.store.invocations
