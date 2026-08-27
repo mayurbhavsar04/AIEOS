@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -33,7 +34,48 @@ from aieos.result_error_support import OutcomeFactory
 from aieos.security_support import AuthorizationFailure, ScopeAuthorizer
 from aieos.skill_registry import SkillRegistry
 from aieos.skill_runtime.ports import Skill, SkillInput, SkillOutput, SkillServices
-from aieos.workflow_engine.governance import validate_binding
+
+_WORKFLOW_AMOUNT = re.compile(r"^(?:0\.[0-9]{0,5}[1-9]|[1-9][0-9]*(?:\.[0-9]{0,5}[1-9])?)$")
+
+
+def _validate_workflow_admission_binding(
+    value: Mapping[str, object],
+    *,
+    workflow_id: str,
+    workflow_step_id: str,
+    command_id: str,
+    execution_id: str,
+    tenant_id: str,
+    workspace_id: str,
+    skill_version_id: str,
+    capability_id: str,
+    capability_contract_version_id: str,
+) -> None:
+    raw_committed = value.get("CommittedExposure")
+    if not isinstance(raw_committed, Mapping):
+        raise ValueError("workflow AI admission binding mismatch")
+    committed = cast(Mapping[str, object], raw_committed)
+    amount = committed.get("Amount")
+    if (
+        value.get("BindingContractVersion") != 1
+        or value.get("WorkflowId") != workflow_id
+        or value.get("WorkflowStepId") != workflow_step_id
+        or value.get("CommandId") != command_id
+        or value.get("ExecutionId") != execution_id
+        or value.get("TenantId") != tenant_id
+        or value.get("WorkspaceId") != workspace_id
+        or value.get("CapabilityBinding")
+        != {
+            "SkillVersionId": skill_version_id,
+            "CapabilityId": capability_id,
+            "CapabilityContractVersionId": capability_contract_version_id,
+        }
+        or set(committed) != {"Amount", "CurrencyOrReferenceUnit"}
+        or committed.get("CurrencyOrReferenceUnit") != "USD"
+        or not isinstance(amount, str)
+        or _WORKFLOW_AMOUNT.fullmatch(amount) is None
+    ):
+        raise ValueError("workflow AI admission binding mismatch")
 
 
 class ExecutionState(StrEnum):
@@ -282,7 +324,7 @@ class SkillRuntime:
                     "governed AI execution requires committed admission",
                 )
             try:
-                validate_binding(
+                _validate_workflow_admission_binding(
                     binding,
                     workflow_id=command.workflow_id,
                     workflow_step_id=command.workflow_step_id,
