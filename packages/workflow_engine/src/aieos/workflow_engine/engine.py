@@ -657,10 +657,30 @@ class WorkflowEngine:
                 "Statement": "information_queue",
             }
             try:
-                value = routes[json.loads(str(value))["task_kind"]]
+                task_kind = json.loads(str(value))["task_kind"]
+                route = routes[task_kind]
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 await self._fail(instance, event)
                 return
+            envelope = instance.ai_budget_envelope
+            assert envelope is not None
+            value = json.dumps(
+                {
+                    "task_kind": task_kind,
+                    "route": route,
+                    "workflow_id": instance.workflow_id,
+                    "workflow_step_id": instance.workflow_step_id,
+                    "execution_id": event.execution_id,
+                    "capability_result_id": event.payload.get("result_id"),
+                    "governance_evidence": {
+                        "workflow_definition_version_id": envelope.definition_version_id,
+                        "policy_id": envelope.policy_id,
+                        "policy_version_id": envelope.policy_version_id,
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         audit_metadata: dict[str, object] = {"audit_lineage": lineage}
         envelope = instance.ai_budget_envelope
         if envelope is not None:

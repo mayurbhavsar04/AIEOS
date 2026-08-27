@@ -86,7 +86,20 @@ async def test_classify_and_route_task_has_one_deterministic_terminal_route(
     accepted = await root.reference_runtime.classify_and_route_task(statement)
     instance = next(iter(root.reference_runtime.workflow_repository.instances.values()))
     assert accepted.result_status is ResultStatus.ACCEPTED
-    assert instance.outcome is not None and instance.outcome.value_reference == route
+    assert instance.outcome is not None and instance.outcome.value_reference is not None
+    projection = json.loads(instance.outcome.value_reference)
+    assert projection["task_kind"] in {"Question", "Instruction", "Statement"}
+    assert projection["route"] == route
+    assert projection["workflow_id"] == instance.workflow_id
+    assert projection["workflow_step_id"] == instance.workflow_step_id
+    assert projection["execution_id"] == instance.execution_ids[0]
+    assert projection["capability_result_id"]
+    assert projection["governance_evidence"] == {
+        "workflow_definition_version_id": "classify-and-route-task-v1",
+        "policy_id": "reference-policy",
+        "policy_version_id": "reference-policy-v1",
+    }
+    assert not {"provider", "model", "provider_attempt"} & projection.keys()
     assert instance.outcome.result_status is ResultStatus.SUCCEEDED
     invocation = next(iter(root.reference_runtime.reference_ai_gateway.store.invocations.values()))
     admission = invocation.request.workflow_ai_budget_admission
