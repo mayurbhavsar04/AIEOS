@@ -659,22 +659,22 @@ class WorkflowEngine:
         audit_metadata: dict[str, object] = {"audit_lineage": lineage}
         envelope = instance.ai_budget_envelope
         if envelope is not None:
-            admissions = instance.ai_admissions or {}
-            committed_microusd = 0
-            for admission in admissions.values():
-                exposure = admission.get("CommittedExposure")
-                if isinstance(exposure, Mapping):
-                    scoped_exposure = cast(Mapping[str, object], exposure)
-                    amount = scoped_exposure.get("Amount")
-                    if isinstance(amount, str):
-                        committed_microusd += scale6(amount)
             avoided = lineage.get("avoided_model_calls")
+            settled_microusd, committed_microusd = self._reconcile_ai_admission(
+                instance, lineage, bypassed=avoided == 1
+            )
+            counted_microusd = settled_microusd + committed_microusd
             committed_amount = (
                 f"{committed_microusd // 1_000_000}.{committed_microusd % 1_000_000:06d}".rstrip(
                     "0"
                 ).rstrip(".")
             )
-            remaining_microusd = envelope.ceiling_microusd - committed_microusd
+            settled_amount = (
+                f"{settled_microusd // 1_000_000}.{settled_microusd % 1_000_000:06d}".rstrip(
+                    "0"
+                ).rstrip(".")
+            )
+            remaining_microusd = envelope.ceiling_microusd - counted_microusd
             remaining_amount = (
                 f"{remaining_microusd // 1_000_000}.{remaining_microusd % 1_000_000:06d}".rstrip(
                     "0"
@@ -693,6 +693,7 @@ class WorkflowEngine:
                     else lineage.get("command_id", "not_exposed")
                 ),
                 "conservative_committed_exposure": committed_amount or "0",
+                "gateway_authoritative_settled_actual": settled_amount or "0",
                 "remaining_workflow_budget": remaining_amount or "0",
                 "ai_calls_made": 0 if avoided == 1 else 1,
                 "ai_calls_avoided": 1 if avoided == 1 else 0,
@@ -716,6 +717,89 @@ class WorkflowEngine:
         )
         await self._publish_workflow_event(instance, "WorkflowCompleted", event.event_id)
         self._observe(instance, instance.outcome)
+
+    def _reconcile_ai_admission(
+        self,
+        instance: WorkflowInstance,
+        lineage: Mapping[str, object],
+        *,
+        bypassed: bool,
+    ) -> tuple[int, int]:
+        """Project matching Gateway authority; retain every unresolved commitment."""
+        states = instance.ai_admission_states or {}
+        if bypassed:
+            return (0, 0)
+        command_id = lineage.get("command_id")
+        if not isinstance(command_id, str) or command_id not in states:
+            raise ValueError("WORKFLOW_AI_GATEWAY_EVIDENCE_MISSING")
+        record: dict[str, object] = dict(states[command_id])
+        binding = record.get("Binding")
+        accounting = lineage.get("accounting_evidence")
+        if not isinstance(binding, Mapping) or not isinstance(accounting, Mapping):
+            raise ValueError("WORKFLOW_AI_GATEWAY_EVIDENCE_MISSING")
+        scoped_accounting = cast(Mapping[str, object], accounting)
+        raw_gateway = scoped_accounting.get("gateway_evidence")
+        if not isinstance(raw_gateway, Mapping):
+            raise ValueError("WORKFLOW_AI_GATEWAY_EVIDENCE_MISSING")
+        gateway = cast(Mapping[str, object], raw_gateway)
+        actual = gateway.get("actual_cost")
+        invocation_id = lineage.get("ai_invocation_id")
+        gateway_result_id = lineage.get("gateway_result_id")
+        if (
+            gateway.get("evidence_version") != 1
+            or gateway.get("status") != "settled"
+            or gateway.get("tenant_id") != instance.tenant_id
+            or gateway.get("workspace_id") != instance.workspace_id
+            or gateway.get("ai_invocation_id") != invocation_id
+            or gateway.get("settled_result_id") != gateway_result_id
+            or gateway.get("currency_or_reference_unit") != "USD"
+            or not isinstance(actual, str)
+        ):
+            raise ValueError("WORKFLOW_AI_GATEWAY_EVIDENCE_MISMATCH")
+        scale6(actual)
+        record.update(
+            {
+                "State": WorkflowAIAdmissionState.GATEWAY_ACCEPTED.value,
+                "AIInvocationId": invocation_id,
+                "GatewayEvidence": dict(gateway),
+                "Disposition": "gateway_acceptance_correlated",
+            }
+        )
+        record["State"] = WorkflowAIAdmissionState.SETTLING.value
+        record["Disposition"] = "gateway_terminal_accounting_validating"
+        record["State"] = WorkflowAIAdmissionState.RECONCILED.value
+        record["SettledActual"] = {
+            "Amount": actual,
+            "CurrencyOrReferenceUnit": "USD",
+        }
+        record["Disposition"] = "gateway_authoritative_actual_settled"
+        states[command_id] = record
+        settled = 0
+        committed = 0
+        for candidate in states.values():
+            scoped_candidate = candidate
+            candidate_state = scoped_candidate.get("State")
+            if candidate_state == WorkflowAIAdmissionState.RECONCILED.value:
+                settled_actual = scoped_candidate.get("SettledActual")
+                if not isinstance(settled_actual, Mapping):
+                    raise ValueError("WORKFLOW_AI_GATEWAY_EVIDENCE_MISSING")
+                amount = cast(Mapping[str, object], settled_actual).get("Amount")
+                if not isinstance(amount, str):
+                    raise ValueError("WORKFLOW_AI_GATEWAY_EVIDENCE_MISSING")
+                settled += scale6(amount)
+            elif candidate_state in {
+                WorkflowAIAdmissionState.COMMITTED.value,
+                WorkflowAIAdmissionState.GATEWAY_ACCEPTED.value,
+                WorkflowAIAdmissionState.SETTLING.value,
+            }:
+                exposure = scoped_candidate.get("CommittedExposure")
+                if not isinstance(exposure, Mapping):
+                    raise ValueError("WORKFLOW_AI_ADMISSION_STATE_INVALID")
+                amount = cast(Mapping[str, object], exposure).get("Amount")
+                if not isinstance(amount, str):
+                    raise ValueError("WORKFLOW_AI_ADMISSION_STATE_INVALID")
+                committed += scale6(amount)
+        return settled, committed
 
     async def _fail(self, instance: WorkflowInstance, event: EventEnvelope) -> None:
         instance.state = WorkflowState.FAILED

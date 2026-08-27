@@ -270,6 +270,12 @@ class StructuredTaskKindClassification:
                 retry=RetryClassification.NEVER_RETRY,
             ) from error
         usage = response.usage
+        raw_gateway_evidence = response.result.metadata.get("gateway_accounting_evidence")
+        gateway_evidence = (
+            dict(cast(Mapping[str, object], raw_gateway_evidence))
+            if isinstance(raw_gateway_evidence, Mapping)
+            else None
+        )
         return SkillOutput(
             result.canonical_json(),
             "",
@@ -277,6 +283,7 @@ class StructuredTaskKindClassification:
             gateway_result_id=response.result.result_id,
             accounting_evidence={
                 "settled_actual_spend_status": "canonical_gateway_store",
+                "gateway_evidence": gateway_evidence,
                 "input_tokens": usage.input_tokens if usage is not None else None,
                 "output_tokens": usage.output_tokens if usage is not None else None,
                 "cached_tokens": usage.cached_tokens if usage is not None else None,

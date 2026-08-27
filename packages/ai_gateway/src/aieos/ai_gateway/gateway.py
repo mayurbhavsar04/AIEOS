@@ -2168,7 +2168,21 @@ class ReferenceAIGateway:
             correlation_id=invocation.request.correlation_id,
             causation_id=invocation.request.causation_id,
             value_reference=f"ai-content:{hashlib.sha256(content.encode()).hexdigest()}",
+            metadata={
+                "gateway_accounting_evidence": {
+                    "evidence_version": 1,
+                    "status": "settled",
+                    "tenant_id": invocation.request.tenant_id,
+                    "workspace_id": invocation.request.workspace_id,
+                    "ai_invocation_id": invocation.invocation_id,
+                    "settled_result_id": "pending_result_binding",
+                    "actual_cost": format(invocation.cumulative_cost, "f").rstrip("0").rstrip("."),
+                    "currency_or_reference_unit": "USD",
+                }
+            },
         )
+        gateway_evidence = cast(dict[str, object], result.metadata["gateway_accounting_evidence"])
+        gateway_evidence["settled_result_id"] = result.result_id
         response = AIInvocationResponse(
             invocation.invocation_id, result, content, usage=usage, route=route, cache_hit=cache_hit
         )

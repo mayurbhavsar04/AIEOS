@@ -10,6 +10,7 @@ import pytest
 from aieos.contracts import AuthorizationContext, ResultStatus
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
+from aieos.workflow_engine.governance import scale6
 from aieos_api.composition import CompositionRoot, compose
 from aieos_api.settings import HostSettings
 
@@ -131,7 +132,8 @@ async def test_success_persists_exact_scoped_ai_lineage_and_budget_evidence():
     budget = cast(Mapping[str, object], workflow.outcome.metadata["workflow_ai_budget_evidence"])
     assert workflow.ai_budget_envelope is not None
     assert budget["policy_version_id"] == workflow.ai_budget_envelope.policy_version_id
-    assert budget["conservative_committed_exposure"] == "0.01"
+    assert budget["conservative_committed_exposure"] == "0"
+    assert scale6(cast(str, budget["gateway_authoritative_settled_actual"])) > 0
     assert budget["ai_calls_made"] == 1
 
 
@@ -230,10 +232,11 @@ async def test_admission_is_durably_committed_with_fixed_logical_binding_before_
     states = workflow.ai_admission_states or {}
     admission = states[command.command_id]
     binding = cast(Mapping[str, object], admission["Binding"])
-    assert admission["State"] == "Committed"
+    assert admission["State"] == "Reconciled"
     assert admission["WorkflowAdmissionStateVersion"] == workflow.transition_version == 1
     assert admission["GatewayIdempotencyKey"] == binding["GatewayIdempotencyKey"]
     assert admission["CommittedExposure"] == binding["CommittedExposure"]
+    assert admission["SettledActual"]
     assert admission["LogicalAdmissionKey"] == ":".join(
         (
             workflow.tenant_id,
