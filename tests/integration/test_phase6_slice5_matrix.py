@@ -1054,8 +1054,9 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
             await root.close()
         restarted = _postgres_root()
         try:
-            replay = await restarted.reference_runtime.run_workflow_command(command)
-            assert replay.result_id == result_id
+            await restarted.reference_runtime.run_workflow_command(command)
+            _, replay_terminal = _terminal(restarted)
+            assert replay_terminal.result_id == result_id
             assert workflow_id in restarted.reference_runtime.workflow_repository.instances
             async with database.transaction() as session:
                 terminal_rows = tuple(
