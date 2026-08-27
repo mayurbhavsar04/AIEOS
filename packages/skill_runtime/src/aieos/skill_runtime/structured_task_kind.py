@@ -269,7 +269,23 @@ class StructuredTaskKindClassification:
                 "Canonical structured result failed deterministic capability acceptance",
                 retry=RetryClassification.NEVER_RETRY,
             ) from error
-        return SkillOutput(result.canonical_json(), "", response.ai_invocation_id)
+        usage = response.usage
+        return SkillOutput(
+            result.canonical_json(),
+            "",
+            response.ai_invocation_id,
+            gateway_result_id=response.result.result_id,
+            accounting_evidence={
+                "settled_actual_spend_status": "canonical_gateway_store",
+                "input_tokens": usage.input_tokens if usage is not None else None,
+                "output_tokens": usage.output_tokens if usage is not None else None,
+                "cached_tokens": usage.cached_tokens if usage is not None else None,
+                "reasoning_tokens": usage.reasoning_tokens if usage is not None else None,
+                "provider_attempt_details": "not_exposed",
+                "fallback_details": "not_exposed",
+                "repair_details": "not_exposed",
+            },
+        )
 
     @staticmethod
     def _require_security_context(skill_input: SkillInput) -> None:

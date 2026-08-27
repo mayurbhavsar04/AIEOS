@@ -50,6 +50,8 @@ def _validate_workflow_admission_binding(
     skill_version_id: str,
     capability_id: str,
     capability_contract_version_id: str,
+    policy_id: str,
+    policy_version_id: str,
 ) -> None:
     raw_committed = value.get("CommittedExposure")
     if not isinstance(raw_committed, Mapping):
@@ -64,6 +66,8 @@ def _validate_workflow_admission_binding(
         or value.get("ExecutionId") != execution_id
         or value.get("TenantId") != tenant_id
         or value.get("WorkspaceId") != workspace_id
+        or value.get("PolicyId") != policy_id
+        or value.get("PolicyVersionId") != policy_version_id
         or value.get("CapabilityBinding")
         != {
             "SkillVersionId": skill_version_id,
@@ -335,6 +339,8 @@ class SkillRuntime:
                     skill_version_id=definition.skill_version_id,
                     capability_id=definition.capability_id,
                     capability_contract_version_id=definition.capability_contract_version_id,
+                    policy_id=command.metadata.authorization.policy_id,
+                    policy_version_id=command.metadata.authorization.policy_version_id,
                 )
             except ValueError:
                 return self._reject(
@@ -416,21 +422,21 @@ class SkillRuntime:
         )
         reused_result_id: str | None = None
         try:
-            if skill_input.authoritative_result_id is not None:
-                self._authorizer.require(
-                    command.metadata.authorization,
-                    permission="result.read",
-                    tenant_id=command.tenant_id,
-                    workspace_id=command.workspace_id,
-                )
-                # A reusable Result never grants execution authority.  The
-                # target capability has a separate invocation authorization.
+            if command.command_version in {"2", "2.0"}:
                 self._authorizer.require(
                     command.metadata.authorization,
                     permission="ai.invoke",
                     tenant_id=command.tenant_id,
                     workspace_id=command.workspace_id,
                 )
+                if skill_input.authoritative_result_id is not None:
+                    self._authorizer.require(
+                        command.metadata.authorization,
+                        permission="result.read",
+                        tenant_id=command.tenant_id,
+                        workspace_id=command.workspace_id,
+                    )
+            if skill_input.authoritative_result_id is not None:
                 statement = self._payload_string(skill_input.payload, "statement").strip()
                 source = self._repository.resolve_authoritative_result(
                     skill_input.authoritative_result_id,
@@ -545,6 +551,12 @@ class SkillRuntime:
         else:
             is_authoritative_bypass = reused_result_id is not None
             terminal_metadata: dict[str, object] = {
+                "workflow_id": command.workflow_id,
+                "workflow_step_id": command.workflow_step_id,
+                "command_id": command.command_id,
+                "execution_id": command.execution_id,
+                "tenant_id": command.tenant_id,
+                "workspace_id": command.workspace_id,
                 "memory_id": output.memory_id,
                 "capability_id": definition.capability_id,
                 "capability_contract_version_id": definition.capability_contract_version_id,
@@ -583,6 +595,13 @@ class SkillRuntime:
                 )
             else:
                 terminal_metadata["ai_invocation_id"] = output.ai_invocation_id
+                terminal_metadata["gateway_result_id"] = output.gateway_result_id or "not_exposed"
+                terminal_metadata["accounting_evidence"] = output.accounting_evidence or {
+                    "settled_actual_spend_status": "not_exposed",
+                    "provider_attempt_details": "not_exposed",
+                    "fallback_details": "not_exposed",
+                    "repair_details": "not_exposed",
+                }
             terminal = self._outcomes.succeeded(
                 subject=command.execution_id,
                 producer=self.component_name,
@@ -660,6 +679,29 @@ class SkillRuntime:
                 ),
                 "attempt_number": command.metadata.attempt_number,
                 "value_reference": result.value_reference,
+                "audit_lineage": {
+                    key: value
+                    for key, value in result.metadata.items()
+                    if key
+                    in {
+                        "workflow_id",
+                        "workflow_step_id",
+                        "command_id",
+                        "execution_id",
+                        "tenant_id",
+                        "workspace_id",
+                        "capability_id",
+                        "capability_contract_version_id",
+                        "ai_invocation_id",
+                        "gateway_result_id",
+                        "reuse_lineage",
+                        "reused_result_id",
+                        "ai_invocation_id_status",
+                        "execution_disposition",
+                        "avoided_model_calls",
+                        "accounting_evidence",
+                    }
+                },
             },
             metadata=EventMetadata(
                 trace_id=command.metadata.trace_id, span_id=command.metadata.span_id

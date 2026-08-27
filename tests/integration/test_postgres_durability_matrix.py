@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -2500,6 +2500,82 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
     async with database.transaction() as session:
         assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
     await recovered.close()
+
+
+async def test_governed_ai_and_reuse_audit_lineage_survive_postgres_restart(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    first = compose(settings)
+    runtime = first.reference_runtime
+    await runtime.classify_and_route_task("Where is the report?")
+    ai_workflow = next(iter(runtime.workflow_repository.instances.values()))
+    source = next(iter(runtime.execution_repository.records.values())).result
+    assert ai_workflow.outcome is not None and source is not None
+    ai_lineage = cast(Mapping[str, object], ai_workflow.outcome.metadata["audit_lineage"])
+    assert ai_lineage["ai_invocation_id"]
+    invocation_count = len(runtime.reference_ai_gateway.store.invocations)
+
+    reuse_command = CommandEnvelope(
+        command_id="command-durable-workflow-reuse-lineage",
+        command_type="StartWorkflow",
+        command_version="2.0",
+        correlation_id="correlation-durable-workflow-reuse-lineage",
+        causation_id="request-durable-workflow-reuse-lineage",
+        target_component="Workflow Engine",
+        initiator="Reference Host",
+        timestamp=runtime.clock.now(),
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        payload={
+            "workflow_definition_id": "ClassifyAndRouteTask",
+            "workflow_definition_version_id": "classify-and-route-task-v1",
+            "workflow_kind": "ClassifyAndRouteTask",
+            "skill_version_id": "structured-task-kind-skill-v1",
+            "statement": "Where is the report?",
+            "max_attempts": 1,
+            "authoritative_result_id": source.result_id,
+            "workflow_ai_budget_envelope": {
+                "ContractVersion": 1,
+                "GatewayNormalizedCostUnitRegistryVersion": 1,
+                "WorkflowDefinitionVersionId": "classify-and-route-task-v1",
+                "PolicyId": runtime.authorization.policy_id,
+                "PolicyVersionId": runtime.authorization.policy_version_id,
+                "TenantId": settings.tenant_id,
+                "WorkspaceId": settings.workspace_id,
+                "BudgetCeiling": {"Amount": "0.01", "CurrencyOrReferenceUnit": "USD"},
+            },
+        },
+        metadata=CommandMetadata(
+            request_id="request-durable-workflow-reuse-lineage",
+            idempotency_key="idem-durable-workflow-reuse-lineage",
+            authorization=runtime.authorization,
+        ),
+    )
+    await runtime.run_workflow_command(reuse_command)
+    reuse_workflow = tuple(runtime.workflow_repository.instances.values())[-1]
+    assert reuse_workflow.outcome is not None
+    reuse_lineage = cast(Mapping[str, object], reuse_workflow.outcome.metadata["audit_lineage"])
+    assert reuse_lineage["reuse_lineage"] == source.result_id
+    assert "ai_invocation_id" not in reuse_lineage
+    assert len(runtime.reference_ai_gateway.store.invocations) == invocation_count
+    ids = (ai_workflow.workflow_id, reuse_workflow.workflow_id)
+    await first.close()
+
+    restarted = compose(settings)
+    for participant in restarted.reference_runtime.durable_participants:
+        await participant.prepare()
+    durable_ai = restarted.reference_runtime.workflow_repository.instances[ids[0]]
+    durable_reuse = restarted.reference_runtime.workflow_repository.instances[ids[1]]
+    assert durable_ai.outcome is not None and durable_reuse.outcome is not None
+    assert durable_ai.outcome.metadata["audit_lineage"] == ai_lineage
+    assert durable_reuse.outcome.metadata["audit_lineage"] == reuse_lineage
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+    await restarted.close()
 
 
 async def test_structured_cancellation_uses_governed_event_and_workflow_is_terminal_after_restart(

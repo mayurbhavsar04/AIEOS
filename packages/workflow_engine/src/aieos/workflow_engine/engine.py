@@ -363,8 +363,12 @@ class WorkflowEngine:
                     instance, receipt.command.command_id
                 )
             except ValueError as exc:
-                if str(exc) != "WORKFLOW_AI_BUDGET_EXHAUSTED":
+                if str(exc) not in {
+                    "WORKFLOW_AI_BUDGET_EXHAUSTED",
+                    "WORKFLOW_AI_AUTHORIZATION_REVOKED",
+                }:
                     raise
+                code = str(exc)
                 result, error = self._outcomes.unsuccessful(
                     status=ResultStatus.REJECTED,
                     subject=instance.workflow_id,
@@ -374,11 +378,19 @@ class WorkflowEngine:
                     correlation_id=instance.correlation_id,
                     causation_id=receipt.command.command_id,
                     command_id=receipt.command.command_id,
-                    error_code="WORKFLOW_AI_BUDGET_EXHAUSTED",
-                    category=ErrorCategory.VALIDATION,
+                    error_code=code,
+                    category=(
+                        ErrorCategory.AUTHORIZATION
+                        if code == "WORKFLOW_AI_AUTHORIZATION_REVOKED"
+                        else ErrorCategory.VALIDATION
+                    ),
                     severity=ErrorSeverity.WARNING,
                     retry=RetryClassification.NEVER_RETRY,
-                    message="Workflow AI budget is exhausted before Gateway dispatch.",
+                    message=(
+                        "Workflow AI authorization is unavailable before admission."
+                        if code == "WORKFLOW_AI_AUTHORIZATION_REVOKED"
+                        else "Workflow AI budget is exhausted before Gateway dispatch."
+                    ),
                 )
                 instance.state = WorkflowState.FAILED
                 instance.outcome = result
@@ -462,15 +474,31 @@ class WorkflowEngine:
     def _create_attempt_command(
         self, instance: WorkflowInstance, causation_id: str
     ) -> CommandEnvelope:
+        envelope = instance.ai_budget_envelope
+        governed_ai_route = (
+            envelope is not None and instance.definition.workflow_kind == "ClassifyAndRouteTask"
+        )
+        if governed_ai_route and instance.input_payload.get("authoritative_result_id") is None:
+            try:
+                self._authorizer.require(
+                    instance.authorization,
+                    permission="ai.invoke",
+                    tenant_id=instance.tenant_id,
+                    workspace_id=instance.workspace_id,
+                )
+            except AuthorizationFailure as error:
+                raise ValueError("WORKFLOW_AI_AUTHORIZATION_REVOKED") from error
+            assert envelope is not None
+            if (
+                instance.authorization.policy_id != envelope.policy_id
+                or instance.authorization.policy_version_id != envelope.policy_version_id
+            ):
+                raise ValueError("WORKFLOW_AI_AUTHORIZATION_REVOKED")
         instance.attempt_number += 1
         execution_id = self._identifiers.new("execution")
         instance.execution_ids = (*instance.execution_ids, execution_id)
         command_id = self._identifiers.new("command")
         admission: Mapping[str, object] | None = None
-        envelope = instance.ai_budget_envelope
-        governed_ai_route = (
-            envelope is not None and instance.definition.workflow_kind == "ClassifyAndRouteTask"
-        )
         if (
             governed_ai_route
             and instance.authorization
@@ -522,7 +550,7 @@ class WorkflowEngine:
             workspace_id=instance.workspace_id,
             payload=(
                 {"statement": str(instance.input_payload["statement"]).strip()}
-                if admission is not None
+                if governed_ai_route
                 else {
                     **instance.input_payload,
                     "skill_version_id": instance.definition.skill_version_id,
@@ -534,9 +562,9 @@ class WorkflowEngine:
                 idempotency_key=f"{instance.workflow_step_id}:{instance.attempt_number}",
                 authorization=instance.authorization,
                 attempt_number=instance.attempt_number,
-                skill_version_id=instance.definition.skill_version_id
-                if admission is not None
-                else None,
+                skill_version_id=(
+                    instance.definition.skill_version_id if governed_ai_route else None
+                ),
                 authoritative_result_id=(
                     str(instance.input_payload["authoritative_result_id"])
                     if instance.input_payload.get("authoritative_result_id")
@@ -548,6 +576,22 @@ class WorkflowEngine:
 
     async def _complete(self, instance: WorkflowInstance, event: EventEnvelope) -> None:
         instance.state = WorkflowState.COMPLETED
+        raw_lineage = event.payload.get("audit_lineage")
+        if not isinstance(raw_lineage, Mapping):
+            await self._fail(instance, event)
+            return
+        lineage = dict(cast(Mapping[str, object], raw_lineage))
+        if (
+            lineage.get("tenant_id") != instance.tenant_id
+            or lineage.get("workspace_id") != instance.workspace_id
+            or lineage.get("workflow_id") != instance.workflow_id
+            or lineage.get("workflow_step_id") != instance.workflow_step_id
+            or lineage.get("execution_id") != event.execution_id
+            or event.execution_id not in instance.execution_ids
+        ):
+            await self._fail(instance, event)
+            return
+        lineage["capability_result_id"] = event.payload.get("result_id")
         value = event.payload.get("value_reference")
         if instance.definition.workflow_kind == "ClassifyAndRouteTask":
             routes = {
@@ -560,6 +604,49 @@ class WorkflowEngine:
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 await self._fail(instance, event)
                 return
+        audit_metadata: dict[str, object] = {"audit_lineage": lineage}
+        envelope = instance.ai_budget_envelope
+        if envelope is not None:
+            admissions = instance.ai_admissions or {}
+            committed_microusd = 0
+            for admission in admissions.values():
+                exposure = admission.get("CommittedExposure")
+                if isinstance(exposure, Mapping):
+                    scoped_exposure = cast(Mapping[str, object], exposure)
+                    amount = scoped_exposure.get("Amount")
+                    if isinstance(amount, str):
+                        committed_microusd += scale6(amount)
+            avoided = lineage.get("avoided_model_calls")
+            committed_amount = (
+                f"{committed_microusd // 1_000_000}.{committed_microusd % 1_000_000:06d}".rstrip(
+                    "0"
+                ).rstrip(".")
+            )
+            remaining_microusd = envelope.ceiling_microusd - committed_microusd
+            remaining_amount = (
+                f"{remaining_microusd // 1_000_000}.{remaining_microusd % 1_000_000:06d}".rstrip(
+                    "0"
+                ).rstrip(".")
+            )
+            audit_metadata["workflow_ai_budget_evidence"] = {
+                "contract_version": 1,
+                "source": "accepted_workflow_budget_envelope",
+                "workflow_definition_version_id": envelope.definition_version_id,
+                "policy_id": envelope.policy_id,
+                "policy_version_id": envelope.policy_version_id,
+                "admission_decision": "bypassed" if avoided == 1 else "committed",
+                "logical_admission_binding": (
+                    "not_applicable_by_design"
+                    if avoided == 1
+                    else lineage.get("command_id", "not_exposed")
+                ),
+                "conservative_committed_exposure": committed_amount or "0",
+                "remaining_workflow_budget": remaining_amount or "0",
+                "ai_calls_made": 0 if avoided == 1 else 1,
+                "ai_calls_avoided": 1 if avoided == 1 else 0,
+                "gateway_accounting": lineage.get("accounting_evidence", "not_exposed"),
+                "replay_recovery_decision": "original_or_idempotent_replay",
+            }
         instance.outcome = self._outcomes.succeeded(
             subject=instance.workflow_id,
             producer=self.component_name,
@@ -572,6 +659,7 @@ class WorkflowEngine:
             metadata={
                 "attempt_count": instance.attempt_number,
                 "execution_ids": instance.execution_ids,
+                **audit_metadata,
             },
         )
         await self._publish_workflow_event(instance, "WorkflowCompleted", event.event_id)

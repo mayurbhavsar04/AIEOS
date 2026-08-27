@@ -30,6 +30,8 @@ class SkillOutput:
     memory_id: str
     ai_invocation_id: str
     reused_result_id: str | None = None
+    gateway_result_id: str | None = None
+    accounting_evidence: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

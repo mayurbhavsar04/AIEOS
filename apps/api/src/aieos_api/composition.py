@@ -178,6 +178,7 @@ class ReferenceRuntime:
     clock: Clock
     identifiers: IdentifierFactory
     authorization: AuthorizationContext
+    authorizer: ScopeAuthorizer
     decisions: InMemoryDecisionEvidenceRepository
     durable_participants: tuple[TransactionParticipant, ...] = ()
     database: PostgresDatabase | None = None
@@ -358,7 +359,6 @@ def compose(
     resolved_clock = clock or SystemClock()
     resolved_identifiers = identifiers or UuidIdentifierFactory()
     outcomes = OutcomeFactory(resolved_clock, resolved_identifiers)
-    authorizer = ScopeAuthorizer()
     authorization = AuthorizationContext(
         actor_id="reference-user",
         permissions=frozenset(
@@ -377,6 +377,16 @@ def compose(
         workspace_id=resolved.workspace_id,
         policy_id="reference-policy",
         policy_version_id="reference-policy-v1",
+    )
+    authorizer = ScopeAuthorizer(
+        active_policy_versions={
+            (
+                resolved.tenant_id,
+                resolved.workspace_id,
+                authorization.policy_id,
+                authorization.policy_version_id,
+            )
+        }
     )
     observations = InMemoryObservationRecorder(resolved_identifiers)
     dispatcher = InProcessCommandDispatcher()
@@ -606,6 +616,7 @@ def compose(
         clock=resolved_clock,
         identifiers=resolved_identifiers,
         authorization=authorization,
+        authorizer=authorizer,
         decisions=decisions,
         durable_participants=durable_participants,
         database=database,
