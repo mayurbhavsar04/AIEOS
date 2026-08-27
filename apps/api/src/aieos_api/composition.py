@@ -207,27 +207,36 @@ class ReferenceRuntime:
         request_id = self.identifiers.new("request")
         command = CommandEnvelope(
             command_id=command_id or self.identifiers.new("command"),
-            command_type="StartWorkflow", command_version="2.0",
-            correlation_id=self.identifiers.new("correlation"), causation_id=request_id,
-            target_component="Workflow Engine", initiator="Reference Host",
-            timestamp=self.clock.now(), tenant_id=self.settings.tenant_id,
+            command_type="StartWorkflow",
+            command_version="2.0",
+            correlation_id=self.identifiers.new("correlation"),
+            causation_id=request_id,
+            target_component="Workflow Engine",
+            initiator="Reference Host",
+            timestamp=self.clock.now(),
+            tenant_id=self.settings.tenant_id,
             workspace_id=self.settings.workspace_id,
             payload={
                 "workflow_definition_id": "ClassifyAndRouteTask",
                 "workflow_definition_version_id": "classify-and-route-task-v1",
                 "workflow_kind": "ClassifyAndRouteTask",
                 "skill_version_id": "structured-task-kind-skill-v1",
-                "statement": statement, "max_attempts": 1,
+                "statement": statement,
+                "max_attempts": 1,
                 "workflow_ai_budget_envelope": {
-                    "ContractVersion": 1, "GatewayNormalizedCostUnitRegistryVersion": 1,
+                    "ContractVersion": 1,
+                    "GatewayNormalizedCostUnitRegistryVersion": 1,
                     "WorkflowDefinitionVersionId": "classify-and-route-task-v1",
                     "PolicyId": self.authorization.policy_id,
                     "PolicyVersionId": self.authorization.policy_version_id,
-                    "TenantId": self.settings.tenant_id, "WorkspaceId": self.settings.workspace_id,
+                    "TenantId": self.settings.tenant_id,
+                    "WorkspaceId": self.settings.workspace_id,
                     "BudgetCeiling": {"Amount": budget_ceiling, "CurrencyOrReferenceUnit": "USD"},
                 },
             },
-            metadata=CommandMetadata(request_id=request_id, idempotency_key=request_id, authorization=self.authorization),
+            metadata=CommandMetadata(
+                request_id=request_id, idempotency_key=request_id, authorization=self.authorization
+            ),
         )
         return await self.run_workflow_command(command)
 
