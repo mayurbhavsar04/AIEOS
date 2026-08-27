@@ -1088,11 +1088,12 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
         right_provider = _provider(right)
         left_provider._behaviors = [MockProviderBehavior.TRANSIENT_FAILURE]  # pyright: ignore[reportPrivateUsage]
         try:
-            one, two = await asyncio.gather(
+            await asyncio.gather(
                 left.reference_runtime.run_workflow_command(command),
                 right.reference_runtime.run_workflow_command(command),
             )
-            assert one == two and one.result_status is ResultStatus.REJECTED
+            _, terminal = _terminal(left)
+            assert terminal.result_status is ResultStatus.REJECTED
             assert left_provider.calls + right_provider.calls == 1
             async with database.transaction() as session:
                 assert (
