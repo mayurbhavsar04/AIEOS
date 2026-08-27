@@ -27,7 +27,9 @@ def runtime():
         ("The report is ready.", "information_queue"),
     ],
 )
-async def test_classify_and_route_task_has_one_deterministic_terminal_route(statement, route):
+async def test_classify_and_route_task_has_one_deterministic_terminal_route(
+    statement: str, route: str
+) -> None:
     root = runtime()
     accepted = await root.reference_runtime.classify_and_route_task(statement)
     instance = next(iter(root.reference_runtime.workflow_repository.instances.values()))

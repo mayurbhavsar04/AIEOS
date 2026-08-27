@@ -1598,8 +1598,13 @@ class ReferenceAIGateway:
         }
         if not isinstance(binding, Mapping) or set(binding) != required:
             raise ValueError("committed Workflow AI admission binding is required")
-        capability = binding.get("CapabilityBinding")
-        exposure = binding.get("CommittedExposure")
+        raw_capability = binding.get("CapabilityBinding")
+        raw_exposure = binding.get("CommittedExposure")
+        state_version = binding.get("WorkflowAdmissionStateVersion")
+        if not isinstance(raw_capability, Mapping) or not isinstance(raw_exposure, Mapping):
+            raise ValueError("Workflow AI admission binding does not match Gateway request")
+        capability = cast(Mapping[str, object], raw_capability)
+        exposure = cast(Mapping[str, object], raw_exposure)
         if (
             binding.get("BindingContractVersion") != 1
             or binding.get("TenantId") != request.tenant_id
@@ -1609,15 +1614,14 @@ class ReferenceAIGateway:
             or binding.get("PolicyId") != request.authorization.policy_id
             or binding.get("PolicyVersionId") != request.authorization.policy_version_id
             or binding.get("GatewayIdempotencyKey") != request.idempotency_key
-            or not isinstance(binding.get("WorkflowAdmissionStateVersion"), int)
-            or int(binding["WorkflowAdmissionStateVersion"]) < 1
+            or not isinstance(state_version, int)
+            or state_version < 1
             or capability
             != {
                 "SkillVersionId": "structured-task-kind-skill-v1",
                 "CapabilityId": request.capability_id,
                 "CapabilityContractVersionId": request.capability_contract_version_id,
             }
-            or not isinstance(exposure, Mapping)
             or set(exposure) != {"Amount", "CurrencyOrReferenceUnit"}
             or exposure.get("CurrencyOrReferenceUnit") != "USD"
         ):

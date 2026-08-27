@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import cast
 
 from aieos.command_dispatcher import CommandDispatcher
 from aieos.contracts import (
@@ -259,6 +261,12 @@ class WorkflowEngine:
             )
         except AuthorizationFailure:
             return self._reject(command, "WORKFLOW_START_UNAUTHORIZED", "Workflow start denied")
+        raw_budget_envelope = command.payload.get("workflow_ai_budget_envelope")
+        budget_envelope = (
+            cast(Mapping[str, object], raw_budget_envelope)
+            if isinstance(raw_budget_envelope, Mapping)
+            else None
+        )
         definition = WorkflowDefinition(
             workflow_definition_id=self._payload_string(command.payload, "workflow_definition_id"),
             workflow_definition_version_id=self._payload_string(
@@ -267,11 +275,7 @@ class WorkflowEngine:
             skill_version_id=self._payload_string(command.payload, "skill_version_id"),
             max_attempts=self._payload_int(command.payload, "max_attempts", 2),
             workflow_kind=str(command.payload.get("workflow_kind", "")),
-            ai_budget_envelope=(
-                command.payload.get("workflow_ai_budget_envelope")
-                if isinstance(command.payload.get("workflow_ai_budget_envelope"), Mapping)
-                else None
-            ),
+            ai_budget_envelope=budget_envelope,
         )
         envelope: WorkflowAIBudgetEnvelope | None = None
         if definition.workflow_kind == "ClassifyAndRouteTask":
@@ -438,9 +442,9 @@ class WorkflowEngine:
         instance.execution_ids = (*instance.execution_ids, execution_id)
         command_id = self._identifiers.new("command")
         admission: Mapping[str, object] | None = None
+        envelope = instance.ai_budget_envelope
         governed_ai_route = (
-            instance.ai_budget_envelope is not None
-            and instance.definition.workflow_kind == "ClassifyAndRouteTask"
+            envelope is not None and instance.definition.workflow_kind == "ClassifyAndRouteTask"
         )
         if (
             governed_ai_route
@@ -451,16 +455,21 @@ class WorkflowEngine:
             committed = 10_000  # approved structured package maximum: USD 0.01
             admissions = instance.ai_admissions
             assert admissions is not None
-            if (
-                sum(
-                    scale6(str(item["CommittedExposure"]["Amount"])) for item in admissions.values()
-                )
-                + committed
-                > instance.ai_budget_envelope.ceiling_microusd
-            ):
+            used = 0
+            for item in admissions.values():
+                raw_exposure = item.get("CommittedExposure")
+                if not isinstance(raw_exposure, Mapping):
+                    raise ValueError("WORKFLOW_AI_ADMISSION_STATE_INVALID")
+                exposure = cast(Mapping[str, object], raw_exposure)
+                amount = exposure.get("Amount")
+                if not isinstance(amount, str):
+                    raise ValueError("WORKFLOW_AI_ADMISSION_STATE_INVALID")
+                used += scale6(amount)
+            assert envelope is not None
+            if used + committed > envelope.ceiling_microusd:
                 raise ValueError("WORKFLOW_AI_BUDGET_EXHAUSTED")
             admission = admission_binding(
-                envelope=instance.ai_budget_envelope,
+                envelope=envelope,
                 workflow_id=instance.workflow_id,
                 workflow_step_id=instance.workflow_step_id,
                 command_id=command_id,
@@ -522,8 +531,6 @@ class WorkflowEngine:
                 "Statement": "information_queue",
             }
             try:
-                import json
-
                 value = routes[json.loads(str(value))["task_kind"]]
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 await self._fail(instance, event)

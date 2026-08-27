@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 _AMOUNT = re.compile(r"^(?:0\.[0-9]{0,5}[1-9]|[1-9][0-9]*(?:\.[0-9]{0,5}[1-9])?)$")
 _OPAQUE_ID = re.compile(r"^[!-~]{1,256}$")
@@ -60,25 +61,28 @@ class WorkflowAIBudgetEnvelope:
             or value.get("GatewayNormalizedCostUnitRegistryVersion") != 1
         ):
             raise ValueError("unsupported WorkflowAIBudgetEnvelope")
-        budget = value.get("BudgetCeiling")
-        if (
-            not isinstance(budget, Mapping)
-            or set(budget) != {"Amount", "CurrencyOrReferenceUnit"}
-            or budget.get("CurrencyOrReferenceUnit") != "USD"
-        ):
+        raw_budget = value.get("BudgetCeiling")
+        if not isinstance(raw_budget, Mapping) or set(raw_budget) != {
+            "Amount",
+            "CurrencyOrReferenceUnit",
+        }:
             raise ValueError("unknown normalized cost unit")
-        fields = (
-            "WorkflowDefinitionVersionId",
-            "PolicyId",
-            "PolicyVersionId",
-            "TenantId",
-            "WorkspaceId",
-        )
-        identities = tuple(_require_opaque_id(value.get(field), field) for field in fields)
+        budget = cast(Mapping[str, object], raw_budget)
+        if budget.get("CurrencyOrReferenceUnit") != "USD":
+            raise ValueError("unknown normalized cost unit")
         amount = budget.get("Amount")
         if not isinstance(amount, str):
             raise ValueError("BudgetCeiling.Amount must be a string")
-        return cls(*identities, scale6(amount))
+        return cls(
+            definition_version_id=_require_opaque_id(
+                value.get("WorkflowDefinitionVersionId"), "WorkflowDefinitionVersionId"
+            ),
+            policy_id=_require_opaque_id(value.get("PolicyId"), "PolicyId"),
+            policy_version_id=_require_opaque_id(value.get("PolicyVersionId"), "PolicyVersionId"),
+            tenant_id=_require_opaque_id(value.get("TenantId"), "TenantId"),
+            workspace_id=_require_opaque_id(value.get("WorkspaceId"), "WorkspaceId"),
+            ceiling_microusd=scale6(amount),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,19 +155,22 @@ def validate_binding(
         or value.get("WorkspaceId") != workspace_id
     ):
         raise ValueError("workflow AI admission binding lineage mismatch")
-    capability = value.get("CapabilityBinding")
-    committed = value.get("CommittedExposure")
+    raw_capability = value.get("CapabilityBinding")
+    raw_committed = value.get("CommittedExposure")
+    if not isinstance(raw_capability, Mapping) or not isinstance(raw_committed, Mapping):
+        raise ValueError("workflow AI admission binding capability mismatch")
+    capability = cast(Mapping[str, object], raw_capability)
+    committed = cast(Mapping[str, object], raw_committed)
+    amount = committed.get("Amount")
     if (
-        not isinstance(capability, Mapping)
-        or not isinstance(committed, Mapping)
-        or capability
+        capability
         != {
             "SkillVersionId": skill_version_id,
             "CapabilityId": capability_id,
             "CapabilityContractVersionId": capability_contract_version_id,
         }
         or committed.get("CurrencyOrReferenceUnit") != "USD"
-        or not isinstance(committed.get("Amount"), str)
+        or not isinstance(amount, str)
     ):
         raise ValueError("workflow AI admission binding capability mismatch")
-    scale6(committed["Amount"])
+    scale6(amount)
