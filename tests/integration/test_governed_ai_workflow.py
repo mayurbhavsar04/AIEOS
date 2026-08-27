@@ -11,6 +11,7 @@ import pytest
 from aieos.contracts import AuthorizationContext, ResultStatus
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
+from aieos.workflow_engine import WorkflowState
 from aieos.workflow_engine.governance import scale6
 from aieos_api.composition import CompositionRoot, compose
 from aieos_api.settings import HostSettings
@@ -229,6 +230,11 @@ async def test_legacy_workflow_ai_activation_is_envelope_governed_but_non_ai_rem
     )
     accepted = await root.reference_runtime.run_workflow_command(non_ai)
     assert accepted.result_status is ResultStatus.ACCEPTED
+    assert accepted.value_reference is not None
+    instance = root.reference_runtime.workflow_repository.instances[accepted.value_reference]
+    assert instance.state is WorkflowState.COMPLETED
+    assert instance.outcome is not None
+    assert instance.outcome.result_status is ResultStatus.SUCCEEDED
 
 
 @pytest.mark.anyio

@@ -9,6 +9,7 @@ process boundary that an in-memory composition cannot truthfully simulate.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -191,13 +192,29 @@ async def test_normal_routes_use_the_complete_composed_path(
     invocation = next(iter(root.reference_runtime.reference_ai_gateway.store.invocations.values()))
     admission = invocation.request.workflow_ai_budget_admission
     assert case_id in EXPECTED_CASE_IDS
-    assert result.result_status is ResultStatus.SUCCEEDED and result.value_reference == route
+    assert result.result_status is ResultStatus.SUCCEEDED
+    projection = json.loads(str(result.value_reference))
+    assert projection["route"] == route
+    assert projection["task_kind"] in {"Question", "Instruction", "Statement"}
+    assert projection["workflow_id"] == instance.workflow_id
+    assert projection["workflow_step_id"] == instance.workflow_step_id
+    assert projection["execution_id"] == invocation.request.execution_id
+    assert projection["capability_result_id"]
+    assert projection["governance_evidence"] == {
+        "workflow_definition_version_id": "classify-and-route-task-v1",
+        "policy_id": "reference-policy",
+        "policy_version_id": "reference-policy-v1",
+    }
+    assert "provider" not in projection and "model" not in projection
     assert admission is not None and len(instance.ai_admissions or {}) == 1
     assert invocation.request.idempotency_key == admission["GatewayIdempotencyKey"]
     assert _provider(root).calls == 1
     budget = cast(Mapping[str, object], result.metadata["workflow_ai_budget_evidence"])
-    assert budget["conservative_committed_exposure"] == "0.01"
-    assert budget["remaining_workflow_budget"] == "0"
+    settled = Decimal(cast(str, budget["gateway_authoritative_settled_actual"]))
+    remaining = Decimal(cast(str, budget["remaining_workflow_budget"]))
+    assert budget["conservative_committed_exposure"] == "0"
+    assert settled > 0
+    assert settled + remaining == Decimal("0.01")
     assert budget["ai_calls_made"] == 1 and budget["ai_calls_avoided"] == 0
 
 

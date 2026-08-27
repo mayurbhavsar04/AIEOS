@@ -319,10 +319,13 @@ class SkillRuntime:
                 "CAPABILITY_IMPLEMENTATION_MISMATCH",
                 "Skill and Capability resolution evidence disagree",
             )
-        ai_capable_route = capability.boundary == "AI Gateway"
+        ai_capable_route = (
+            capability.boundary == "AI Gateway"
+            and capability.capability_id == "StructuredTaskKindClassification"
+        )
         workflow_owned = command.initiator == "Workflow Engine"
-        # Capability resolution, not caller-selected command version, activates
-        # the governed admission boundary for every Workflow-owned AI route.
+        # The approved capability identity, not caller-selected command version,
+        # activates the governed admission boundary for Workflow-owned dispatch.
         if ai_capable_route and workflow_owned and command.metadata.authoritative_result_id is None:
             binding = command.metadata.workflow_ai_budget_admission
             if binding is None:
