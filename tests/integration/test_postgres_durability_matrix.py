@@ -2665,7 +2665,8 @@ async def test_cancelled_workflow_result_is_immutable_across_restart_and_late_de
         terminal_events = tuple(
             await session.scalars(
                 select(OutboxEventRow).where(
-                    OutboxEventRow.workflow_id == instance.workflow_id,
+                    OutboxEventRow.tenant_id == instance.tenant_id,
+                    OutboxEventRow.workspace_id == instance.workspace_id,
                     OutboxEventRow.event_type.in_(("WorkflowCompleted", "WorkflowFailed")),
                 )
             )
