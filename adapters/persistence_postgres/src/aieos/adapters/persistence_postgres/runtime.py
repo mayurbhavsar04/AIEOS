@@ -102,6 +102,15 @@ def scoped_idempotency_lock_key(command: CommandEnvelope) -> str:
     )
 
 
+def scoped_workflow_lock_key(command: CommandEnvelope) -> str | None:
+    """Return the governed exact-Workflow serialization key when one exists."""
+    if command.workflow_id is None:
+        return None
+    return "\x1f".join(
+        ("WorkflowAdmission", command.tenant_id, command.workspace_id, command.workflow_id)
+    )
+
+
 async def _immutable_outcome(
     session: AsyncSession,
     result: ResultEnvelope,

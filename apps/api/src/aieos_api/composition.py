@@ -26,6 +26,7 @@ from aieos.adapters.persistence_postgres import (
     TransactionParticipant,
     checkpoint,
     scoped_idempotency_lock_key,
+    scoped_workflow_lock_key,
 )
 from aieos.ai_gateway import (
     AIGateway,
@@ -330,12 +331,20 @@ class ReferenceRuntime:
             raise ValueError("workflow command must target Workflow Engine")
         if self.database is not None:
             async with self.database.command_lock(scoped_idempotency_lock_key(command)):
-                for participant in self.durable_participants:
-                    await participant.prepare()
-                result = await self.dispatcher.dispatch(command)
-                await checkpoint(self.database, self.durable_participants)
-                return result
+                workflow_lock = scoped_workflow_lock_key(command)
+                if workflow_lock is not None:
+                    async with self.database.command_lock(workflow_lock):
+                        return await self._run_workflow_prepared(command)
+                return await self._run_workflow_prepared(command)
         return await self.dispatcher.dispatch(command)
+
+    async def _run_workflow_prepared(self, command: CommandEnvelope) -> ResultEnvelope:
+        for participant in self.durable_participants:
+            await participant.prepare()
+        result = await self.dispatcher.dispatch(command)
+        assert self.database is not None
+        await checkpoint(self.database, self.durable_participants)
+        return result
 
     async def _run_prepared(self, command: CommandEnvelope) -> ResultEnvelope:
         for participant in self.durable_participants:

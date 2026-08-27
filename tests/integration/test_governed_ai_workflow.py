@@ -218,3 +218,29 @@ async def test_persistable_audit_evidence_contains_no_raw_prompt_response_or_sec
     assert statement not in encoded
     for forbidden in ("raw_prompt", "provider_response", "credential", "api_key", "secret"):
         assert f'"{forbidden}"' not in encoded
+
+
+@pytest.mark.anyio
+async def test_admission_is_durably_committed_with_fixed_logical_binding_before_gateway() -> None:
+    root = runtime()
+    await root.reference_runtime.classify_and_route_task("Where is the report?")
+    workflow = next(iter(root.reference_runtime.workflow_repository.instances.values()))
+    command = workflow.initial_attempt_command
+    assert command is not None
+    states = workflow.ai_admission_states or {}
+    admission = states[command.command_id]
+    binding = cast(Mapping[str, object], admission["Binding"])
+    assert admission["State"] == "Committed"
+    assert admission["WorkflowAdmissionStateVersion"] == workflow.transition_version == 1
+    assert admission["GatewayIdempotencyKey"] == binding["GatewayIdempotencyKey"]
+    assert admission["CommittedExposure"] == binding["CommittedExposure"]
+    assert admission["LogicalAdmissionKey"] == ":".join(
+        (
+            workflow.tenant_id,
+            workflow.workspace_id,
+            workflow.workflow_id,
+            workflow.workflow_step_id,
+            command.command_id,
+            command.execution_id or "",
+        )
+    )

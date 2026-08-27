@@ -54,6 +54,19 @@ class CommandProcessingState(StrEnum):
     COMPLETED = "Completed"
 
 
+class WorkflowAIAdmissionState(StrEnum):
+    """Approved durable lifecycle for one logical Workflow AI admission."""
+
+    REQUESTED = "Requested"
+    PENDING_ADMISSION = "PendingAdmission"
+    COMMITTED = "Committed"
+    GATEWAY_ACCEPTED = "GatewayAccepted"
+    SETTLING = "Settling"
+    RECONCILED = "Reconciled"
+    RELEASED = "Released"
+    REJECTED = "Rejected"
+
+
 @dataclass(frozen=True, slots=True)
 class WorkflowDefinition:
     workflow_definition_id: str
@@ -91,6 +104,8 @@ class WorkflowInstance:
     error: ErrorEnvelope | None = None
     ai_budget_envelope: WorkflowAIBudgetEnvelope | None = None
     ai_admissions: dict[str, Mapping[str, object]] | None = None
+    ai_admission_states: dict[str, Mapping[str, object]] | None = None
+    transition_version: int = 0
 
     def __post_init__(self) -> None:
         if self.workflow_events is None:
@@ -99,6 +114,8 @@ class WorkflowInstance:
             self.retry_commands = {}
         if self.ai_admissions is None:
             self.ai_admissions = {}
+        if self.ai_admission_states is None:
+            self.ai_admission_states = {}
 
 
 @dataclass(slots=True)
@@ -507,7 +524,9 @@ class WorkflowEngine:
             # Reuse/bypass is deliberately zero-cost and does not fabricate an AI id.
             committed = 10_000  # approved structured package maximum: USD 0.01
             admissions = instance.ai_admissions
+            admission_states = instance.ai_admission_states
             assert admissions is not None
+            assert admission_states is not None
             used = 0
             for item in admissions.values():
                 raw_exposure = item.get("CommittedExposure")
@@ -521,6 +540,31 @@ class WorkflowEngine:
             assert envelope is not None
             if used + committed > envelope.ceiling_microusd:
                 raise ValueError("WORKFLOW_AI_BUDGET_EXHAUSTED")
+            instance.transition_version += 1
+            logical_key = ":".join(
+                (
+                    instance.tenant_id,
+                    instance.workspace_id,
+                    instance.workflow_id,
+                    instance.workflow_step_id,
+                    command_id,
+                    execution_id,
+                )
+            )
+            admission_states[command_id] = {
+                "State": WorkflowAIAdmissionState.REQUESTED.value,
+                "LogicalAdmissionKey": logical_key,
+                "WorkflowAdmissionStateVersion": instance.transition_version,
+                "CommittedExposure": None,
+                "GatewayEvidence": None,
+                "SettledActual": None,
+                "Disposition": "admission_requested",
+            }
+            admission_states[command_id] = {
+                **admission_states[command_id],
+                "State": WorkflowAIAdmissionState.PENDING_ADMISSION.value,
+                "Disposition": "authority_scope_and_accounting_validated",
+            }
             admission = admission_binding(
                 envelope=envelope,
                 workflow_id=instance.workflow_id,
@@ -530,10 +574,18 @@ class WorkflowEngine:
                 skill_version_id=instance.definition.skill_version_id,
                 capability_id="StructuredTaskKindClassification",
                 capability_contract_version_id="1",
-                state_version=len(admissions) + 1,
+                state_version=instance.transition_version,
                 committed_microusd=committed,
             )
             admissions[command_id] = admission
+            admission_states[command_id] = {
+                **admission_states[command_id],
+                "State": WorkflowAIAdmissionState.COMMITTED.value,
+                "CommittedExposure": admission["CommittedExposure"],
+                "GatewayIdempotencyKey": admission["GatewayIdempotencyKey"],
+                "Binding": admission,
+                "Disposition": "committed_before_gateway_handoff",
+            }
         return CommandEnvelope(
             command_id=command_id,
             command_type="DispatchExecutionAttempt",
