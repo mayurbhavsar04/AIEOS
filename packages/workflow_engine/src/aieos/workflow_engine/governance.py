@@ -62,13 +62,13 @@ class WorkflowAIBudgetEnvelope:
         ):
             raise ValueError("unsupported WorkflowAIBudgetEnvelope")
         raw_budget = value.get("BudgetCeiling")
-        if not isinstance(raw_budget, Mapping) or set(raw_budget) != {
-            "Amount",
-            "CurrencyOrReferenceUnit",
-        }:
+        if not isinstance(raw_budget, Mapping):
             raise ValueError("unknown normalized cost unit")
         budget = cast(Mapping[str, object], raw_budget)
-        if budget.get("CurrencyOrReferenceUnit") != "USD":
+        if (
+            set(budget) != {"Amount", "CurrencyOrReferenceUnit"}
+            or budget.get("CurrencyOrReferenceUnit") != "USD"
+        ):
             raise ValueError("unknown normalized cost unit")
         amount = budget.get("Amount")
         if not isinstance(amount, str):
