@@ -1337,7 +1337,7 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
                     WorkflowRow,
                     (command.tenant_id, command.workspace_id, instance.workflow_id),
                 )
-                assert workflow_row is not None and workflow_row.state == "Succeeded"
+                assert workflow_row is not None and workflow_row.state == "Completed"
                 workflow_snapshot = cast(dict[str, Any], json.loads(workflow_row.payload))
                 assert workflow_snapshot["outcome"]["result_id"] == durable_terminal.result_id
                 assert workflow_snapshot["error"] is None
