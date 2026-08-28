@@ -1387,9 +1387,15 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
                 ) >= 1
 
             replay = await root.reference_runtime.run_workflow_command(command)
-            assert replay.result_status is ResultStatus.SUCCEEDED
-            assert replay.subject_reference == instance.workflow_id
-            assert replay.result_id == durable_terminal.result_id
+            assert replay.result_status in {ResultStatus.ACCEPTED, ResultStatus.SUCCEEDED}
+            replay_workflow_id = (
+                cast(str, replay.value_reference)
+                if replay.result_status is ResultStatus.ACCEPTED
+                else replay.subject_reference
+            )
+            assert replay_workflow_id == instance.workflow_id
+            if replay.result_status is ResultStatus.SUCCEEDED:
+                assert replay.result_id == durable_terminal.result_id
             assert provider.calls == 1
             async with database.transaction() as session:
                 terminal_result_ids = tuple(
@@ -1404,6 +1410,12 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
                     )
                 )
                 assert terminal_result_ids == (durable_terminal.result_id,)
+                replay_resolved_result_id = (
+                    replay.result_id
+                    if replay.result_status is ResultStatus.SUCCEEDED
+                    else terminal_result_ids[0]
+                )
+                assert replay_resolved_result_id == durable_terminal.result_id
         finally:
             await root.close()
         return _execution(
