@@ -1094,8 +1094,14 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
                 right.reference_runtime.run_workflow_command(command),
             )
             assert all(result.result_status is ResultStatus.ACCEPTED for result in outcomes)
-            _, terminal = _terminal(left)
-            assert terminal.result_status is ResultStatus.REJECTED
+            restarted = _postgres_root()
+            try:
+                replay = await restarted.reference_runtime.run_workflow_command(command)
+                assert replay.result_status is ResultStatus.ACCEPTED
+                _, durable_terminal = _terminal(restarted)
+                assert durable_terminal.result_status is ResultStatus.REJECTED
+            finally:
+                await restarted.close()
             assert left_provider.calls + right_provider.calls == 1
             async with database.transaction() as session:
                 assert (
