@@ -21,6 +21,7 @@ from aieos.adapters.persistence_postgres import (
     PostgresMemoryRepository,
     PostgresOutboxRelay,
     PostgresOutboxStore,
+    PostgresProviderEffectBoundary,
     PostgresRequestRepository,
     PostgresWorkflowRepository,
     TransactionParticipant,
@@ -472,6 +473,14 @@ def compose(
         delay_seconds=resolved.mock_ai_delay_seconds,
     )
     prompt_packages = PromptPackageCatalog((STRUCTURED_TASK_KIND_PACKAGE,))
+    reference_ai_adapters = {
+        "mock-economy": DeterministicMockProvider("mock-economy", prefix="Economy"),
+        "mock-quality": DeterministicMockProvider("mock-quality", prefix="Quality"),
+    }
+    if database is not None:
+        provider_effect_boundary = PostgresProviderEffectBoundary(database)
+        for adapter in reference_ai_adapters.values():
+            adapter.use_effect_boundary(provider_effect_boundary)
     reference_ai_gateway = ReferenceAIGateway(
         clock=resolved_clock,
         identifiers=resolved_identifiers,
@@ -504,10 +513,7 @@ def compose(
                 pricing_version="reference-2026-08",
             ),
         ),
-        adapters={
-            "mock-economy": DeterministicMockProvider("mock-economy", prefix="Economy"),
-            "mock-quality": DeterministicMockProvider("mock-quality", prefix="Quality"),
-        },
+        adapters=reference_ai_adapters,
         prompt_packages=prompt_packages,
     )
     routed_ai_gateway = CapabilityGatewayRouter(ai_gateway, reference_ai_gateway)
