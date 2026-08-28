@@ -1294,26 +1294,116 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
         command = _workflow_command(root)
         provider = _provider(root)
         try:
-            first, second = await asyncio.gather(
+            racing_results = await asyncio.gather(
                 root.reference_runtime.run_workflow_command(command),
                 root.reference_runtime.run_workflow_command(command),
             )
             instance, terminal = _terminal(root)
-            assert first == second == terminal and provider.calls == 1
+            assert all(
+                result.result_status in {ResultStatus.ACCEPTED, ResultStatus.SUCCEEDED}
+                for result in racing_results
+            )
+            resolved_workflow_ids = {
+                cast(str, result.value_reference)
+                if result.result_status is ResultStatus.ACCEPTED
+                else result.subject_reference
+                for result in racing_results
+            }
+            assert resolved_workflow_ids == {instance.workflow_id}
+            assert terminal.result_status is ResultStatus.SUCCEEDED
+            assert terminal.subject_reference == instance.workflow_id
+            assert provider.calls == 1
             async with database.transaction() as session:
                 terminal_rows = tuple(
                     await session.scalars(
                         select(OutcomeRow).where(
+                            OutcomeRow.tenant_id == command.tenant_id,
+                            OutcomeRow.workspace_id == command.workspace_id,
                             OutcomeRow.owner_component == "Workflow Engine",
                             OutcomeRow.subject_id == instance.workflow_id,
                             OutcomeRow.terminal.is_(True),
                         )
                     )
                 )
-                assert [outcome.outcome_id for outcome in terminal_rows] == [terminal.result_id]
+                assert len(terminal_rows) == 1
+                durable_terminal = TypeAdapter(ResultEnvelope).validate_json(
+                    terminal_rows[0].payload
+                )
+                assert durable_terminal.result_status is ResultStatus.SUCCEEDED
+                assert durable_terminal.result_id == terminal.result_id
+                assert durable_terminal.subject_reference == instance.workflow_id
+
+                workflow_row = await session.get(
+                    WorkflowRow,
+                    (command.tenant_id, command.workspace_id, instance.workflow_id),
+                )
+                assert workflow_row is not None and workflow_row.state == "Succeeded"
+                workflow_snapshot = cast(dict[str, Any], json.loads(workflow_row.payload))
+                assert workflow_snapshot["outcome"]["result_id"] == durable_terminal.result_id
+                assert workflow_snapshot["error"] is None
+
+                invocations = tuple(
+                    await session.scalars(
+                        select(AIGatewayInvocationRow).where(
+                            AIGatewayInvocationRow.tenant_id == command.tenant_id,
+                            AIGatewayInvocationRow.workspace_id == command.workspace_id,
+                        )
+                    )
+                )
+                assert len(invocations) == 1
+                ai_invocation_id = invocations[0].ai_invocation_id
+                attempts = tuple(
+                    await session.scalars(
+                        select(AIGatewayAttemptRow).where(
+                            AIGatewayAttemptRow.tenant_id == command.tenant_id,
+                            AIGatewayAttemptRow.workspace_id == command.workspace_id,
+                            AIGatewayAttemptRow.ai_invocation_id == ai_invocation_id,
+                        )
+                    )
+                )
+                effects = tuple(
+                    await session.scalars(
+                        select(AIGatewayProviderEffectRow).where(
+                            AIGatewayProviderEffectRow.tenant_id == command.tenant_id,
+                            AIGatewayProviderEffectRow.workspace_id == command.workspace_id,
+                            AIGatewayProviderEffectRow.ai_invocation_id == ai_invocation_id,
+                        )
+                    )
+                )
+                budgets = tuple(
+                    await session.scalars(
+                        select(AIGatewayBudgetRow).where(
+                            AIGatewayBudgetRow.tenant_id == command.tenant_id,
+                            AIGatewayBudgetRow.workspace_id == command.workspace_id,
+                            AIGatewayBudgetRow.ai_invocation_id == ai_invocation_id,
+                        )
+                    )
+                )
+                assert len(attempts) == 1
+                assert len(effects) == 1 and effects[0].dispatch_count == 1
+                assert len(budgets) == 1
                 assert (
                     await session.scalar(select(func.count()).select_from(OutboxEventRow)) or 0
                 ) >= 1
+
+            replay = await root.reference_runtime.run_workflow_command(command)
+            assert replay.result_status is ResultStatus.SUCCEEDED
+            assert replay.subject_reference == instance.workflow_id
+            assert replay.result_id == durable_terminal.result_id
+            assert provider.calls == 1
+            async with database.transaction() as session:
+                terminal_result_ids = tuple(
+                    await session.scalars(
+                        select(OutcomeRow.outcome_id).where(
+                            OutcomeRow.tenant_id == command.tenant_id,
+                            OutcomeRow.workspace_id == command.workspace_id,
+                            OutcomeRow.owner_component == "Workflow Engine",
+                            OutcomeRow.subject_id == instance.workflow_id,
+                            OutcomeRow.terminal.is_(True),
+                        )
+                    )
+                )
+                assert terminal_result_ids == (durable_terminal.result_id,)
         finally:
             await root.close()
         return _execution(
