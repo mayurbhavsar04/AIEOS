@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
 from sqlalchemy import func, select, text, update
 
 from aieos.adapters.ai_mock import DeterministicMockProvider, MockProviderBehavior
@@ -35,6 +35,7 @@ from aieos.adapters.persistence_postgres.models import (
     AIGatewayProviderEffectRow,
     OutboxEventRow,
     OutcomeRow,
+    WorkflowRow,
 )
 from aieos.ai_gateway import (
     AIInvocationRequest,
@@ -47,6 +48,7 @@ from aieos.ai_gateway.gateway import ProviderFailure
 from aieos.contracts import (
     AuthorizationContext,
     ErrorCategory,
+    ErrorEnvelope,
     ResultEnvelope,
     ResultStatus,
     RetryClassification,
@@ -1094,20 +1096,90 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
                 right.reference_runtime.run_workflow_command(command),
             )
             assert all(result.result_status is ResultStatus.ACCEPTED for result in outcomes)
-            restarted = _postgres_root()
-            try:
-                replay = await restarted.reference_runtime.run_workflow_command(command)
-                assert replay.result_status is ResultStatus.ACCEPTED
-                _, durable_terminal = _terminal(restarted)
-                assert durable_terminal.result_status is ResultStatus.REJECTED
-            finally:
-                await restarted.close()
+            assert outcomes[0].value_reference == outcomes[1].value_reference
+            workflow_id = cast(str, outcomes[0].value_reference)
             assert left_provider.calls + right_provider.calls == 1
             async with database.transaction() as session:
-                assert (
-                    await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow))
-                    == 1
+                terminal_rows = tuple(
+                    await session.scalars(
+                        select(OutcomeRow).where(
+                            OutcomeRow.tenant_id == command.tenant_id,
+                            OutcomeRow.workspace_id == command.workspace_id,
+                            OutcomeRow.owner_component == "Workflow Engine",
+                            OutcomeRow.subject_id == workflow_id,
+                            OutcomeRow.terminal.is_(True),
+                        )
+                    )
                 )
+                assert len(terminal_rows) == 1
+                durable_terminal = TypeAdapter(ResultEnvelope).validate_json(
+                    terminal_rows[0].payload
+                )
+                assert durable_terminal.result_status is ResultStatus.REJECTED
+                assert durable_terminal.error_id is not None
+                error_row = await session.get(
+                    OutcomeRow,
+                    (command.tenant_id, command.workspace_id, durable_terminal.error_id),
+                )
+                assert error_row is not None and error_row.kind == "Error"
+                durable_error = TypeAdapter(ErrorEnvelope).validate_json(error_row.payload)
+                assert durable_error.error_code == "WORKFLOW_AI_BUDGET_EXHAUSTED"
+
+                workflow_row = await session.get(
+                    WorkflowRow, (command.tenant_id, command.workspace_id, workflow_id)
+                )
+                assert workflow_row is not None and workflow_row.state == "Failed"
+                workflow_snapshot = cast(dict[str, Any], json.loads(workflow_row.payload))
+                assert workflow_snapshot["outcome"]["result_id"] == durable_terminal.result_id
+                assert workflow_snapshot["outcome"]["error_id"] == durable_error.error_id
+                assert workflow_snapshot["error"]["error_code"] == ("WORKFLOW_AI_BUDGET_EXHAUSTED")
+                assert workflow_snapshot["attempt_number"] == 1
+                assert len(workflow_snapshot["execution_ids"]) == 1
+                assert len(workflow_snapshot["ai_admissions"]) == 1
+                assert len(workflow_snapshot["ai_admission_states"]) == 1
+                assert workflow_snapshot["transition_version"] == 1
+                assert workflow_snapshot["retry_commands"] == {}
+
+                invocations = tuple(
+                    await session.scalars(
+                        select(AIGatewayInvocationRow).where(
+                            AIGatewayInvocationRow.tenant_id == command.tenant_id,
+                            AIGatewayInvocationRow.workspace_id == command.workspace_id,
+                        )
+                    )
+                )
+                assert len(invocations) == 1
+                ai_invocation_id = invocations[0].ai_invocation_id
+                attempts = tuple(
+                    await session.scalars(
+                        select(AIGatewayAttemptRow).where(
+                            AIGatewayAttemptRow.tenant_id == command.tenant_id,
+                            AIGatewayAttemptRow.workspace_id == command.workspace_id,
+                            AIGatewayAttemptRow.ai_invocation_id == ai_invocation_id,
+                        )
+                    )
+                )
+                assert len(attempts) == 1
+                effects = tuple(
+                    await session.scalars(
+                        select(AIGatewayProviderEffectRow).where(
+                            AIGatewayProviderEffectRow.tenant_id == command.tenant_id,
+                            AIGatewayProviderEffectRow.workspace_id == command.workspace_id,
+                            AIGatewayProviderEffectRow.ai_invocation_id == ai_invocation_id,
+                        )
+                    )
+                )
+                assert len(effects) == 1 and effects[0].dispatch_count == 1
+                budgets = tuple(
+                    await session.scalars(
+                        select(AIGatewayBudgetRow).where(
+                            AIGatewayBudgetRow.tenant_id == command.tenant_id,
+                            AIGatewayBudgetRow.workspace_id == command.workspace_id,
+                            AIGatewayBudgetRow.ai_invocation_id == ai_invocation_id,
+                        )
+                    )
+                )
+                assert len(budgets) == 1
         finally:
             await left.close()
             await right.close()

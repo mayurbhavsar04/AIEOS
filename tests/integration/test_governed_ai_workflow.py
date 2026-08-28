@@ -8,6 +8,7 @@ from typing import cast
 
 import pytest
 
+from aieos.adapters.ai_mock import DeterministicMockProvider, MockProviderBehavior
 from aieos.contracts import AuthorizationContext, ResultStatus
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
@@ -127,6 +128,40 @@ async def test_exhausted_budget_rejects_before_gateway():
     assert result.result_status is ResultStatus.REJECTED
     assert result.metadata == {}
     assert not root.reference_runtime.reference_ai_gateway.store.invocations
+
+
+@pytest.mark.anyio
+async def test_retry_budget_exhaustion_terminalizes_without_speculative_attempt_state():
+    root = runtime()
+    runtime_ = root.reference_runtime
+    provider = runtime_.reference_ai_gateway._adapters[  # pyright: ignore[reportPrivateUsage]
+        "mock-economy"
+    ]
+    assert isinstance(provider, DeterministicMockProvider)
+    provider._behaviors = [  # pyright: ignore[reportPrivateUsage]
+        MockProviderBehavior.TRANSIENT_FAILURE
+    ]
+    original = workflow_command(root)
+    command = replace(original, payload={**original.payload, "max_attempts": 2})
+
+    acknowledgement = await runtime_.run_workflow_command(command)
+
+    assert acknowledgement.result_status is ResultStatus.ACCEPTED
+    workflow = runtime_.workflow_repository.instances[cast(str, acknowledgement.value_reference)]
+    assert workflow.state is WorkflowState.FAILED
+    assert workflow.outcome is not None
+    assert workflow.outcome.result_status is ResultStatus.REJECTED
+    assert workflow.error is not None
+    assert workflow.outcome.error_id == workflow.error.error_id
+    assert workflow.error.error_code == "WORKFLOW_AI_BUDGET_EXHAUSTED"
+    assert workflow.attempt_number == 1
+    assert len(workflow.execution_ids) == 1
+    assert len(workflow.ai_admissions or {}) == 1
+    assert len(workflow.ai_admission_states or {}) == 1
+    assert workflow.transition_version == 1
+    assert workflow.retry_commands == {}
+    assert provider.calls == 1
+    assert len(runtime_.reference_ai_gateway.store.invocations) == 1
 
 
 @pytest.mark.anyio

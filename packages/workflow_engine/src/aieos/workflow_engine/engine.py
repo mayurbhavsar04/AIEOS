@@ -276,8 +276,19 @@ class WorkflowEngine:
         retry_command = retry_commands.get(event.event_id)
         if retry_command is not None or self._retry_allowed(instance, retry):
             if retry_command is None:
-                decision_id = self._record_retry_decision(instance, event)
-                retry_command = self._create_attempt_command(instance, decision_id)
+                decision_id = self._identifiers.new("decision")
+                try:
+                    retry_command = self._create_attempt_command(instance, decision_id)
+                except ValueError as exc:
+                    if str(exc) not in {
+                        "WORKFLOW_AI_BUDGET_EXHAUSTED",
+                        "WORKFLOW_AI_AUTHORIZATION_REVOKED",
+                    }:
+                        raise
+                    await self._reject_retry_admission(instance, event, str(exc))
+                    instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
+                    return
+                self._record_retry_decision(instance, event, decision_id)
                 retry_commands[event.event_id] = retry_command
             await self._dispatcher.dispatch(retry_command)
             instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
@@ -516,11 +527,8 @@ class WorkflowEngine:
                 or instance.authorization.policy_version_id != envelope.policy_version_id
             ):
                 raise ValueError("WORKFLOW_AI_AUTHORIZATION_REVOKED")
-        instance.attempt_number += 1
-        execution_id = self._identifiers.new("execution")
-        instance.execution_ids = (*instance.execution_ids, execution_id)
-        command_id = self._identifiers.new("command")
         admission: Mapping[str, object] | None = None
+        committed: int | None = None
         if (
             governed_ai_route
             and instance.authorization
@@ -545,6 +553,16 @@ class WorkflowEngine:
             assert envelope is not None
             if used + committed > envelope.ceiling_microusd:
                 raise ValueError("WORKFLOW_AI_BUDGET_EXHAUSTED")
+        instance.attempt_number += 1
+        execution_id = self._identifiers.new("execution")
+        instance.execution_ids = (*instance.execution_ids, execution_id)
+        command_id = self._identifiers.new("command")
+        if committed is not None:
+            admissions = instance.ai_admissions
+            admission_states = instance.ai_admission_states
+            assert admissions is not None
+            assert admission_states is not None
+            assert envelope is not None
             instance.transition_version += 1
             logical_key = ":".join(
                 (
@@ -846,8 +864,39 @@ class WorkflowEngine:
         await self._publish_workflow_event(instance, "WorkflowFailed", event.event_id)
         self._observe(instance, instance.outcome)
 
-    def _record_retry_decision(self, instance: WorkflowInstance, event: EventEnvelope) -> str:
-        decision_id = self._identifiers.new("decision")
+    async def _reject_retry_admission(
+        self, instance: WorkflowInstance, event: EventEnvelope, code: str
+    ) -> None:
+        instance.state = WorkflowState.FAILED
+        instance.outcome, instance.error = self._outcomes.unsuccessful(
+            status=ResultStatus.REJECTED,
+            subject=instance.workflow_id,
+            producer=self.component_name,
+            tenant_id=instance.tenant_id,
+            workspace_id=instance.workspace_id,
+            correlation_id=instance.correlation_id,
+            causation_id=event.event_id,
+            event_id=event.event_id,
+            error_code=code,
+            category=(
+                ErrorCategory.AUTHORIZATION
+                if code == "WORKFLOW_AI_AUTHORIZATION_REVOKED"
+                else ErrorCategory.VALIDATION
+            ),
+            severity=ErrorSeverity.WARNING,
+            retry=RetryClassification.NEVER_RETRY,
+            message=(
+                "Workflow AI authorization is unavailable before retry admission."
+                if code == "WORKFLOW_AI_AUTHORIZATION_REVOKED"
+                else "Workflow AI budget is exhausted before retry Gateway dispatch."
+            ),
+        )
+        await self._publish_workflow_event(instance, "WorkflowFailed", event.event_id)
+        self._observe(instance, instance.outcome)
+
+    def _record_retry_decision(
+        self, instance: WorkflowInstance, event: EventEnvelope, decision_id: str
+    ) -> None:
         self._decisions.record(
             DecisionEvidence(
                 decision_id=decision_id,
@@ -860,7 +909,6 @@ class WorkflowEngine:
                 triggering_id=event.event_id,
             )
         )
-        return decision_id
 
     def _retry_allowed(self, instance: WorkflowInstance, classification: str) -> bool:
         return self.permits_new_attempt(instance.workflow_step_id) and classification in {
