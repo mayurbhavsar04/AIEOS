@@ -106,9 +106,12 @@ def scoped_workflow_lock_key(command: CommandEnvelope) -> str | None:
     """Return the governed exact-Workflow serialization key when one exists."""
     if command.workflow_id is None:
         return None
-    return "\x1f".join(
-        ("WorkflowAdmission", command.tenant_id, command.workspace_id, command.workflow_id)
-    )
+    return workflow_lock_key(command.tenant_id, command.workspace_id, command.workflow_id)
+
+
+def workflow_lock_key(tenant_id: str, workspace_id: str, workflow_id: str) -> str:
+    """Return the shared exact-Workflow mutation serialization authority."""
+    return "\x1f".join(("WorkflowAdmission", tenant_id, workspace_id, workflow_id))
 
 
 async def _immutable_outcome(
@@ -270,7 +273,7 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
                 instance = _WORKFLOW.validate_json(payload)
                 if instance.outcome is not None:
                     instance.outcome = _normalize_result(instance.outcome)
-                self.instances.setdefault(instance.workflow_id, instance)
+                self.instances[instance.workflow_id] = instance
             receipts = await session.scalars(
                 select(CommandIdempotencyRow.payload).where(
                     CommandIdempotencyRow.tenant_id == self._tenant_id,
@@ -281,7 +284,49 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
             for payload in receipts:
                 receipt = _WORKFLOW_RECEIPT.validate_json(payload)
                 receipt.result = _normalize_result(receipt.result)
-                self.command_receipts.setdefault(receipt.command.command_id, receipt)
+                self.command_receipts[receipt.command.command_id] = receipt
+
+    async def refresh_workflow(self, workflow_id: str) -> WorkflowInstance | None:
+        """Replace a warmed worker's cached Workflow with durable authority."""
+        async with self._database.transaction() as session:
+            row = await session.get(
+                WorkflowRow,
+                (self._tenant_id, self._workspace_id, workflow_id),
+            )
+        if row is None:
+            self.instances.pop(workflow_id, None)
+            return None
+        instance = _WORKFLOW.validate_json(row.payload)
+        if instance.outcome is not None:
+            instance.outcome = _normalize_result(instance.outcome)
+        self.instances[workflow_id] = instance
+        return instance
+
+    async def replay_command(
+        self, command: CommandEnvelope
+    ) -> tuple[CommandEnvelope, ResultEnvelope | None] | None:
+        """Resolve authoritative scoped replay before creating a WorkflowId."""
+        async with self._database.transaction() as session:
+            row = await session.get(
+                CommandIdempotencyRow,
+                (
+                    command.tenant_id,
+                    command.workspace_id,
+                    "Workflow Engine",
+                    command.metadata.idempotency_key,
+                ),
+                with_for_update=True,
+            )
+            if row is None:
+                return None
+            if row.command_hash != command_intent_hash(command):
+                raise ValueError("IdempotencyKey cannot be reused with changed immutable intent")
+            receipt = _WORKFLOW_RECEIPT.validate_json(row.payload)
+            completed = row.completed
+        receipt.result = _normalize_result(receipt.result)
+        await self.refresh_workflow(receipt.workflow_id)
+        self.command_receipts[receipt.command.command_id] = receipt
+        return receipt.command, receipt.result if completed else None
 
     async def flush_in_transaction(self, session: AsyncSession) -> None:
         for instance in self.instances.values():

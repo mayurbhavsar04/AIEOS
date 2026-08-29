@@ -1525,6 +1525,92 @@ async def test_concurrent_duplicate_submission_creates_one_workflow(
     await right.close()
 
 
+async def test_warmed_worker_replays_authoritative_direct_workflow_submission(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    first = compose(settings)
+    warmed = compose(settings)
+    for participant in warmed.reference_runtime.durable_participants:
+        await participant.prepare()
+
+    runtime = first.reference_runtime
+    command_envelope = CommandEnvelope(
+        command_id="command-warmed-first",
+        command_type="StartWorkflow",
+        command_version="2.0",
+        correlation_id="correlation-warmed",
+        causation_id="request-warmed",
+        target_component="Workflow Engine",
+        initiator="Reference Host",
+        timestamp=runtime.clock.now(),
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        payload={
+            "workflow_definition_id": "ClassifyAndRouteTask",
+            "workflow_definition_version_id": "classify-and-route-task-v1",
+            "workflow_kind": "ClassifyAndRouteTask",
+            "skill_version_id": "structured-task-kind-skill-v1",
+            "statement": "Where is the warmed-worker report?",
+            "max_attempts": 1,
+            "workflow_ai_budget_envelope": {
+                "ContractVersion": 1,
+                "GatewayNormalizedCostUnitRegistryVersion": 1,
+                "WorkflowDefinitionVersionId": "classify-and-route-task-v1",
+                "PolicyId": runtime.authorization.policy_id,
+                "PolicyVersionId": runtime.authorization.policy_version_id,
+                "TenantId": settings.tenant_id,
+                "WorkspaceId": settings.workspace_id,
+                "BudgetCeiling": {"Amount": "0.01", "CurrencyOrReferenceUnit": "USD"},
+            },
+        },
+        metadata=CommandMetadata(
+            request_id="request-warmed",
+            idempotency_key="idempotency-warmed",
+            authorization=runtime.authorization,
+        ),
+    )
+    first_acknowledgement = await runtime.run_workflow_command(command_envelope)
+    replay_command = replace(
+        command_envelope,
+        command_id="command-warmed-replay",
+        timestamp=command_envelope.timestamp + timedelta(microseconds=1),
+    )
+    replay_acknowledgement = await warmed.reference_runtime.run_workflow_command(replay_command)
+
+    assert replay_acknowledgement == first_acknowledgement
+    assert replay_acknowledgement.subject_reference == first_acknowledgement.subject_reference
+    durable_workflow = warmed.reference_runtime.workflow_repository.instances[
+        first_acknowledgement.subject_reference
+    ]
+    assert durable_workflow.outcome is not None
+    assert len(durable_workflow.ai_admissions or {}) == 1
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == first_acknowledgement.subject_reference,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+    await first.close()
+    await warmed.close()
+
+
 async def test_scoped_idempotency_key_deduplicates_distinct_command_ids(
     database: PostgresDatabase,
 ) -> None:

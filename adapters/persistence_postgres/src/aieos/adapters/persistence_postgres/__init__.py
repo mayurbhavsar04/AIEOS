@@ -13,6 +13,7 @@ from .runtime import (
     checkpoint,
     scoped_idempotency_lock_key,
     scoped_workflow_lock_key,
+    workflow_lock_key,
 )
 
 __all__ = (
@@ -31,4 +32,5 @@ __all__ = (
     "checkpoint",
     "scoped_idempotency_lock_key",
     "scoped_workflow_lock_key",
+    "workflow_lock_key",
 )

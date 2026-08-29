@@ -28,6 +28,7 @@ from aieos.adapters.persistence_postgres import (
     checkpoint,
     scoped_idempotency_lock_key,
     scoped_workflow_lock_key,
+    workflow_lock_key,
 )
 from aieos.ai_gateway import (
     AIGateway,
@@ -41,6 +42,7 @@ from aieos.ai_gateway import (
 from aieos.capability_registry import CapabilityImplementation, CapabilityRegistry
 from aieos.contracts import AuthorizationContext, DataClassification, ResultEnvelope
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
+from aieos.contracts.events import EventEnvelope
 from aieos.domain import (
     Clock,
     DecisionEvidence,
@@ -156,6 +158,32 @@ class CapabilityGatewayRouter:
             else self._text_gateway
         )
         return await gateway.invoke(request)
+
+
+class DurableWorkflowEventConsumer:
+    """Serialize and checkpoint event-driven mutations for one exact Workflow."""
+
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        repository: PostgresWorkflowRepository,
+        workflow_engine: WorkflowEngine,
+        participants: tuple[TransactionParticipant, ...],
+    ) -> None:
+        self._database = database
+        self._repository = repository
+        self._workflow_engine = workflow_engine
+        self._participants = participants
+
+    async def consume(self, event: EventEnvelope) -> None:
+        if event.workflow_id is None or event.tenant_id is None or event.workspace_id is None:
+            raise ValueError("durable Workflow Event requires exact scoped WorkflowId")
+        lock_key = workflow_lock_key(event.tenant_id, event.workspace_id, event.workflow_id)
+        async with self._database.command_lock(lock_key):
+            if await self._repository.refresh_workflow(event.workflow_id) is None:
+                raise KeyError(f"Workflow does not exist: {event.workflow_id}")
+            await self._workflow_engine.consume(event)
+            await checkpoint(self._database, self._participants)
 
 
 @dataclass(slots=True)
@@ -342,6 +370,14 @@ class ReferenceRuntime:
     async def _run_workflow_prepared(self, command: CommandEnvelope) -> ResultEnvelope:
         for participant in self.durable_participants:
             await participant.prepare()
+        repository = self.workflow_repository
+        assert isinstance(repository, PostgresWorkflowRepository)
+        replay = await repository.replay_command(command)
+        if replay is not None:
+            stored_command, completed_result = replay
+            if completed_result is not None:
+                return completed_result
+            command = stored_command
         result = await self.dispatcher.dispatch(command)
         assert self.database is not None
         await checkpoint(self.database, self.durable_participants)
@@ -606,12 +642,22 @@ def compose(
     dispatcher.register("Manager", manager)
     dispatcher.register("Workflow Engine", workflow_engine)
     dispatcher.register("Skill Runtime", skill_runtime)
+    if database is not None:
+        assert isinstance(workflow_repository, PostgresWorkflowRepository)
+        workflow_event_consumer = DurableWorkflowEventConsumer(
+            database,
+            workflow_repository,
+            workflow_engine,
+            durable_participants,
+        )
+    else:
+        workflow_event_consumer = workflow_engine
     for event_type in (
         "ExecutionAttemptSucceeded",
         "ExecutionAttemptFailed",
         "ExecutionAttemptTimedOut",
     ):
-        event_bus.subscribe(event_type, "workflow-engine", workflow_engine)
+        event_bus.subscribe(event_type, "workflow-engine", workflow_event_consumer)
     runtime = ReferenceRuntime(
         settings=resolved,
         dispatcher=dispatcher,
