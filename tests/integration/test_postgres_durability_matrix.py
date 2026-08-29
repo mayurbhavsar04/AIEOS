@@ -2452,9 +2452,7 @@ async def test_accounting_reconciliation_failure_redelivers_without_false_comple
             self.injected = True
             lineage = dict(cast(Mapping[str, object], delivered.payload["audit_lineage"]))
             accounting = dict(cast(Mapping[str, object], lineage["accounting_evidence"]))
-            gateway_evidence = dict(
-                cast(Mapping[str, object], accounting["gateway_evidence"])
-            )
+            gateway_evidence = dict(cast(Mapping[str, object], accounting["gateway_evidence"]))
             gateway_evidence["actual_cost"] = "not-scale-6"
             accounting["gateway_evidence"] = gateway_evidence
             lineage["accounting_evidence"] = accounting
@@ -2465,9 +2463,7 @@ async def test_accounting_reconciliation_failure_redelivers_without_false_comple
                 )
             )
 
-    consumers["ExecutionAttemptSucceeded"] = [
-        ("workflow-engine", InvalidAccountingOnce())
-    ]
+    consumers["ExecutionAttemptSucceeded"] = [("workflow-engine", InvalidAccountingOnce())]
     acknowledgement = await runtime.classify_and_route_task("Where is reconciliation?")
     workflow_id = acknowledgement.subject_reference
 

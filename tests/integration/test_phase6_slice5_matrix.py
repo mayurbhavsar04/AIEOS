@@ -836,9 +836,7 @@ def test_r5_evaluator_rejects_real_oracle_mutations(field: str, replacement: obj
         ("forged_admission_rejected", False),
     ),
 )
-def test_r5_race_proof_rejects_false_green_mutations(
-    field: str, replacement: object
-) -> None:
+def test_r5_race_proof_rejects_false_green_mutations(field: str, replacement: object) -> None:
     proof = RaceProof(
         workflow_ids=("workflow-a", "workflow-a"),
         terminal_result_ids=("result-a",),
@@ -1523,9 +1521,7 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
                 assert budgets[0].actual_amount is not None
                 assert len(usage_rows) == 1 and usage_rows[0].final
                 admissions = cast(dict[str, Any], workflow_snapshot["ai_admissions"])
-                admission_states = cast(
-                    dict[str, Any], workflow_snapshot["ai_admission_states"]
-                )
+                admission_states = cast(dict[str, Any], workflow_snapshot["ai_admission_states"])
                 assert len(admissions) == len(admission_states) == 1
                 admission_key = next(iter(admissions))
                 admission = cast(dict[str, Any], admissions[admission_key])
@@ -1639,9 +1635,7 @@ async def test_r5_postgres_rows_execute_through_real_postgres_runners(
     postgres_database: PostgresDatabase,
 ) -> None:
     rows = tuple(row for row in ROWS if row.proof == "postgres")
-    executions = [
-        await _run_composed_row(row) for row in ROWS if row.proof == "composed"
-    ]
+    executions = [await _run_composed_row(row) for row in ROWS if row.proof == "composed"]
     for row in rows:
         await _reset_postgres(postgres_database)
         executions.append(await _run_postgres_row(row, postgres_database))
