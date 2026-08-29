@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
@@ -30,6 +31,7 @@ from aieos.adapters.persistence_postgres import (
     PostgresOutboxStore,
     PostgresProviderEffectBoundary,
     PostgresWorkflowRepository,
+    checkpoint,
 )
 from aieos.adapters.persistence_postgres.models import (
     AIGatewayAttemptRow,
@@ -64,6 +66,7 @@ from aieos.contracts.events import EventEnvelope, EventMetadata
 from aieos.security_support import ScopeAuthorizer
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
 from aieos.workflow_engine import WorkflowDefinition, WorkflowInstance, WorkflowState
+from aieos.workflow_engine.engine import CommandProcessingState, WorkflowCommandReceipt
 from aieos_api.composition import CompositionRoot, compose
 from aieos_api.settings import HostSettings, RuntimeAdapter
 
@@ -1609,6 +1612,91 @@ async def test_warmed_worker_replays_authoritative_direct_workflow_submission(
         )
     await first.close()
     await warmed.close()
+
+
+async def test_unrelated_checkpoint_does_not_flush_untouched_stale_workflow_or_receipt(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    winner = compose(settings)
+    stale = compose(settings)
+    acknowledgement = await winner.reference_runtime.classify_and_route_task(
+        "Where is the authoritative report?"
+    )
+    workflow_id = acknowledgement.subject_reference
+    for participant in stale.reference_runtime.durable_participants:
+        await participant.prepare()
+    repository = stale.reference_runtime.workflow_repository
+    assert isinstance(repository, PostgresWorkflowRepository)
+    cached = repository.instances[workflow_id]
+    terminal_outcome = cached.outcome
+    assert terminal_outcome is not None
+    terminal_result_id = terminal_outcome.result_id
+    stale_snapshot = copy.deepcopy(cached)
+    stale_snapshot.state = WorkflowState.RUNNING
+    stale_snapshot.outcome = None
+    repository.instances[workflow_id] = stale_snapshot
+    repository._workflow_baseline[workflow_id] = TypeAdapter(WorkflowInstance).dump_json(  # pyright: ignore[reportPrivateUsage]
+        stale_snapshot
+    )
+    receipt = next(
+        value for value in repository.command_receipts.values() if value.workflow_id == workflow_id
+    )
+    receipt.state = CommandProcessingState.IN_PROGRESS
+    repository._receipt_baseline[receipt.command.command_id] = TypeAdapter(  # pyright: ignore[reportPrivateUsage]
+        WorkflowCommandReceipt
+    ).dump_json(receipt)
+
+    await stale.reference_runtime.classify_and_route_task("Send the unrelated report")
+
+    fresh = compose(settings)
+    for participant in fresh.reference_runtime.durable_participants:
+        await participant.prepare()
+    authoritative = fresh.reference_runtime.workflow_repository.instances[workflow_id]
+    assert authoritative.state is WorkflowState.COMPLETED
+    assert authoritative.outcome is not None
+    assert authoritative.outcome.result_id == terminal_result_id
+    durable_receipt = next(
+        value
+        for value in fresh.reference_runtime.workflow_repository.command_receipts.values()
+        if value.workflow_id == workflow_id
+    )
+    assert durable_receipt.state is CommandProcessingState.COMPLETED
+    async with database.transaction() as session:
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 2
+        )
+    await winner.close()
+    await stale.close()
+    await fresh.close()
+
+
+async def test_stale_dirty_workflow_snapshot_is_rejected_by_version_fence(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    root = compose(settings)
+    acknowledgement = await root.reference_runtime.classify_and_route_task("Where is the report?")
+    workflow_id = acknowledgement.subject_reference
+    repository = root.reference_runtime.workflow_repository
+    assert isinstance(repository, PostgresWorkflowRepository)
+    repository.instances[workflow_id].state = WorkflowState.RUNNING
+    async with database.transaction() as session:
+        await session.execute(
+            update(WorkflowRow)
+            .where(WorkflowRow.workflow_id == workflow_id)
+            .values(version=WorkflowRow.version + 1)
+        )
+
+    with pytest.raises(RuntimeError, match="durable version fence"):
+        await checkpoint(database, (repository,))
+    await root.close()
 
 
 async def test_postgres_gateway_rejects_forged_and_stale_workflow_admission(
