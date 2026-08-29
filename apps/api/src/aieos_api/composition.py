@@ -1,5 +1,6 @@
 """Explicit composition root for the executable AIEOS reference workflow."""
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -174,16 +175,28 @@ class DurableWorkflowEventConsumer:
         self._repository = repository
         self._workflow_engine = workflow_engine
         self._participants = participants
+        self._held_workflow_locks: ContextVar[frozenset[str]] = ContextVar(
+            "held_workflow_locks", default=frozenset()
+        )
 
     async def consume(self, event: EventEnvelope) -> None:
         if event.workflow_id is None or event.tenant_id is None or event.workspace_id is None:
             raise ValueError("durable Workflow Event requires exact scoped WorkflowId")
         lock_key = workflow_lock_key(event.tenant_id, event.workspace_id, event.workflow_id)
-        async with self._database.command_lock(lock_key):
-            if await self._repository.refresh_workflow(event.workflow_id) is None:
-                raise KeyError(f"Workflow does not exist: {event.workflow_id}")
+        held = self._held_workflow_locks.get()
+        if lock_key in held:
             await self._workflow_engine.consume(event)
             await checkpoint(self._database, self._participants)
+            return
+        async with self._database.command_lock(lock_key):
+            token = self._held_workflow_locks.set(held | {lock_key})
+            try:
+                if await self._repository.refresh_workflow(event.workflow_id) is None:
+                    raise KeyError(f"Workflow does not exist: {event.workflow_id}")
+                await self._workflow_engine.consume(event)
+                await checkpoint(self._database, self._participants)
+            finally:
+                self._held_workflow_locks.reset(token)
 
 
 @dataclass(slots=True)
@@ -390,13 +403,6 @@ class ReferenceRuntime:
             await self.outbox.drain()
         result = await self.dispatcher.dispatch(command)
         if self.database is not None:
-            await self.outbox.drain()
-            if result.value_reference is not None:
-                outcome = self.workflow_engine.outcome(result.value_reference)
-                if outcome is not None:
-                    result = outcome
-                    if command.target_component == "Manager":
-                        self.request_repository.command_results[command.command_id] = outcome
             await checkpoint(self.database, self.durable_participants)
         return result
 
