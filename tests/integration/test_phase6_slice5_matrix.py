@@ -1142,6 +1142,9 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
             await root.close()
         restarted = _postgres_root()
         try:
+            for participant in restarted.reference_runtime.durable_participants:
+                await participant.prepare()
+            await asyncio.sleep(0.02)
             await restarted.reference_runtime.outbox.drain()
             durable = restarted.reference_runtime.workflow_repository.instances[workflow_id]
             assert durable.state is WorkflowState.CANCELLED

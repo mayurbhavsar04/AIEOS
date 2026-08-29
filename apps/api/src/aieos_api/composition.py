@@ -390,6 +390,13 @@ class ReferenceRuntime:
             await self.outbox.drain()
         result = await self.dispatcher.dispatch(command)
         if self.database is not None:
+            await self.outbox.drain()
+            if result.value_reference is not None:
+                outcome = self.workflow_engine.outcome(result.value_reference)
+                if outcome is not None:
+                    result = outcome
+                    if command.target_component == "Manager":
+                        self.request_repository.command_results[command.command_id] = outcome
             await checkpoint(self.database, self.durable_participants)
         return result
 

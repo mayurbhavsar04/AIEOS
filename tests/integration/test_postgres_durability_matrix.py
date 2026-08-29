@@ -2432,7 +2432,7 @@ async def test_accounting_reconciliation_failure_redelivers_without_false_comple
     settings = HostSettings(
         runtime_adapter=RuntimeAdapter.POSTGRES,
         database_url=SecretStr(database_url()),
-        delivery_backoff_seconds=0,
+        delivery_backoff_seconds=0.001,
     )
     interrupted = compose(settings)
     runtime = interrupted.reference_runtime
@@ -2495,6 +2495,7 @@ async def test_accounting_reconciliation_failure_redelivers_without_false_comple
     await interrupted.close()
 
     recovered = compose(settings)
+    await asyncio.sleep(0.01)
     await recovered.reference_runtime.outbox.drain()
     async with database.transaction() as session:
         workflow_row = await session.get(
