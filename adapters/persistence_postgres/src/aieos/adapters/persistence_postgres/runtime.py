@@ -408,8 +408,9 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
                     },
                     where=WorkflowRow.version == expected_version,
                 )
+                .returning(WorkflowRow.version)
             )
-            if result.rowcount != 1:
+            if result.scalar_one_or_none() != next_version:
                 raise RuntimeError("stale Workflow snapshot rejected by durable version fence")
             await session.execute(
                 insert(WorkflowStepRow)
