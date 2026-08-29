@@ -689,7 +689,6 @@ class WorkflowEngine:
         )
 
     async def _complete(self, instance: WorkflowInstance, event: EventEnvelope) -> None:
-        instance.state = WorkflowState.COMPLETED
         raw_lineage = event.payload.get("audit_lineage")
         if not isinstance(raw_lineage, Mapping):
             await self._fail(instance, event)
@@ -797,6 +796,7 @@ class WorkflowEngine:
                 **audit_metadata,
             },
         )
+        instance.state = WorkflowState.COMPLETED
         await self._publish_workflow_event(instance, "WorkflowCompleted", event.event_id)
         self._observe(instance, instance.outcome)
 

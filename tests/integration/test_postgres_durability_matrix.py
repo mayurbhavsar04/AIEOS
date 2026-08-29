@@ -2426,6 +2426,107 @@ async def test_incomplete_publication_and_idempotency_resume_after_restart(
     await recovered.close()
 
 
+async def test_accounting_reconciliation_failure_redelivers_without_false_completion(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+        delivery_backoff_seconds=0,
+    )
+    interrupted = compose(settings)
+    runtime = interrupted.reference_runtime
+    consumers = cast(
+        dict[str, list[tuple[str, Any]]],
+        vars(runtime.event_bus)["_consumers"],
+    )
+    durable_consumer = consumers["ExecutionAttemptSucceeded"][0][1]
+
+    class InvalidAccountingOnce:
+        injected = False
+
+        async def consume(self, delivered: EventEnvelope) -> None:
+            if self.injected:
+                await durable_consumer.consume(delivered)
+                return
+            self.injected = True
+            lineage = dict(cast(Mapping[str, object], delivered.payload["audit_lineage"]))
+            accounting = dict(cast(Mapping[str, object], lineage["accounting_evidence"]))
+            gateway_evidence = dict(
+                cast(Mapping[str, object], accounting["gateway_evidence"])
+            )
+            gateway_evidence["actual_cost"] = "not-scale-6"
+            accounting["gateway_evidence"] = gateway_evidence
+            lineage["accounting_evidence"] = accounting
+            await durable_consumer.consume(
+                replace(
+                    delivered,
+                    payload={**delivered.payload, "audit_lineage": lineage},
+                )
+            )
+
+    consumers["ExecutionAttemptSucceeded"] = [
+        ("workflow-engine", InvalidAccountingOnce())
+    ]
+    acknowledgement = await runtime.classify_and_route_task("Where is reconciliation?")
+    workflow_id = acknowledgement.subject_reference
+
+    async with database.transaction() as session:
+        workflow_row = await session.get(
+            WorkflowRow,
+            (settings.tenant_id, settings.workspace_id, workflow_id),
+        )
+        assert workflow_row is not None and workflow_row.state == "Running"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 0
+        )
+        receipt = await session.scalar(
+            select(DeliveryReceiptRow).where(
+                DeliveryReceiptRow.consumer_name == "workflow-engine",
+                DeliveryReceiptRow.status == "Failed",
+            )
+        )
+        assert receipt is not None
+    await interrupted.close()
+
+    recovered = compose(settings)
+    await recovered.reference_runtime.outbox.drain()
+    async with database.transaction() as session:
+        workflow_row = await session.get(
+            WorkflowRow,
+            (settings.tenant_id, settings.workspace_id, workflow_id),
+        )
+        assert workflow_row is not None and workflow_row.state == "Completed"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 1
+        )
+    recovered_workflow = recovered.reference_runtime.workflow_repository.instances[workflow_id]
+    assert recovered_workflow.outcome is not None
+    await recovered.close()
+
+
 async def test_memory_terminal_checkpoint_rolls_back_and_redelivery_is_exactly_once(
     database: PostgresDatabase,
 ) -> None:
