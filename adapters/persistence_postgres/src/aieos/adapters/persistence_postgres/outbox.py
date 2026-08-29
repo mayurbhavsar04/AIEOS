@@ -457,6 +457,10 @@ class BufferedPostgresOutbox:
                 await participant.flush_in_transaction(session)
             for event in pending:
                 await self._store.record_in_transaction(session, event)
+        for participant in self._participants:
+            completed = getattr(participant, "checkpoint_completed", None)
+            if callable(completed):
+                completed()
         for event in pending:
             self._pending.pop(event.event_id, None)
         return await self._relay.drain()
