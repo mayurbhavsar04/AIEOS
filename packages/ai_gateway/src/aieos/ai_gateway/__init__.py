@@ -19,6 +19,7 @@ from aieos.ai_gateway.gateway import (
     ResponseMode,
     RouteDecision,
     StreamChunk,
+    WorkflowAdmissionAuthority,
 )
 from aieos.ai_gateway.prompt_pipeline import (
     STRUCTURED_TASK_KIND_SCHEMA,
@@ -52,4 +53,5 @@ __all__ = (
     "ResponseMode",
     "RouteDecision",
     "StreamChunk",
+    "WorkflowAdmissionAuthority",
 )

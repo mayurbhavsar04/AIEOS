@@ -168,6 +168,45 @@ class InMemoryWorkflowRepository:
         receipt = self.begin_command(command, result, workflow_id, error)
         receipt.state = CommandProcessingState.COMPLETED
 
+    async def authoritative_ai_admission(
+        self,
+        *,
+        workflow_id: str,
+        command_id: str,
+        execution_id: str,
+    ) -> Mapping[str, object] | None:
+        """Resolve the current Workflow-owned admission without caller evidence."""
+        instance = self.instances.get(workflow_id)
+        if instance is None:
+            return None
+        admissions = instance.ai_admissions or {}
+        states = instance.ai_admission_states or {}
+        binding = admissions.get(command_id)
+        record = states.get(command_id)
+        if not isinstance(binding, Mapping) or not isinstance(record, Mapping):
+            return None
+        version = binding.get("WorkflowAdmissionStateVersion")
+        state = record.get("State")
+        current_running = instance.state is WorkflowState.RUNNING and state in {
+            WorkflowAIAdmissionState.COMMITTED.value,
+            WorkflowAIAdmissionState.GATEWAY_ACCEPTED.value,
+            WorkflowAIAdmissionState.SETTLING.value,
+        }
+        current_replay = (
+            instance.state is WorkflowState.COMPLETED
+            and state == WorkflowAIAdmissionState.RECONCILED.value
+        )
+        if (
+            not (current_running or current_replay)
+            or not isinstance(version, int)
+            or version != instance.transition_version
+            or record.get("WorkflowAdmissionStateVersion") != version
+            or record.get("Binding") != binding
+            or binding.get("ExecutionId") != execution_id
+        ):
+            return None
+        return binding
+
 
 class WorkflowEngine:
     """Own Workflow state, transitions, retry decisions, and new ExecutionId values."""

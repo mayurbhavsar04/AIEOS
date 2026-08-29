@@ -120,6 +120,70 @@ async def test_invalid_reference_input_rejects_before_gateway():
 
 
 @pytest.mark.anyio
+async def test_gateway_resolves_authoritative_admission_and_rejects_coordinated_forgery():
+    root = runtime()
+    gateway = root.reference_runtime.reference_ai_gateway
+    await root.reference_runtime.classify_and_route_task("Where is the report?")
+    invocation = next(iter(gateway.store.invocations.values()))
+    provider = gateway._adapters["mock-economy"]  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(provider, DeterministicMockProvider)
+
+    replay = await gateway.accept(invocation.request)
+    assert replay.replay
+    assert provider.calls == 1
+
+    original_binding = invocation.request.workflow_ai_budget_admission
+    assert original_binding is not None
+    forged_binding = {
+        **original_binding,
+        "CommandId": "forged-command",
+        "ExecutionId": "forged-execution",
+        "GatewayIdempotencyKey": "forged-idempotency",
+    }
+    forged = replace(
+        invocation.request,
+        command_id="forged-command",
+        execution_id="forged-execution",
+        idempotency_key="forged-idempotency",
+        workflow_ai_budget_admission=forged_binding,
+    )
+    with pytest.raises(ValueError, match="authoritative Workflow AI admission"):
+        await gateway.accept(forged)
+    assert provider.calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("state", ("Released", "Rejected"))
+async def test_gateway_rejects_non_current_or_terminally_denied_admission(state: str):
+    root = runtime()
+    gateway = root.reference_runtime.reference_ai_gateway
+    await root.reference_runtime.classify_and_route_task("Where is the report?")
+    invocation = next(iter(gateway.store.invocations.values()))
+    workflow = next(iter(root.reference_runtime.workflow_repository.instances.values()))
+    record = dict((workflow.ai_admission_states or {})[invocation.request.command_id])
+    record["State"] = state
+    assert workflow.ai_admission_states is not None
+    workflow.ai_admission_states[invocation.request.command_id] = record
+    workflow.state = WorkflowState.RUNNING
+
+    with pytest.raises(ValueError, match="authoritative Workflow AI admission"):
+        await gateway.accept(invocation.request)
+
+
+@pytest.mark.anyio
+async def test_gateway_rejects_replaced_admission_fence():
+    root = runtime()
+    gateway = root.reference_runtime.reference_ai_gateway
+    await root.reference_runtime.classify_and_route_task("Where is the report?")
+    invocation = next(iter(gateway.store.invocations.values()))
+    workflow = next(iter(root.reference_runtime.workflow_repository.instances.values()))
+    workflow.transition_version += 1
+
+    with pytest.raises(ValueError, match="authoritative Workflow AI admission"):
+        await gateway.accept(invocation.request)
+
+
+@pytest.mark.anyio
 async def test_exhausted_budget_rejects_before_gateway():
     root = runtime()
     result = await root.reference_runtime.classify_and_route_task(

@@ -273,6 +273,18 @@ class AIGateway(Protocol):
     async def invoke(self, request: AIInvocationRequest) -> AIInvocationResponse: ...
 
 
+class WorkflowAdmissionAuthority(Protocol):
+    """Resolve the current Workflow-owned durable admission at the Gateway boundary."""
+
+    async def authoritative_ai_admission(
+        self,
+        *,
+        workflow_id: str,
+        command_id: str,
+        execution_id: str,
+    ) -> Mapping[str, object] | None: ...
+
+
 @dataclass(slots=True)
 class GatewayInvocation:
     request: AIInvocationRequest
@@ -718,6 +730,7 @@ class ReferenceAIGateway:
         heartbeat_interval: float = 10.0,
         health_cooldown: timedelta = timedelta(seconds=30),
         prompt_packages: PromptPackageCatalog | None = None,
+        workflow_admission_authority: WorkflowAdmissionAuthority | None = None,
     ) -> None:
         self._clock = clock
         self._identifiers = identifiers
@@ -735,6 +748,7 @@ class ReferenceAIGateway:
         self._cooldowns: dict[str, datetime] = {}
         self._degraded: set[str] = set()
         self._prompt_packages = prompt_packages
+        self._workflow_admission_authority = workflow_admission_authority
 
     async def _heartbeat(
         self, invocation_id: str, owner: str, generation: int, lost: asyncio.Event
@@ -772,7 +786,7 @@ class ReferenceAIGateway:
         return self._observations
 
     async def accept(self, request: AIInvocationRequest) -> Acceptance:
-        self._preflight(request)
+        await self._preflight(request)
         invocation_id = self._identifiers.new("ai")
         acknowledgement = ResultEnvelope(
             result_id=self._identifiers.new("result"),
@@ -1576,7 +1590,7 @@ class ReferenceAIGateway:
             terminal=response,
         )
 
-    def _preflight(self, request: AIInvocationRequest) -> None:
+    async def _preflight(self, request: AIInvocationRequest) -> None:
         self._authorizer.require(
             request.authorization,
             permission="ai.invoke",
@@ -1592,10 +1606,9 @@ class ReferenceAIGateway:
         if (request.output_schema is None) != (request.output_schema_identity is None):
             raise ValueError("governed schema material and identity must be bound together")
         if request.workflow_ai_budget_admission is not None:
-            self._validate_workflow_admission(request)
+            await self._validate_workflow_admission(request)
 
-    @staticmethod
-    def _validate_workflow_admission(request: AIInvocationRequest) -> None:
+    async def _validate_workflow_admission(self, request: AIInvocationRequest) -> None:
         binding = request.workflow_ai_budget_admission
         required = {
             "BindingContractVersion",
@@ -1656,6 +1669,17 @@ class ReferenceAIGateway:
             is None
         ):
             raise ValueError("Workflow AI admission binding does not match Gateway request")
+        authority = self._workflow_admission_authority
+        if authority is None:
+            raise ValueError("authoritative Workflow AI admission is unavailable")
+        assert request.workflow_id is not None
+        authoritative = await authority.authoritative_ai_admission(
+            workflow_id=request.workflow_id,
+            command_id=request.command_id,
+            execution_id=request.execution_id,
+        )
+        if authoritative != binding:
+            raise ValueError("authoritative Workflow AI admission does not match Gateway request")
 
     def _assemble(self, request: AIInvocationRequest, *, stage: int = 0) -> tuple[str, int, str]:
         if (

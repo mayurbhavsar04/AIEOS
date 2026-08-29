@@ -15,7 +15,7 @@ import anyio
 import pytest
 from alembic import command
 from alembic.config import Config
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
 from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.exc import IntegrityError
@@ -1609,6 +1609,62 @@ async def test_warmed_worker_replays_authoritative_direct_workflow_submission(
         )
     await first.close()
     await warmed.close()
+
+
+async def test_postgres_gateway_rejects_forged_and_stale_workflow_admission(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    root = compose(settings)
+    runtime = root.reference_runtime
+    await runtime.classify_and_route_task("Where is the durable report?")
+    gateway = runtime.reference_ai_gateway
+    invocation = next(iter(gateway.store.invocations.values()))
+    replay = await gateway.accept(invocation.request)
+    assert replay.replay
+
+    binding = invocation.request.workflow_ai_budget_admission
+    assert binding is not None
+    forged_binding = {
+        **binding,
+        "CommandId": "forged-command",
+        "ExecutionId": "forged-execution",
+        "GatewayIdempotencyKey": "forged-idempotency",
+    }
+    forged = replace(
+        invocation.request,
+        command_id="forged-command",
+        execution_id="forged-execution",
+        idempotency_key="forged-idempotency",
+        workflow_ai_budget_admission=forged_binding,
+    )
+    with pytest.raises(ValueError, match="authoritative Workflow AI admission"):
+        await gateway.accept(forged)
+
+    workflow_id = cast(str, invocation.request.workflow_id)
+    workflow_adapter = TypeAdapter(WorkflowInstance)
+    async with database.transaction() as session:
+        row = await session.get(
+            WorkflowRow,
+            (settings.tenant_id, settings.workspace_id, workflow_id),
+            with_for_update=True,
+        )
+        assert row is not None
+        workflow = workflow_adapter.validate_json(row.payload)
+        workflow.transition_version += 1
+        row.payload = workflow_adapter.dump_json(workflow)
+    with pytest.raises(ValueError, match="authoritative Workflow AI admission"):
+        await gateway.accept(invocation.request)
+
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 1
+        )
+    await root.close()
 
 
 async def test_scoped_idempotency_key_deduplicates_distinct_command_ids(

@@ -8,7 +8,7 @@ identity and lineage columns used for constraints and operational queries.
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -327,6 +327,22 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
         await self.refresh_workflow(receipt.workflow_id)
         self.command_receipts[receipt.command.command_id] = receipt
         return receipt.command, receipt.result if completed else None
+
+    async def authoritative_ai_admission(
+        self,
+        *,
+        workflow_id: str,
+        command_id: str,
+        execution_id: str,
+    ) -> Mapping[str, object] | None:
+        """Resolve fresh committed Workflow authority from PostgreSQL."""
+        if await self.refresh_workflow(workflow_id) is None:
+            return None
+        return await super().authoritative_ai_admission(
+            workflow_id=workflow_id,
+            command_id=command_id,
+            execution_id=execution_id,
+        )
 
     async def flush_in_transaction(self, session: AsyncSession) -> None:
         for instance in self.instances.values():

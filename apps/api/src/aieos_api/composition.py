@@ -551,6 +551,7 @@ def compose(
         ),
         adapters=reference_ai_adapters,
         prompt_packages=prompt_packages,
+        workflow_admission_authority=workflow_repository,
     )
     routed_ai_gateway = CapabilityGatewayRouter(ai_gateway, reference_ai_gateway)
     capabilities = CapabilityRegistry(
