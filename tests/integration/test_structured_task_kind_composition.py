@@ -127,22 +127,22 @@ async def test_composed_capability_resolves_schema_and_uses_real_gateway() -> No
 
 
 @pytest.mark.anyio
-async def test_legacy_workflow_owned_ai_route_without_admission_fails_before_gateway() -> None:
+async def test_direct_phase5_route_does_not_trust_initiator_as_workflow_authority() -> None:
     root = compose()
     runtime = root.reference_runtime
     runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
     workflow_owned = replace(command(root), initiator="Workflow Engine")
     result = await runtime.skill_runtime.handle(workflow_owned)
-    assert result.result_status is ResultStatus.REJECTED
-    assert not runtime.reference_ai_gateway.store.invocations
+    assert result.result_status is ResultStatus.ACCEPTED
+    assert runtime.reference_ai_gateway.store.invocations
     adapter = runtime.reference_ai_gateway._adapters[  # pyright: ignore[reportPrivateUsage]
         "mock-economy"
     ]
-    assert isinstance(adapter, DeterministicMockProvider) and adapter.calls == 0
+    assert isinstance(adapter, DeterministicMockProvider) and adapter.calls == 1
 
 
 @pytest.mark.anyio
-async def test_governed_v2_without_admission_fails_before_gateway() -> None:
+async def test_direct_phase5_v2_route_does_not_infer_workflow_from_version() -> None:
     root = compose()
     runtime = root.reference_runtime
     runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
@@ -160,8 +160,8 @@ async def test_governed_v2_without_admission_fails_before_gateway() -> None:
 
     result = await runtime.skill_runtime.handle(governed)
 
-    assert result.result_status is ResultStatus.REJECTED
-    assert not runtime.reference_ai_gateway.store.invocations
+    assert result.result_status is ResultStatus.ACCEPTED
+    assert runtime.reference_ai_gateway.store.invocations
 
 
 @pytest.mark.anyio

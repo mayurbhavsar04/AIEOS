@@ -132,6 +132,47 @@ async def test_gateway_resolves_authoritative_admission_and_rejects_coordinated_
     assert replay.replay
     assert provider.calls == 1
 
+
+@pytest.mark.anyio
+async def test_workflow_dispatch_cannot_drop_admission_by_mutating_initiator_or_version():
+    root = runtime()
+    runtime_ = root.reference_runtime
+    await runtime_.classify_and_route_task("Where is the report?")
+    receipt = next(iter(runtime_.execution_repository.command_receipts.values()))
+    command = receipt.command
+    runtime_.execution_repository.command_receipts.clear()
+    runtime_.execution_repository.records.clear()
+    bypass = replace(
+        command,
+        initiator="Reference Host",
+        command_version="2",
+        metadata=replace(command.metadata, workflow_ai_budget_admission=None),
+    )
+    provider = runtime_.reference_ai_gateway._adapters[  # pyright: ignore[reportPrivateUsage]
+        "mock-economy"
+    ]
+    assert isinstance(provider, DeterministicMockProvider)
+    calls_before = provider.calls
+
+    result = await runtime_.skill_runtime.handle(bypass)
+
+    assert result.result_status is ResultStatus.REJECTED
+    assert provider.calls == calls_before
+
+
+@pytest.mark.anyio
+async def test_gateway_requires_binding_from_workflow_dispatch_authority():
+    root = runtime()
+    gateway = root.reference_runtime.reference_ai_gateway
+    await root.reference_runtime.classify_and_route_task("Where is the report?")
+    invocation = next(iter(gateway.store.invocations.values()))
+    provider = gateway._adapters["mock-economy"]  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(provider, DeterministicMockProvider)
+
+    with pytest.raises(ValueError, match="committed Workflow AI admission"):
+        await gateway.accept(replace(invocation.request, workflow_ai_budget_admission=None))
+    assert provider.calls == 1
+
     original_binding = invocation.request.workflow_ai_budget_admission
     assert original_binding is not None
     forged_binding = {

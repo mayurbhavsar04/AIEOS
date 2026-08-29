@@ -344,6 +344,22 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
             execution_id=execution_id,
         )
 
+    async def owns_ai_dispatch(
+        self,
+        *,
+        workflow_id: str,
+        command_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Resolve fresh target-owned Workflow dispatch authority from PostgreSQL."""
+        if await self.refresh_workflow(workflow_id) is None:
+            return False
+        return await super().owns_ai_dispatch(
+            workflow_id=workflow_id,
+            command_id=command_id,
+            execution_id=execution_id,
+        )
+
     async def flush_in_transaction(self, session: AsyncSession) -> None:
         for instance in self.instances.values():
             await session.execute(

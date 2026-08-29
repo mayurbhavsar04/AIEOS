@@ -631,6 +631,7 @@ def compose(
         clock=resolved_clock,
         identifiers=resolved_identifiers,
         observations=observations,
+        workflow_admission_authority=workflow_repository,
         default_timeout_seconds=resolved.reference_timeout_seconds,
     )
     workflow_engine = WorkflowEngine(

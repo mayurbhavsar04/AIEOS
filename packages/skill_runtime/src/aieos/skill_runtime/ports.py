@@ -22,6 +22,9 @@ class SkillInput:
     payload: Mapping[str, object]
     authoritative_result_id: str | None = None
     workflow_ai_budget_admission: Mapping[str, object] | None = None
+    workflow_id: str | None = None
+    workflow_step_id: str | None = None
+    skill_version_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

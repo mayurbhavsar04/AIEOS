@@ -207,6 +207,30 @@ class InMemoryWorkflowRepository:
             return None
         return binding
 
+    async def owns_ai_dispatch(
+        self,
+        *,
+        workflow_id: str,
+        command_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Resolve Workflow-owned dispatch lineage without trusting command metadata."""
+        instance = self.instances.get(workflow_id)
+        if instance is None:
+            return False
+        admissions = instance.ai_admissions or {}
+        states = instance.ai_admission_states or {}
+        binding = admissions.get(command_id)
+        record = states.get(command_id)
+        return bool(
+            isinstance(binding, Mapping)
+            and isinstance(record, Mapping)
+            and binding.get("WorkflowId") == workflow_id
+            and binding.get("CommandId") == command_id
+            and binding.get("ExecutionId") == execution_id
+            and record.get("Binding") == binding
+        )
+
 
 class WorkflowEngine:
     """Own Workflow state, transitions, retry decisions, and new ExecutionId values."""

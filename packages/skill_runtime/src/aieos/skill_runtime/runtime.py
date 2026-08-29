@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
 
-from aieos.ai_gateway import AIGateway
+from aieos.ai_gateway import AIGateway, WorkflowAdmissionAuthority
 from aieos.capability_registry import CapabilityRegistry
 from aieos.contracts import (
     DataClassification,
@@ -250,6 +250,7 @@ class SkillRuntime:
         clock: Clock,
         identifiers: IdentifierFactory,
         observations: ObservationRecorder,
+        workflow_admission_authority: WorkflowAdmissionAuthority | None = None,
         default_timeout_seconds: float = 1.0,
     ) -> None:
         self._repository = repository
@@ -263,6 +264,7 @@ class SkillRuntime:
         self._clock = clock
         self._identifiers = identifiers
         self._observations = observations
+        self._workflow_admission_authority = workflow_admission_authority
         self._default_timeout_seconds = default_timeout_seconds
 
     async def handle(self, command: CommandEnvelope) -> ResultEnvelope:
@@ -323,7 +325,13 @@ class SkillRuntime:
             capability.boundary == "AI Gateway"
             and capability.capability_id == "StructuredTaskKindClassification"
         )
-        workflow_owned = command.initiator == "Workflow Engine"
+        workflow_owned = False
+        if self._workflow_admission_authority is not None:
+            workflow_owned = await self._workflow_admission_authority.owns_ai_dispatch(
+                workflow_id=command.workflow_id,
+                command_id=command.command_id,
+                execution_id=command.execution_id,
+            )
         # The approved capability identity, not caller-selected command version,
         # activates the governed admission boundary for Workflow-owned dispatch.
         if ai_capable_route and workflow_owned and command.metadata.authoritative_result_id is None:
@@ -429,6 +437,9 @@ class SkillRuntime:
             },
             authoritative_result_id=command.metadata.authoritative_result_id,
             workflow_ai_budget_admission=command.metadata.workflow_ai_budget_admission,
+            workflow_id=command.workflow_id,
+            workflow_step_id=command.workflow_step_id,
+            skill_version_id=definition.skill_version_id,
         )
         reused_result_id: str | None = None
         try:

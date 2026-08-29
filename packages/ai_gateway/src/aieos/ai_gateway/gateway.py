@@ -284,6 +284,16 @@ class WorkflowAdmissionAuthority(Protocol):
         execution_id: str,
     ) -> Mapping[str, object] | None: ...
 
+    async def owns_ai_dispatch(
+        self,
+        *,
+        workflow_id: str,
+        command_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Return target-owned Workflow dispatch authority, independent of caller metadata."""
+        ...
+
 
 @dataclass(slots=True)
 class GatewayInvocation:
@@ -1605,6 +1615,16 @@ class ReferenceAIGateway:
             raise ValueError("coarse budget feasibility failed")
         if (request.output_schema is None) != (request.output_schema_identity is None):
             raise ValueError("governed schema material and identity must be bound together")
+        workflow_owned = False
+        authority = self._workflow_admission_authority
+        if request.workflow_id is not None and authority is not None:
+            workflow_owned = await authority.owns_ai_dispatch(
+                workflow_id=request.workflow_id,
+                command_id=request.command_id,
+                execution_id=request.execution_id,
+            )
+        if workflow_owned and request.workflow_ai_budget_admission is None:
+            raise ValueError("committed Workflow AI admission binding is required")
         if request.workflow_ai_budget_admission is not None:
             await self._validate_workflow_admission(request)
 
