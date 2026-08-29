@@ -364,10 +364,18 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
         command_id: str,
         execution_id: str,
     ) -> bool:
-        """Resolve fresh target-owned Workflow dispatch authority from PostgreSQL."""
-        if await self.refresh_workflow(workflow_id) is None:
+        """Inspect durable dispatch authority without replacing an active unit of work."""
+        async with self._database.transaction() as session:
+            row = await session.get(
+                WorkflowRow,
+                (self._tenant_id, self._workspace_id, workflow_id),
+            )
+        if row is None:
             return False
-        return await super().owns_ai_dispatch(
+        instance = _WORKFLOW.validate_json(row.payload)
+        authority = InMemoryWorkflowRepository()
+        authority.instances[workflow_id] = instance
+        return await authority.owns_ai_dispatch(
             workflow_id=workflow_id,
             command_id=command_id,
             execution_id=execution_id,
