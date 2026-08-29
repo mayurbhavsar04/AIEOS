@@ -33,18 +33,17 @@ from aieos.adapters.persistence_postgres.models import (
     AIGatewayBudgetRow,
     AIGatewayInvocationRow,
     AIGatewayProviderEffectRow,
+    AIGatewayUsageLedgerRow,
     OutboxEventRow,
     OutcomeRow,
     WorkflowRow,
 )
 from aieos.ai_gateway import (
     AIInvocationRequest,
-    AIUsage,
     ModelCatalogEntry,
     ProviderResult,
     ReferenceAIGateway,
 )
-from aieos.ai_gateway.gateway import ProviderFailure
 from aieos.contracts import (
     AuthorizationContext,
     ErrorCategory,
@@ -54,9 +53,11 @@ from aieos.contracts import (
     RetryClassification,
 )
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
+from aieos.contracts.events import EventEnvelope
 from aieos.security_support import ScopeAuthorizer
 from aieos.skill_runtime.runtime import SkillDependencyFailure
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
+from aieos.workflow_engine import WorkflowState
 from aieos_api.composition import CompositionRoot, compose
 from aieos_api.settings import HostSettings, RuntimeAdapter
 
@@ -90,6 +91,34 @@ class MatrixExecution:
     lineage: str
     terminal_results: int
     runner_completed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RaceProof:
+    workflow_ids: tuple[str, ...]
+    terminal_result_ids: tuple[str, ...]
+    replay_result_id: str
+    provider_effects: int
+    provider_dispatches: int
+    admission_matches: bool
+    admission_state: str
+    budget_state: str
+    usage_final: bool
+    forged_admission_rejected: bool
+
+
+def _validate_race_proof(proof: RaceProof) -> None:
+    assert len(proof.workflow_ids) >= 2
+    assert len(set(proof.workflow_ids)) == 1
+    assert len(proof.terminal_result_ids) == 1
+    assert proof.replay_result_id == proof.terminal_result_ids[0]
+    assert proof.provider_effects == 1
+    assert proof.provider_dispatches == 1
+    assert proof.admission_matches
+    assert proof.admission_state == "Reconciled"
+    assert proof.budget_state == "committed"
+    assert proof.usage_final
+    assert proof.forged_admission_rejected
 
 
 ROWS = (
@@ -491,16 +520,20 @@ def _evaluate(rows: tuple[MatrixRow, ...], executions: tuple[MatrixExecution, ..
     assert frozenset(execution_ids) == EXPECTED_CASE_IDS
     observed = {execution.case_id: execution for execution in executions}
     for row in rows:
-        execution = observed[row.case_id]
-        assert execution.runner_completed, f"{row.case_id}: metadata-only execution is forbidden"
-        assert execution.terminal == row.terminal
-        assert execution.gateway_calls == row.gateway_calls
-        assert execution.provider_calls == row.provider_calls
-        assert execution.budget == row.budget
-        assert execution.security == row.security
-        assert execution.durability == row.durability
-        assert execution.lineage == row.lineage
-        assert execution.terminal_results == 1
+        _evaluate_execution(row, observed[row.case_id])
+
+
+def _evaluate_execution(row: MatrixRow, execution: MatrixExecution) -> None:
+    assert execution.runner_completed, f"{row.case_id}: metadata-only execution is forbidden"
+    assert execution.case_id == row.case_id
+    assert execution.terminal == row.terminal
+    assert execution.gateway_calls == row.gateway_calls
+    assert execution.provider_calls == row.provider_calls
+    assert execution.budget == row.budget
+    assert execution.security == row.security
+    assert execution.durability == row.durability
+    assert execution.lineage == row.lineage
+    assert execution.terminal_results == 1
 
 
 async def _run_composed_row(row: MatrixRow) -> MatrixExecution:
@@ -753,28 +786,17 @@ async def test_r5_composed_rows_execute_through_their_real_runners() -> None:
 
 
 def test_r5_evaluator_rejects_omitted_duplicate_and_metadata_only_rows() -> None:
-    complete = tuple(
-        _execution(
-            row,
-            terminal=row.terminal,
-            gateway_calls=row.gateway_calls,
-            provider_calls=row.provider_calls,
-            budget=row.budget,
-            security=row.security,
-            durability=row.durability,
-            lineage=row.lineage,
-        )
-        for row in ROWS
-    )
-    _evaluate(ROWS, complete)
     with pytest.raises(AssertionError):
-        _evaluate(ROWS[:-1], complete[:-1])
+        _evaluate(ROWS[:-1], ())
     duplicated = (*ROWS[:-1], ROWS[0])
     with pytest.raises(AssertionError):
-        _evaluate(duplicated, complete)
-    metadata_only = replace(complete[0], runner_completed=False)
+        _evaluate(duplicated, ())
+    row = MatrixRow("oracle", "observed", "Succeeded", 1, 1, "settled", "scoped", "none", "safe")
+    metadata_only = MatrixExecution(
+        "oracle", "Succeeded", 1, 1, "settled", "scoped", "none", "safe", 1, False
+    )
     with pytest.raises(AssertionError, match="metadata-only"):
-        _evaluate(ROWS, (metadata_only, *complete[1:]))
+        _evaluate_execution(row, metadata_only)
 
 
 @pytest.mark.parametrize(
@@ -788,22 +810,50 @@ def test_r5_evaluator_rejects_omitted_duplicate_and_metadata_only_rows() -> None
     ),
 )
 def test_r5_evaluator_rejects_real_oracle_mutations(field: str, replacement: object) -> None:
-    complete = tuple(
-        _execution(
-            row,
-            terminal=row.terminal,
-            gateway_calls=row.gateway_calls,
-            provider_calls=row.provider_calls,
-            budget=row.budget,
-            security=row.security,
-            durability=row.durability,
-            lineage=row.lineage,
-        )
-        for row in ROWS
+    row = MatrixRow(
+        "oracle", "observed", "Succeeded", 1, 1, "settled", "scoped", "recovered", "safe"
     )
-    mutated = replace(complete[0], **{field: replacement})
+    observed = MatrixExecution(
+        "oracle", "Succeeded", 1, 1, "settled", "scoped", "recovered", "safe", 1, True
+    )
+    mutated = replace(observed, **{field: replacement})
     with pytest.raises(AssertionError):
-        _evaluate(ROWS, (mutated, *complete[1:]))
+        _evaluate_execution(row, mutated)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("workflow_ids", ("workflow-a", "workflow-b")),
+        ("terminal_result_ids", ("result-a", "result-b")),
+        ("replay_result_id", "different-result"),
+        ("provider_effects", 2),
+        ("provider_dispatches", 2),
+        ("admission_matches", False),
+        ("admission_state", "Committed"),
+        ("budget_state", "released"),
+        ("usage_final", False),
+        ("forged_admission_rejected", False),
+    ),
+)
+def test_r5_race_proof_rejects_false_green_mutations(
+    field: str, replacement: object
+) -> None:
+    proof = RaceProof(
+        workflow_ids=("workflow-a", "workflow-a"),
+        terminal_result_ids=("result-a",),
+        replay_result_id="result-a",
+        provider_effects=1,
+        provider_dispatches=1,
+        admission_matches=True,
+        admission_state="Reconciled",
+        budget_state="committed",
+        usage_final=True,
+        forged_admission_rejected=True,
+    )
+    _validate_race_proof(proof)
+    with pytest.raises(AssertionError):
+        _validate_race_proof(replace(proof, **{field: replacement}))
 
 
 def _database_url() -> str:
@@ -969,70 +1019,148 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
             durability="recovered",
         )
     if row.case_id == "ambiguous-provider-effect":
-        gateway, _, _ = _durable_gateway(database)
-        request = _ai_request(idempotency_key="r5-ambiguous-effect")
-        accepted = await gateway.accept(request)
-        effect_key = f"{accepted.ai_invocation_id}:provider:1"
-        calls = 0
+        root = _postgres_root()
+        command = _workflow_command(root)
+        provider = _provider(root)
+        durable_boundary = PostgresProviderEffectBoundary(database)
 
-        async def crash_after_dispatch() -> ProviderResult:
-            nonlocal calls
-            calls += 1
-            raise RuntimeError("injected process loss after provider dispatch")
+        class CrashAfterProviderEffect:
+            async def execute(
+                self,
+                *,
+                request: AIInvocationRequest,
+                effect_key: str,
+                effect_type: str,
+                request_hash: str,
+                operation: Any,
+            ) -> ProviderResult:
+                async def lose_process_after_effect() -> ProviderResult:
+                    await operation()
+                    raise RuntimeError("injected process loss after provider effect")
 
-        with pytest.raises(RuntimeError, match="process loss"):
-            await PostgresProviderEffectBoundary(database).execute(
-                request=request,
-                effect_key=effect_key,
-                effect_type="provider",
-                request_hash="r5-hash",
-                operation=crash_after_dispatch,
-            )
+                return await durable_boundary.execute(
+                    request=request,
+                    effect_key=effect_key,
+                    effect_type=effect_type,
+                    request_hash=request_hash,
+                    operation=lose_process_after_effect,
+                )
 
-        async def must_not_replay() -> ProviderResult:
-            nonlocal calls
-            calls += 1
-            return ProviderResult("{}", AIUsage(1, 1))
-
-        with pytest.raises(ProviderFailure, match="AI_PROVIDER_EFFECT_AMBIGUOUS"):
-            await PostgresProviderEffectBoundary(database).execute(
-                request=request,
-                effect_key=effect_key,
-                effect_type="provider",
-                request_hash="r5-hash",
-                operation=must_not_replay,
-            )
-        assert calls == 1
-        async with database.transaction() as session:
-            effect = await session.get(
-                AIGatewayProviderEffectRow, (request.tenant_id, request.workspace_id, effect_key)
-            )
-            assert (
-                effect is not None and effect.state == "dispatching" and effect.dispatch_count == 1
-            )
+        provider.use_effect_boundary(CrashAfterProviderEffect())
+        try:
+            await root.reference_runtime.run_workflow_command(command)
+            instance, terminal = _terminal(root)
+            workflow_id = instance.workflow_id
+            terminal_result_id = terminal.result_id
+            assert terminal.result_status is ResultStatus.FAILED
+            assert provider.calls == 1
+            async with database.transaction() as session:
+                effects = tuple(await session.scalars(select(AIGatewayProviderEffectRow)))
+                assert len(effects) == 1
+                effect = effects[0]
+                assert effect.state == "dispatching" and effect.dispatch_count == 1
+                observed_budget = "ambiguous" if effect.state == "dispatching" else effect.state
+        finally:
+            await root.close()
+        restarted = _postgres_root()
+        try:
+            replay = await restarted.reference_runtime.run_workflow_command(command)
+            replay_workflow_id = cast(str, replay.value_reference)
+            assert replay_workflow_id == workflow_id
+            recovered = restarted.reference_runtime.workflow_repository.instances[workflow_id]
+            assert recovered.outcome is not None
+            assert recovered.outcome.result_id == terminal_result_id
+            assert recovered.outcome.result_status is ResultStatus.FAILED
+            assert _provider(restarted).calls == 0
+            async with database.transaction() as session:
+                effects = tuple(await session.scalars(select(AIGatewayProviderEffectRow)))
+                terminal_ids = tuple(
+                    await session.scalars(
+                        select(OutcomeRow.outcome_id).where(
+                            OutcomeRow.owner_component == "Workflow Engine",
+                            OutcomeRow.subject_id == workflow_id,
+                            OutcomeRow.terminal.is_(True),
+                        )
+                    )
+                )
+                assert len(effects) == 1 and effects[0].dispatch_count == 1
+                assert terminal_ids == (terminal_result_id,)
+        finally:
+            await restarted.close()
         return _execution(
             row,
             terminal="Failed",
             gateway_calls=1,
             provider_calls=1,
-            budget="ambiguous",
+            budget=observed_budget,
             security="fail-closed",
             durability="recovered",
         )
     if row.case_id == "workflow-cancellation":
         root = _postgres_root()
         provider = _provider(root)
-        provider._behaviors = [MockProviderBehavior.CANCELLED]  # pyright: ignore[reportPrivateUsage]
         try:
-            await root.reference_runtime.run_workflow_command(_workflow_command(root))
-            execution = next(iter(root.reference_runtime.execution_repository.records.values()))
-            assert (
-                execution.result is not None
-                and execution.result.result_status is ResultStatus.CANCELLED
+            runtime = root.reference_runtime
+            runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+            acknowledgement = await runtime.run_workflow_command(_workflow_command(root))
+            workflow_id = cast(str, acknowledgement.value_reference)
+            workflow = runtime.workflow_repository.instances[workflow_id]
+            assert workflow.state is WorkflowState.RUNNING and provider.calls == 1
+            cancel = CommandEnvelope(
+                command_id=runtime.identifiers.new("command"),
+                command_type="CancelWorkflow",
+                command_version="2.0",
+                correlation_id=workflow.correlation_id,
+                causation_id=runtime.identifiers.new("request"),
+                target_component="Workflow Engine",
+                initiator="Reference Host",
+                timestamp=runtime.clock.now(),
+                tenant_id=workflow.tenant_id,
+                workspace_id=workflow.workspace_id,
+                workflow_id=workflow_id,
+                payload={"reason": "R5 governed cancellation"},
+                metadata=CommandMetadata(
+                    request_id=workflow.request_id,
+                    idempotency_key=runtime.identifiers.new("idempotency"),
+                    authorization=runtime.authorization,
+                ),
             )
-            assert provider.calls == 1
+            cancelled = await runtime.run_workflow_command(cancel)
+            assert cancelled.result_status is ResultStatus.CANCELLED
+            cancelled_result_id = cancelled.result_id
+            async with database.transaction() as session:
+                late_row = await session.scalar(
+                    select(OutboxEventRow).where(
+                        OutboxEventRow.event_type == "ExecutionAttemptSucceeded"
+                    )
+                )
+                assert late_row is not None
+                late_event = TypeAdapter(EventEnvelope).validate_json(late_row.payload)
+            await runtime.workflow_engine.consume(late_event)
+            assert workflow.state is WorkflowState.CANCELLED
+            assert workflow.outcome is not None
+            assert workflow.outcome.result_id == cancelled_result_id
         finally:
             await root.close()
+        restarted = _postgres_root()
+        try:
+            await restarted.reference_runtime.outbox.drain()
+            durable = restarted.reference_runtime.workflow_repository.instances[workflow_id]
+            assert durable.state is WorkflowState.CANCELLED
+            assert durable.outcome is not None and durable.outcome.result_id == cancelled_result_id
+            async with database.transaction() as session:
+                terminal_ids = tuple(
+                    await session.scalars(
+                        select(OutcomeRow.outcome_id).where(
+                            OutcomeRow.owner_component == "Workflow Engine",
+                            OutcomeRow.subject_id == workflow_id,
+                            OutcomeRow.terminal.is_(True),
+                        )
+                    )
+                )
+                assert terminal_ids == (cancelled_result_id,)
+        finally:
+            await restarted.close()
         return _execution(
             row,
             terminal="Cancelled",
@@ -1303,12 +1431,13 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
                 result.result_status in {ResultStatus.ACCEPTED, ResultStatus.SUCCEEDED}
                 for result in racing_results
             )
-            resolved_workflow_ids = {
+            observed_workflow_ids = tuple(
                 cast(str, result.value_reference)
                 if result.result_status is ResultStatus.ACCEPTED
                 else result.subject_reference
                 for result in racing_results
-            }
+            )
+            resolved_workflow_ids = set(observed_workflow_ids)
             assert resolved_workflow_ids == {instance.workflow_id}
             assert terminal.result_status is ResultStatus.SUCCEEDED
             assert terminal.subject_reference == instance.workflow_id
@@ -1379,9 +1508,45 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
                         )
                     )
                 )
+                usage_rows = tuple(
+                    await session.scalars(
+                        select(AIGatewayUsageLedgerRow).where(
+                            AIGatewayUsageLedgerRow.tenant_id == command.tenant_id,
+                            AIGatewayUsageLedgerRow.workspace_id == command.workspace_id,
+                            AIGatewayUsageLedgerRow.ai_invocation_id == ai_invocation_id,
+                        )
+                    )
+                )
                 assert len(attempts) == 1
                 assert len(effects) == 1 and effects[0].dispatch_count == 1
-                assert len(budgets) == 1
+                assert len(budgets) == 1 and budgets[0].state == "committed"
+                assert budgets[0].actual_amount is not None
+                assert len(usage_rows) == 1 and usage_rows[0].final
+                admissions = cast(dict[str, Any], workflow_snapshot["ai_admissions"])
+                admission_states = cast(
+                    dict[str, Any], workflow_snapshot["ai_admission_states"]
+                )
+                assert len(admissions) == len(admission_states) == 1
+                admission_key = next(iter(admissions))
+                admission = cast(dict[str, Any], admissions[admission_key])
+                admission_state = cast(dict[str, Any], admission_states[admission_key])
+                assert admission_state["State"] == "Reconciled"
+                assert admission_state["Binding"] == admission
+                assert admission_state["SettledActual"]["Amount"] == str(
+                    budgets[0].actual_amount.normalize()
+                )
+                invocation_snapshot = cast(
+                    dict[str, Any], json.loads(invocations[0].request_payload)
+                )
+                request_snapshot = cast(dict[str, Any], invocation_snapshot["request"])
+                assert request_snapshot["workflow_ai_budget_admission"] == admission
+                observed_budget = (
+                    "settled"
+                    if admission_state["State"] == "Reconciled"
+                    and budgets[0].state == "committed"
+                    and usage_rows[0].final
+                    else "divergent"
+                )
                 assert (
                     await session.scalar(select(func.count()).select_from(OutboxEventRow)) or 0
                 ) >= 1
@@ -1416,6 +1581,44 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
                     else terminal_result_ids[0]
                 )
                 assert replay_resolved_result_id == durable_terminal.result_id
+            invocation = next(
+                iter(root.reference_runtime.reference_ai_gateway.store.invocations.values())
+            )
+            binding = invocation.request.workflow_ai_budget_admission
+            assert binding is not None
+            forged_binding = {
+                **binding,
+                "CommandId": "r5-forged-command",
+                "ExecutionId": "r5-forged-execution",
+                "GatewayIdempotencyKey": "r5-forged-idempotency",
+            }
+            forged = replace(
+                invocation.request,
+                command_id="r5-forged-command",
+                execution_id="r5-forged-execution",
+                idempotency_key="r5-forged-idempotency",
+                workflow_ai_budget_admission=forged_binding,
+            )
+            with pytest.raises(ValueError, match="authoritative Workflow AI admission"):
+                await root.reference_runtime.reference_ai_gateway.accept(forged)
+            _validate_race_proof(
+                RaceProof(
+                    workflow_ids=observed_workflow_ids,
+                    terminal_result_ids=terminal_result_ids,
+                    replay_result_id=replay_resolved_result_id,
+                    provider_effects=len(effects),
+                    provider_dispatches=sum(effect.dispatch_count for effect in effects),
+                    admission_matches=(
+                        admission_state["Binding"] == admission
+                        and request_snapshot["workflow_ai_budget_admission"] == admission
+                    ),
+                    admission_state=cast(str, admission_state["State"]),
+                    budget_state=budgets[0].state,
+                    usage_final=usage_rows[0].final,
+                    forged_admission_rejected=True,
+                )
+            )
+            assert provider.calls == 1
         finally:
             await root.close()
         return _execution(
@@ -1423,7 +1626,7 @@ async def _run_postgres_row(row: MatrixRow, database: PostgresDatabase) -> Matri
             terminal="Succeeded",
             gateway_calls=1,
             provider_calls=1,
-            budget="settled",
+            budget=observed_budget,
             security="fenced",
             durability="recovered",
         )
@@ -1436,26 +1639,12 @@ async def test_r5_postgres_rows_execute_through_real_postgres_runners(
     postgres_database: PostgresDatabase,
 ) -> None:
     rows = tuple(row for row in ROWS if row.proof == "postgres")
-    executions: list[MatrixExecution] = []
+    executions = [
+        await _run_composed_row(row) for row in ROWS if row.proof == "composed"
+    ]
     for row in rows:
         await _reset_postgres(postgres_database)
         executions.append(await _run_postgres_row(row, postgres_database))
     assert len(rows) == 10
-    combined = tuple(
-        [
-            _execution(
-                row,
-                terminal=row.terminal,
-                gateway_calls=row.gateway_calls,
-                provider_calls=row.provider_calls,
-                budget=row.budget,
-                security=row.security,
-                durability=row.durability,
-                lineage=row.lineage,
-            )
-            for row in ROWS
-            if row.proof == "composed"
-        ]
-        + executions
-    )
-    _evaluate(ROWS, combined)
+    assert len(executions) == 28
+    _evaluate(ROWS, tuple(executions))
