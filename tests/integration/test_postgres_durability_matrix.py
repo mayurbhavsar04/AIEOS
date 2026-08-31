@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import os
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
@@ -38,6 +37,7 @@ from aieos.adapters.persistence_postgres.models import (
     AIGatewayBudgetRow,
     AIGatewayInvocationRow,
     AIGatewayProviderEffectRow,
+    AIGatewayUsageLedgerRow,
     Base,
     CommandIdempotencyRow,
     DecisionEvidenceRow,
@@ -66,7 +66,7 @@ from aieos.contracts.events import EventEnvelope, EventMetadata
 from aieos.security_support import ScopeAuthorizer
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
 from aieos.workflow_engine import WorkflowDefinition, WorkflowInstance, WorkflowState
-from aieos.workflow_engine.engine import CommandProcessingState, WorkflowCommandReceipt
+from aieos.workflow_engine.engine import CommandProcessingState
 from aieos_api.composition import CompositionRoot, compose
 from aieos_api.settings import HostSettings, RuntimeAdapter
 
@@ -1614,8 +1614,9 @@ async def test_warmed_worker_replays_authoritative_direct_workflow_submission(
     await warmed.close()
 
 
-async def test_unrelated_checkpoint_does_not_flush_untouched_stale_workflow_or_receipt(
+async def test_prewarmed_nonterminal_workflow_survives_unrelated_checkpoint(
     database: PostgresDatabase,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = HostSettings(
         runtime_adapter=RuntimeAdapter.POSTGRES,
@@ -1623,52 +1624,152 @@ async def test_unrelated_checkpoint_does_not_flush_untouched_stale_workflow_or_r
     )
     winner = compose(settings)
     stale = compose(settings)
+    repository = stale.reference_runtime.workflow_repository
+    assert isinstance(repository, PostgresWorkflowRepository)
+    original = winner.reference_runtime.skill_runtime.handle
+    warmed: list[tuple[str, int, bytes]] = []
+
+    async def prewarm_before_delivery(command: CommandEnvelope) -> ResultEnvelope:
+        # A has created W, but has not delivered its first execution or completed its receipt.
+        assert command.workflow_id is not None
+        await checkpoint(database, winner.reference_runtime.durable_participants)
+        for participant in stale.reference_runtime.durable_participants:
+            await participant.prepare()
+        cached = repository.instances[command.workflow_id]
+        assert cached.state is WorkflowState.RUNNING
+        assert cached.outcome is None
+        receipt = next(
+            r for r in repository.command_receipts.values() if r.workflow_id == cached.workflow_id
+        )
+        assert receipt.state is CommandProcessingState.IN_PROGRESS
+        async with database.transaction() as session:
+            row = await session.get(
+                WorkflowRow, (settings.tenant_id, settings.workspace_id, cached.workflow_id)
+            )
+            assert row is not None and row.state == WorkflowState.RUNNING.value
+            assert repository._workflow_versions[cached.workflow_id] == row.version  # pyright: ignore[reportPrivateUsage]
+            warmed.append((cached.workflow_id, row.version, row.payload))
+            durable_receipt = await session.get(
+                CommandIdempotencyRow,
+                (
+                    settings.tenant_id,
+                    settings.workspace_id,
+                    "Workflow Engine",
+                    receipt.command.metadata.idempotency_key,
+                ),
+            )
+            assert durable_receipt is not None and not durable_receipt.completed
+        return await original(command)
+
+    monkeypatch.setattr(winner.reference_runtime.skill_runtime, "handle", prewarm_before_delivery)
     acknowledgement = await winner.reference_runtime.classify_and_route_task(
         "Where is the authoritative report?"
     )
     workflow_id = acknowledgement.subject_reference
-    for participant in stale.reference_runtime.durable_participants:
-        await participant.prepare()
-    repository = stale.reference_runtime.workflow_repository
-    assert isinstance(repository, PostgresWorkflowRepository)
+    assert len(warmed) == 1 and warmed[0][0] == workflow_id
     cached = repository.instances[workflow_id]
-    terminal_outcome = cached.outcome
-    assert terminal_outcome is not None
-    terminal_result_id = terminal_outcome.result_id
-    stale_snapshot = copy.deepcopy(cached)
-    stale_snapshot.state = WorkflowState.RUNNING
-    stale_snapshot.outcome = None
-    repository.instances[workflow_id] = stale_snapshot
-    repository._workflow_baseline[workflow_id] = TypeAdapter(WorkflowInstance).dump_json(  # pyright: ignore[reportPrivateUsage]
-        stale_snapshot
-    )
-    receipt = next(
-        value for value in repository.command_receipts.values() if value.workflow_id == workflow_id
-    )
-    receipt.state = CommandProcessingState.IN_PROGRESS
-    repository._receipt_baseline[receipt.command.command_id] = TypeAdapter(  # pyright: ignore[reportPrivateUsage]
-        WorkflowCommandReceipt
-    ).dump_json(receipt)
+    assert cached.state is WorkflowState.RUNNING and cached.outcome is None
+    receipt = next(r for r in repository.command_receipts.values() if r.workflow_id == workflow_id)
+    assert receipt.state is CommandProcessingState.IN_PROGRESS
+    gateway = winner.reference_runtime.reference_ai_gateway
+    invocation = next(iter(gateway.store.invocations.values()))
+    invocation_id = invocation.invocation_id
+    provider = gateway._adapters["mock-economy"]  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(provider, DeterministicMockProvider) and provider.calls == 1
 
-    await stale.reference_runtime.classify_and_route_task("Send the unrelated report")
+    async def durable_snapshot(db: PostgresDatabase) -> dict[str, list[dict[str, Any]]]:
+        result: dict[str, list[dict[str, Any]]] = {}
+        async with db.transaction() as session:
+            queries = {
+                "workflow": select(WorkflowRow.__table__).where(
+                    WorkflowRow.workflow_id == workflow_id
+                ),
+                "outcome": select(OutcomeRow.__table__).where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                ),
+                "receipt": select(CommandIdempotencyRow.__table__).where(
+                    CommandIdempotencyRow.target_component == "Workflow Engine",
+                    CommandIdempotencyRow.idempotency_key
+                    == receipt.command.metadata.idempotency_key,
+                ),
+            }
+            for model in (
+                AIGatewayInvocationRow,
+                AIGatewayBudgetRow,
+                AIGatewayUsageLedgerRow,
+                AIGatewayProviderEffectRow,
+                AIGatewayAttemptRow,
+            ):
+                queries[model.__tablename__] = select(model.__table__).where(
+                    model.ai_invocation_id == invocation_id
+                )
+            for name, query in queries.items():
+                rows = (await session.execute(query)).mappings().all()
+                result[name] = sorted((dict(row) for row in rows), key=repr)
+        return result
+
+    terminal = await durable_snapshot(database)
+    assert len(terminal["workflow"]) == len(terminal["outcome"]) == len(terminal["receipt"]) == 1
+    assert terminal["workflow"][0]["version"] > warmed[0][1]
+    assert terminal["workflow"][0]["state"] == WorkflowState.COMPLETED.value
+    assert terminal["receipt"][0]["completed"] is True
+    assert terminal["ai_gateway_invocations"][0]["state"] == "Succeeded"
+    assert terminal["ai_gateway_budgets"][0]["state"] == "committed"
+    assert terminal["ai_gateway_budgets"][0]["reconciled_at"] is not None
+    assert terminal["ai_gateway_usage_ledger"]
+    assert len(terminal["ai_gateway_provider_effects"]) == 1
+    assert terminal["ai_gateway_provider_effects"][0]["state"] == "completed"
+    assert terminal["ai_gateway_provider_effects"][0]["dispatch_count"] == 1
+
+    refresh = repository.refresh_workflow
+    replay = repository.replay_command
+
+    async def forbid_refresh(target_id: str) -> WorkflowInstance | None:
+        assert target_id != workflow_id, "B must not refresh W before its unrelated checkpoint"
+        return await refresh(target_id)
+
+    async def forbid_replay(
+        command: CommandEnvelope,
+    ) -> tuple[CommandEnvelope, ResultEnvelope | None] | None:
+        assert command.metadata.idempotency_key != receipt.command.metadata.idempotency_key
+        return await replay(command)
+
+    monkeypatch.setattr(repository, "refresh_workflow", forbid_refresh)
+    monkeypatch.setattr(repository, "replay_command", forbid_replay)
+    # Non-AI unrelated command makes any extra AI provider dispatch unambiguously a failure.
+    await stale.reference_runtime.run_command(
+        stale.reference_runtime.build_request_command("unrelated hello")
+    )
+    assert repository.instances[workflow_id] is cached
+    assert cached.state is WorkflowState.RUNNING and cached.outcome is None
+    assert repository._workflow_versions[workflow_id] == warmed[0][1]  # pyright: ignore[reportPrivateUsage]
+    assert TypeAdapter(WorkflowInstance).dump_json(cached) == warmed[0][2]
+    assert receipt.state is CommandProcessingState.IN_PROGRESS
+    assert provider.calls == 1
+    stale_provider = stale.reference_runtime.reference_ai_gateway._adapters["mock-economy"]  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(stale_provider, DeterministicMockProvider) and stale_provider.calls == 0
 
     fresh = compose(settings)
     for participant in fresh.reference_runtime.durable_participants:
         await participant.prepare()
     authoritative = fresh.reference_runtime.workflow_repository.instances[workflow_id]
-    assert authoritative.state is WorkflowState.COMPLETED
-    assert authoritative.outcome is not None
-    assert authoritative.outcome.result_id == terminal_result_id
+    assert authoritative.workflow_id == workflow_id
+    assert authoritative.state is WorkflowState.COMPLETED and authoritative.outcome is not None
+    assert authoritative.outcome.result_id == terminal["outcome"][0]["outcome_id"]
+    assert authoritative.ai_admission_states
+    assert all(
+        state["State"] == "Reconciled" for state in authoritative.ai_admission_states.values()
+    )
     durable_receipt = next(
-        value
-        for value in fresh.reference_runtime.workflow_repository.command_receipts.values()
-        if value.workflow_id == workflow_id
+        r
+        for r in fresh.reference_runtime.workflow_repository.command_receipts.values()
+        if r.workflow_id == workflow_id
     )
     assert durable_receipt.state is CommandProcessingState.COMPLETED
-    async with database.transaction() as session:
-        assert (
-            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 2
-        )
+    assert fresh.database is not None
+    assert await durable_snapshot(fresh.database) == terminal
     await winner.close()
     await stale.close()
     await fresh.close()
@@ -1681,22 +1782,48 @@ async def test_stale_dirty_workflow_snapshot_is_rejected_by_version_fence(
         runtime_adapter=RuntimeAdapter.POSTGRES,
         database_url=SecretStr(database_url()),
     )
-    root = compose(settings)
-    acknowledgement = await root.reference_runtime.classify_and_route_task("Where is the report?")
+    winner = compose(settings)
+    stale = compose(settings)
+    acknowledgement = await winner.reference_runtime.classify_and_route_task("Where is the report?")
     workflow_id = acknowledgement.subject_reference
-    repository = root.reference_runtime.workflow_repository
+    for participant in stale.reference_runtime.durable_participants:
+        await participant.prepare()
+    repository = stale.reference_runtime.workflow_repository
+    winner_repository = winner.reference_runtime.workflow_repository
     assert isinstance(repository, PostgresWorkflowRepository)
+    assert isinstance(winner_repository, PostgresWorkflowRepository)
+    old_version = repository._workflow_versions[workflow_id]  # pyright: ignore[reportPrivateUsage]
+    # B really changes its older snapshot; A then commits a newer authoritative version.
     repository.instances[workflow_id].state = WorkflowState.RUNNING
+    winner_repository.instances[workflow_id].transition_version += 1
+    await checkpoint(database, (winner_repository,))
     async with database.transaction() as session:
-        await session.execute(
-            update(WorkflowRow)
-            .where(WorkflowRow.workflow_id == workflow_id)
-            .values(version=WorkflowRow.version + 1)
+        row = await session.get(
+            WorkflowRow, (settings.tenant_id, settings.workspace_id, workflow_id)
         )
+        assert row is not None and row.version > old_version
+        terminal_payload, terminal_version = row.payload, row.version
 
     with pytest.raises(RuntimeError, match="durable version fence"):
         await checkpoint(database, (repository,))
-    await root.close()
+    assert repository._workflow_versions[workflow_id] == old_version  # pyright: ignore[reportPrivateUsage]
+    fresh = compose(settings)
+    for participant in fresh.reference_runtime.durable_participants:
+        await participant.prepare()
+    assert (
+        fresh.reference_runtime.workflow_repository.instances[workflow_id].state
+        is WorkflowState.COMPLETED
+    )
+    assert fresh.database is not None
+    async with fresh.database.transaction() as session:
+        row = await session.get(
+            WorkflowRow, (settings.tenant_id, settings.workspace_id, workflow_id)
+        )
+        assert row is not None
+        assert (row.payload, row.version) == (terminal_payload, terminal_version)
+    await winner.close()
+    await stale.close()
+    await fresh.close()
 
 
 async def test_postgres_gateway_rejects_forged_and_stale_workflow_admission(
