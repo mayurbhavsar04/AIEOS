@@ -360,26 +360,21 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
     async def owns_ai_dispatch(
         self,
         *,
-        workflow_id: str,
+        workflow_id: str | None,
         command_id: str,
         execution_id: str,
     ) -> bool:
-        """Inspect durable dispatch authority without replacing an active unit of work."""
+        """Consult Engine context or durable ownership, never admission validity."""
+        if self._dispatch_context.get() is not None:
+            return True
+        if workflow_id is None:
+            return False
         async with self._database.transaction() as session:
             row = await session.get(
                 WorkflowRow,
                 (self._tenant_id, self._workspace_id, workflow_id),
             )
-        if row is None:
-            return False
-        instance = _WORKFLOW.validate_json(row.payload)
-        authority = InMemoryWorkflowRepository()
-        authority.instances[workflow_id] = instance
-        return await authority.owns_ai_dispatch(
-            workflow_id=workflow_id,
-            command_id=command_id,
-            execution_id=execution_id,
-        )
+        return row is not None
 
     async def flush_in_transaction(self, session: AsyncSession) -> None:
         for instance in self.instances.values():

@@ -9,7 +9,9 @@ from typing import cast
 import pytest
 
 from aieos.adapters.ai_mock import DeterministicMockProvider, MockProviderBehavior
-from aieos.contracts import AuthorizationContext, ResultStatus
+from aieos.ai_gateway import AIInvocationRequest
+from aieos.ai_gateway.gateway import Acceptance
+from aieos.contracts import AuthorizationContext, ResultEnvelope, ResultStatus
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
 from aieos.workflow_engine import WorkflowState
@@ -451,3 +453,107 @@ async def test_admission_is_durably_committed_with_fixed_logical_binding_before_
             command.execution_id or "",
         )
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "execution_id",
+        "missing_binding",
+        "execution_id_and_missing_binding",
+        "workflow_id",
+        "workflow_step_id",
+    ],
+)
+async def test_intercepted_workflow_dispatch_identity_rejected_before_gateway(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    root = runtime()
+    runtime_ = root.reference_runtime
+    gateway = runtime_.reference_ai_gateway
+    provider = gateway._adapters["mock-economy"]  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(provider, DeterministicMockProvider)
+    original = runtime_.skill_runtime.handle
+    intercepted: list[CommandEnvelope] = []
+
+    async def intercept(command: CommandEnvelope) -> ResultEnvelope:
+        changed = command
+        if mutation in {"execution_id", "execution_id_and_missing_binding"}:
+            changed = replace(changed, execution_id="mismatched-execution")
+        if mutation in {"missing_binding", "execution_id_and_missing_binding"}:
+            changed = replace(
+                changed, metadata=replace(changed.metadata, workflow_ai_budget_admission=None)
+            )
+        if mutation == "workflow_id":
+            changed = replace(changed, workflow_id="mismatched-workflow")
+        if mutation == "workflow_step_id":
+            changed = replace(changed, workflow_step_id="mismatched-step")
+        assert changed.execution_id is not None
+        assert await runtime_.workflow_repository.owns_ai_dispatch(
+            workflow_id=changed.workflow_id,
+            command_id=changed.command_id,
+            execution_id=changed.execution_id,
+        )
+        intercepted.append(changed)
+        result = await original(changed)
+        assert result.result_status in {ResultStatus.REJECTED, ResultStatus.FAILED}
+        assert provider.calls == 0
+        assert not gateway.store.invocations
+        return result
+
+    monkeypatch.setattr(runtime_.skill_runtime, "handle", intercept)
+    await runtime_.classify_and_route_task("Where is the report?")
+    assert len(intercepted) == 1
+    assert provider.calls == 0
+    assert not gateway.store.invocations
+    # Engine context is reset after delivery, so genuine direct execution is not reclassified.
+    assert not await runtime_.workflow_repository.owns_ai_dispatch(
+        workflow_id="direct-workflow-context",
+        command_id="direct-command",
+        execution_id="direct-execution",
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "mutation",
+    ["execution_id", "missing_binding", "missing_workflow_and_binding", "definition_version"],
+)
+async def test_intercepted_workflow_gateway_identity_rejected_before_invocation(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    root = runtime()
+    runtime_ = root.reference_runtime
+    gateway = runtime_.reference_ai_gateway
+    original = gateway.accept
+    intercepted: list[AIInvocationRequest] = []
+
+    async def intercept(request: AIInvocationRequest) -> Acceptance:
+        changed = request
+        if mutation == "execution_id":
+            changed = replace(changed, execution_id="mismatched-execution")
+        elif mutation == "missing_binding":
+            changed = replace(changed, workflow_ai_budget_admission=None)
+        elif mutation == "missing_workflow_and_binding":
+            changed = replace(changed, workflow_id=None, workflow_ai_budget_admission=None)
+        else:
+            changed = replace(changed, workflow_definition_version_id="mismatched-definition")
+        assert changed.execution_id is not None
+        assert await runtime_.workflow_repository.owns_ai_dispatch(
+            workflow_id=changed.workflow_id,
+            command_id=changed.command_id,
+            execution_id=changed.execution_id,
+        )
+        intercepted.append(changed)
+        with pytest.raises(ValueError):
+            await original(changed)
+        raise ValueError("intercepted invalid workflow dispatch")
+
+    monkeypatch.setattr(gateway, "accept", intercept)
+    await runtime_.classify_and_route_task("Where is the report?")
+    assert len(intercepted) == 1
+    assert not gateway.store.invocations
+    provider = gateway._adapters["mock-economy"]  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(provider, DeterministicMockProvider)
+    assert provider.calls == 0

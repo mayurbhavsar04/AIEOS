@@ -287,7 +287,7 @@ class WorkflowAdmissionAuthority(Protocol):
     async def owns_ai_dispatch(
         self,
         *,
-        workflow_id: str,
+        workflow_id: str | None,
         command_id: str,
         execution_id: str,
     ) -> bool:
@@ -1617,7 +1617,7 @@ class ReferenceAIGateway:
             raise ValueError("governed schema material and identity must be bound together")
         workflow_owned = False
         authority = self._workflow_admission_authority
-        if request.workflow_id is not None and authority is not None:
+        if authority is not None:
             workflow_owned = await authority.owns_ai_dispatch(
                 workflow_id=request.workflow_id,
                 command_id=request.command_id,

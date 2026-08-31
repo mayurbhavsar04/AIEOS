@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
@@ -131,6 +133,9 @@ class InMemoryWorkflowRepository:
     """Authoritative Workflow state and target-owned idempotency receipts."""
 
     def __init__(self) -> None:
+        self._dispatch_context: ContextVar[CommandEnvelope | None] = ContextVar(
+            "workflow_dispatch_context", default=None
+        )
         self.instances: dict[str, WorkflowInstance] = {}
         self.command_receipts: dict[str, WorkflowCommandReceipt] = {}
 
@@ -168,6 +173,15 @@ class InMemoryWorkflowRepository:
         receipt = self.begin_command(command, result, workflow_id, error)
         receipt.state = CommandProcessingState.COMPLETED
 
+    @contextmanager
+    def dispatch_context(self, command: CommandEnvelope) -> Iterator[None]:
+        """Preserve Engine-owned identity across delivery, including metadata mutation."""
+        token = self._dispatch_context.set(command)
+        try:
+            yield
+        finally:
+            self._dispatch_context.reset(token)
+
     async def authoritative_ai_admission(
         self,
         *,
@@ -176,6 +190,13 @@ class InMemoryWorkflowRepository:
         execution_id: str,
     ) -> Mapping[str, object] | None:
         """Resolve the current Workflow-owned admission without caller evidence."""
+        dispatch = self._dispatch_context.get()
+        if dispatch is not None and (
+            dispatch.workflow_id != workflow_id
+            or dispatch.command_id != command_id
+            or dispatch.execution_id != execution_id
+        ):
+            return None
         instance = self.instances.get(workflow_id)
         if instance is None:
             return None
@@ -210,26 +231,12 @@ class InMemoryWorkflowRepository:
     async def owns_ai_dispatch(
         self,
         *,
-        workflow_id: str,
+        workflow_id: str | None,
         command_id: str,
         execution_id: str,
     ) -> bool:
-        """Resolve Workflow-owned dispatch lineage without trusting command metadata."""
-        instance = self.instances.get(workflow_id)
-        if instance is None:
-            return False
-        admissions = instance.ai_admissions or {}
-        states = instance.ai_admission_states or {}
-        binding = admissions.get(command_id)
-        record = states.get(command_id)
-        return bool(
-            isinstance(binding, Mapping)
-            and isinstance(record, Mapping)
-            and binding.get("WorkflowId") == workflow_id
-            and binding.get("CommandId") == command_id
-            and binding.get("ExecutionId") == execution_id
-            and record.get("Binding") == binding
-        )
+        """Ownership survives invalid identity and absent or released admission."""
+        return self._dispatch_context.get() is not None or workflow_id in self.instances
 
 
 class WorkflowEngine:
@@ -353,7 +360,8 @@ class WorkflowEngine:
                     return
                 self._record_retry_decision(instance, event, decision_id)
                 retry_commands[event.event_id] = retry_command
-            await self._dispatcher.dispatch(retry_command)
+            with self._repository.dispatch_context(retry_command):
+                await self._dispatcher.dispatch(retry_command)
             instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
             return
         await self._fail(instance, event)
@@ -496,7 +504,8 @@ class WorkflowEngine:
                 receipt.result = result
                 receipt.error = error
                 return self._repository.complete_command(receipt.command.command_id)
-        await self._dispatcher.dispatch(instance.initial_attempt_command)
+        with self._repository.dispatch_context(instance.initial_attempt_command):
+            await self._dispatcher.dispatch(instance.initial_attempt_command)
         return self._repository.complete_command(receipt.command.command_id)
 
     async def _cancel(self, command: CommandEnvelope) -> ResultEnvelope:
