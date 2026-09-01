@@ -283,7 +283,7 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
                     instance.outcome = _normalize_result(instance.outcome)
                 self.instances[instance.workflow_id] = instance
                 self._workflow_versions[instance.workflow_id] = row.version
-                self._workflow_baseline[instance.workflow_id] = row.payload
+                self._workflow_baseline[instance.workflow_id] = _WORKFLOW.dump_json(instance)
             receipts = await session.scalars(
                 select(CommandIdempotencyRow.payload).where(
                     CommandIdempotencyRow.tenant_id == self._tenant_id,
@@ -295,7 +295,9 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
                 receipt = _WORKFLOW_RECEIPT.validate_json(payload)
                 receipt.result = _normalize_result(receipt.result)
                 self.command_receipts[receipt.command.command_id] = receipt
-                self._receipt_baseline[receipt.command.command_id] = payload
+                self._receipt_baseline[receipt.command.command_id] = _WORKFLOW_RECEIPT.dump_json(
+                    receipt
+                )
 
     async def refresh_workflow(self, workflow_id: str) -> WorkflowInstance | None:
         """Replace a warmed worker's cached Workflow with durable authority."""
@@ -312,7 +314,7 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
             instance.outcome = _normalize_result(instance.outcome)
         self.instances[workflow_id] = instance
         self._workflow_versions[workflow_id] = row.version
-        self._workflow_baseline[workflow_id] = row.payload
+        self._workflow_baseline[workflow_id] = _WORKFLOW.dump_json(instance)
         return instance
 
     async def replay_command(
@@ -364,7 +366,7 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
         command_id: str,
         execution_id: str,
     ) -> bool:
-        """Consult Engine context or durable ownership, never admission validity."""
+        """Consult Engine context or durable admission ownership, never parentage."""
         if self._dispatch_context.get() is not None:
             return True
         if workflow_id is None:
@@ -374,7 +376,12 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
                 WorkflowRow,
                 (self._tenant_id, self._workspace_id, workflow_id),
             )
-        return row is not None
+        if row is None:
+            return False
+        instance = _WORKFLOW.validate_json(row.payload)
+        return command_id in (instance.ai_admissions or {}) or command_id in (
+            instance.ai_admission_states or {}
+        )
 
     async def flush_in_transaction(self, session: AsyncSession) -> None:
         for instance in self.instances.values():
