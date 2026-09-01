@@ -144,6 +144,7 @@ def durable_ai_gateway(
     database: PostgresDatabase,
     *,
     provider: DeterministicMockProvider | None = None,
+    store: PostgresAIGatewayStore | None = None,
     clock: Any | None = None,
     execution_lease: timedelta = timedelta(seconds=30),
     heartbeat_interval: float = 10.0,
@@ -152,7 +153,7 @@ def durable_ai_gateway(
     identifiers = DeterministicIdentifiers()
     provider = provider or DeterministicMockProvider("mock", prefix="Durable")
     provider.use_effect_boundary(PostgresProviderEffectBoundary(database))
-    store = PostgresAIGatewayStore(database)
+    store = store or PostgresAIGatewayStore(database)
     gateway = ReferenceAIGateway(
         clock=effective_clock,
         identifiers=identifiers,
@@ -512,23 +513,57 @@ async def test_ai_gateway_lease_renewal_blocks_reclaim_beyond_original_ttl(
     )
 
 
+@pytest.mark.parametrize("iteration", range(20))
 async def test_ai_gateway_slow_active_provider_is_heartbeat_renewed(
     database: PostgresDatabase,
+    iteration: int,
 ) -> None:
     class RealtimeClock:
         def now(self) -> datetime:
             return datetime.now(UTC)
 
     class SlowProvider(DeterministicMockProvider):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.dispatch_started = asyncio.Event()
+
         async def invoke(self, **values: Any) -> ProviderResult:
+            self.dispatch_started.set()
             await asyncio.sleep(0.25)
             return await super().invoke(**values)
 
+    class HeartbeatRecordingStore(PostgresAIGatewayStore):
+        def __init__(self, database: PostgresDatabase) -> None:
+            super().__init__(database)
+            self.heartbeat_renewed = asyncio.Event()
+
+        async def renew_execution(
+            self,
+            invocation_id: str,
+            *,
+            owner: str,
+            generation: int,
+            now: datetime,
+            lease: timedelta,
+        ) -> bool:
+            renewed = await super().renew_execution(
+                invocation_id,
+                owner=owner,
+                generation=generation,
+                now=now,
+                lease=lease,
+            )
+            if renewed:
+                self.heartbeat_renewed.set()
+            return renewed
+
     lease = timedelta(seconds=0.1)
     first_provider = SlowProvider("mock", prefix="Slow")
+    first_store = HeartbeatRecordingStore(database)
     first, _, _ = durable_ai_gateway(
         database,
         provider=first_provider,
+        store=first_store,
         clock=RealtimeClock(),
         execution_lease=lease,
         heartbeat_interval=0.02,
@@ -542,7 +577,8 @@ async def test_ai_gateway_slow_active_provider_is_heartbeat_renewed(
     first_task = asyncio.create_task(
         first.invoke(ai_request(idempotency_key="slow-heartbeat-provider"))
     )
-    await asyncio.sleep(0.14)
+    await first_provider.dispatch_started.wait()
+    await first_store.heartbeat_renewed.wait()
     second_task = asyncio.create_task(
         second.invoke(
             ai_request(
@@ -556,6 +592,14 @@ async def test_ai_gateway_slow_active_provider_is_heartbeat_renewed(
     assert two.result.result_id == one.result.result_id
     assert first_provider.calls == 1
     assert second_provider.calls == 0
+    async with database.transaction() as session:
+        effects = tuple(await session.scalars(select(AIGatewayProviderEffectRow)))
+        budgets = tuple(await session.scalars(select(AIGatewayBudgetRow)))
+        usage = tuple(await session.scalars(select(AIGatewayUsageLedgerRow)))
+    assert len(effects) == len(budgets) == len(usage) == 1
+    assert effects[0].state == "completed"
+    assert effects[0].dispatch_count == effects[0].claim_generation == 1
+    assert budgets[0].state == "committed"
 
 
 async def test_ai_gateway_reclaim_increments_generation_and_fences_stale_effect(
