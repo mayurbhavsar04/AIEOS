@@ -235,8 +235,17 @@ class InMemoryWorkflowRepository:
         command_id: str,
         execution_id: str,
     ) -> bool:
-        """Ownership survives invalid identity and absent or released admission."""
-        return self._dispatch_context.get() is not None or workflow_id in self.instances
+        """Recognize Engine delivery or a durable admission record, not parentage."""
+        if self._dispatch_context.get() is not None:
+            return True
+        if workflow_id is None:
+            return False
+        instance = self.instances.get(workflow_id)
+        if instance is None:
+            return False
+        return command_id in (instance.ai_admissions or {}) or command_id in (
+            instance.ai_admission_states or {}
+        )
 
 
 class WorkflowEngine:
