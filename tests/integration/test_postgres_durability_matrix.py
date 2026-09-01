@@ -1648,7 +1648,13 @@ async def test_prewarmed_nonterminal_workflow_survives_unrelated_checkpoint(
             )
             assert row is not None and row.state == WorkflowState.RUNNING.value
             assert repository._workflow_versions[cached.workflow_id] == row.version  # pyright: ignore[reportPrivateUsage]
-            warmed.append((cached.workflow_id, row.version, row.payload))
+            warmed.append(
+                (
+                    cached.workflow_id,
+                    row.version,
+                    TypeAdapter(WorkflowInstance).dump_json(cached),
+                )
+            )
             durable_receipt = await session.get(
                 CommandIdempotencyRow,
                 (
