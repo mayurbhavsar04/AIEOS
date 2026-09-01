@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -41,6 +42,17 @@ from aieos.workflow_engine.governance import (
     admission_binding,
     scale6,
 )
+
+# ES-017 permits exactly one structured-AI Workflow.  Keep its immutable
+# identity in the Engine, rather than treating any caller-selected definition
+# which happens to name the structured Skill as governed.
+_APPROVED_REFERENCE_WORKFLOW_IDENTITY = (
+    "ClassifyAndRouteTask",
+    "classify-and-route-task-v1",
+    "ClassifyAndRouteTask",
+    "structured-task-kind-skill-v1",
+)
+_AUTHORITATIVE_RESULT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
 
 class WorkflowState(StrEnum):
@@ -329,7 +341,16 @@ class WorkflowEngine:
             return
         if event.workflow_id is None:
             raise ValueError("attempt Event must reference WorkflowId")
-        instance = self._repository.instances[event.workflow_id]
+        instance = self._repository.instances.get(event.workflow_id)
+        if instance is None:
+            # A Skill Runtime rejection can expose a changed caller-supplied
+            # WorkflowId.  For that rejection-only case, recover the Engine's
+            # authoritative instance from the immutable dispatched CommandId;
+            # accepting the changed event WorkflowId would be unsafe.
+            workflow_id = self.pre_acceptance_rejection_workflow_id(event)
+            if workflow_id is None:
+                raise KeyError(f"Workflow does not exist: {event.workflow_id}")
+            instance = self._repository.instances[workflow_id]
         if event.event_id in instance.processed_event_ids:
             return
         if event.tenant_id != instance.tenant_id or event.workspace_id != instance.workspace_id:
@@ -347,6 +368,10 @@ class WorkflowEngine:
             return
         if event.event_type == "ExecutionAttemptSucceeded":
             await self._complete(instance, event)
+            instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
+            return
+        if event.payload.get("pre_acceptance_rejection") is True:
+            await self._reject_pre_acceptance_attempt(instance, event)
             instance.processed_event_ids = instance.processed_event_ids | {event.event_id}
             return
         retry = str(event.payload.get("retry_classification", "NeverRetry"))
@@ -386,24 +411,60 @@ class WorkflowEngine:
             )
         except AuthorizationFailure:
             return self._reject(command, "WORKFLOW_START_UNAUTHORIZED", "Workflow start denied")
+        raw_authoritative_result_id = command.payload.get("authoritative_result_id")
+        if raw_authoritative_result_id is not None and (
+            not isinstance(raw_authoritative_result_id, str)
+            or _AUTHORITATIVE_RESULT_ID.fullmatch(raw_authoritative_result_id) is None
+        ):
+            # CommandMetadata validates the same frozen opaque ResultId syntax.
+            # Do that before an instance/WorkflowStarted checkpoint exists.
+            return self._reject(
+                command,
+                "AUTHORITATIVE_RESULT_ID_INVALID",
+                "AuthoritativeResultId must be a well-formed opaque ResultId",
+            )
         raw_budget_envelope = command.payload.get("workflow_ai_budget_envelope")
         budget_envelope = (
             cast(Mapping[str, object], raw_budget_envelope)
             if isinstance(raw_budget_envelope, Mapping)
             else None
         )
-        definition = WorkflowDefinition(
-            workflow_definition_id=self._payload_string(command.payload, "workflow_definition_id"),
-            workflow_definition_version_id=self._payload_string(
-                command.payload, "workflow_definition_version_id"
-            ),
-            skill_version_id=self._payload_string(command.payload, "skill_version_id"),
-            max_attempts=self._payload_int(command.payload, "max_attempts", 2),
-            workflow_kind=str(command.payload.get("workflow_kind", "")),
-            ai_budget_envelope=budget_envelope,
+        try:
+            definition = WorkflowDefinition(
+                workflow_definition_id=self._payload_string(
+                    command.payload, "workflow_definition_id"
+                ),
+                workflow_definition_version_id=self._payload_string(
+                    command.payload, "workflow_definition_version_id"
+                ),
+                skill_version_id=self._payload_string(command.payload, "skill_version_id"),
+                max_attempts=self._payload_int(command.payload, "max_attempts", 2),
+                workflow_kind=self._payload_optional_string(command.payload, "workflow_kind"),
+                ai_budget_envelope=budget_envelope,
+            )
+        except ValueError:
+            return self._reject(
+                command,
+                "WORKFLOW_DEFINITION_INVALID",
+                "Workflow definition identity is incomplete or invalid",
+            )
+        identity = (
+            definition.workflow_definition_id,
+            definition.workflow_definition_version_id,
+            definition.workflow_kind,
+            definition.skill_version_id,
         )
+        reference_identity_candidate = any(
+            member in _APPROVED_REFERENCE_WORKFLOW_IDENTITY for member in identity
+        )
+        if reference_identity_candidate and identity != _APPROVED_REFERENCE_WORKFLOW_IDENTITY:
+            return self._reject(
+                command,
+                "WORKFLOW_REFERENCE_IDENTITY_INVALID",
+                "structured-AI execution requires the exact approved reference Workflow identity",
+            )
         envelope: WorkflowAIBudgetEnvelope | None = None
-        ai_capable_definition = definition.skill_version_id == "structured-task-kind-skill-v1"
+        ai_capable_definition = identity == _APPROVED_REFERENCE_WORKFLOW_IDENTITY
         if ai_capable_definition:
             # This is deliberately before instance creation and dispatch: malformed
             # reference-workflow input never reaches Skill Runtime or Gateway.
@@ -591,7 +652,7 @@ class WorkflowEngine:
         self, instance: WorkflowInstance, causation_id: str
     ) -> CommandEnvelope:
         envelope = instance.ai_budget_envelope
-        governed_ai_route = instance.definition.skill_version_id == "structured-task-kind-skill-v1"
+        governed_ai_route = self._is_approved_reference_workflow(instance.definition)
         if governed_ai_route and instance.input_payload.get("authoritative_result_id") is None:
             try:
                 self._authorizer.require(
@@ -721,10 +782,8 @@ class WorkflowEngine:
                 skill_version_id=(
                     instance.definition.skill_version_id if governed_ai_route else None
                 ),
-                authoritative_result_id=(
-                    str(instance.input_payload["authoritative_result_id"])
-                    if instance.input_payload.get("authoritative_result_id")
-                    else None
+                authoritative_result_id=cast(
+                    str | None, instance.input_payload.get("authoritative_result_id")
                 ),
                 workflow_ai_budget_admission=admission,
             ),
@@ -748,7 +807,7 @@ class WorkflowEngine:
             return
         lineage["capability_result_id"] = event.payload.get("result_id")
         value = event.payload.get("value_reference")
-        if instance.definition.workflow_kind == "ClassifyAndRouteTask":
+        if self._is_approved_reference_workflow(instance.definition):
             routes = {
                 "Question": "question_queue",
                 "Instruction": "instruction_queue",
@@ -945,6 +1004,38 @@ class WorkflowEngine:
         await self._publish_workflow_event(instance, "WorkflowFailed", event.event_id)
         self._observe(instance, instance.outcome)
 
+    async def _reject_pre_acceptance_attempt(
+        self, instance: WorkflowInstance, event: EventEnvelope
+    ) -> None:
+        """Make a Skill Runtime pre-acceptance rejection terminal for its Workflow."""
+        code = event.payload.get("error_code")
+        error_code = code if isinstance(code, str) and code else "WORKFLOW_PRE_AI_REJECTED"
+        instance.state = WorkflowState.FAILED
+        instance.outcome, instance.error = self._outcomes.unsuccessful(
+            status=ResultStatus.REJECTED,
+            subject=instance.workflow_id,
+            producer=self.component_name,
+            tenant_id=instance.tenant_id,
+            workspace_id=instance.workspace_id,
+            correlation_id=instance.correlation_id,
+            causation_id=event.event_id,
+            event_id=event.event_id,
+            error_code=error_code,
+            category=ErrorCategory.VALIDATION,
+            severity=ErrorSeverity.WARNING,
+            retry=RetryClassification.NEVER_RETRY,
+            message="Workflow execution was rejected before AI acceptance.",
+        )
+        for receipt in self._repository.command_receipts.values():
+            if (
+                receipt.workflow_id == instance.workflow_id
+                and receipt.state is CommandProcessingState.IN_PROGRESS
+            ):
+                receipt.result = instance.outcome
+                receipt.error = instance.error
+        await self._publish_workflow_event(instance, "WorkflowFailed", event.event_id)
+        self._observe(instance, instance.outcome)
+
     async def _reject_retry_admission(
         self, instance: WorkflowInstance, event: EventEnvelope, code: str
     ) -> None:
@@ -1092,6 +1183,47 @@ class WorkflowEngine:
         if not isinstance(value, str) or not value:
             raise ValueError(f"{key} must be a non-empty string")
         return value
+
+    @staticmethod
+    def _payload_optional_string(payload: Mapping[str, object], key: str) -> str:
+        value = payload.get(key, "")
+        if not isinstance(value, str):
+            raise ValueError(f"{key} must be a string")
+        return value
+
+    @staticmethod
+    def _is_approved_reference_workflow(definition: WorkflowDefinition) -> bool:
+        return (
+            definition.workflow_definition_id,
+            definition.workflow_definition_version_id,
+            definition.workflow_kind,
+            definition.skill_version_id,
+        ) == _APPROVED_REFERENCE_WORKFLOW_IDENTITY
+
+    def pre_acceptance_rejection_workflow_id(self, event: EventEnvelope) -> str | None:
+        """Resolve only a terminal pre-AI event to its dispatched Workflow."""
+        if event.payload.get("pre_acceptance_rejection") is not True:
+            return None
+        candidates = [
+            candidate
+            for candidate in self._repository.instances.values()
+            if self._owns_attempt_command(candidate, event.causation_id)
+        ]
+        return candidates[0].workflow_id if len(candidates) == 1 else None
+
+    @staticmethod
+    def _owns_attempt_command(instance: WorkflowInstance, command_id: str | None) -> bool:
+        if command_id is None:
+            return False
+        if (
+            instance.initial_attempt_command is not None
+            and instance.initial_attempt_command.command_id == command_id
+        ):
+            return True
+        return any(
+            retry_command.command_id == command_id
+            for retry_command in (instance.retry_commands or {}).values()
+        )
 
     @staticmethod
     def _payload_int(payload: Mapping[str, object], key: str, default: int) -> int:

@@ -182,7 +182,16 @@ class DurableWorkflowEventConsumer:
     async def consume(self, event: EventEnvelope) -> None:
         if event.workflow_id is None or event.tenant_id is None or event.workspace_id is None:
             raise ValueError("durable Workflow Event requires exact scoped WorkflowId")
-        lock_key = workflow_lock_key(event.tenant_id, event.workspace_id, event.workflow_id)
+        # A pre-AI rejection can be raised after a child dispatch identity is
+        # mutated.  Lock and load the Engine's immutable dispatched Workflow,
+        # never the caller-controlled value carried by that rejected Event.
+        workflow_id = self._workflow_engine.pre_acceptance_rejection_workflow_id(event)
+        authoritative_workflow_id = workflow_id or event.workflow_id
+        lock_key = workflow_lock_key(
+            event.tenant_id,
+            event.workspace_id,
+            authoritative_workflow_id,
+        )
         held = self._held_workflow_locks.get()
         if lock_key in held:
             await self._workflow_engine.consume(event)
@@ -191,8 +200,8 @@ class DurableWorkflowEventConsumer:
         async with self._database.command_lock(lock_key):
             token = self._held_workflow_locks.set(held | {lock_key})
             try:
-                if await self._repository.refresh_workflow(event.workflow_id) is None:
-                    raise KeyError(f"Workflow does not exist: {event.workflow_id}")
+                if await self._repository.refresh_workflow(authoritative_workflow_id) is None:
+                    raise KeyError(f"Workflow does not exist: {authoritative_workflow_id}")
                 await self._workflow_engine.consume(event)
                 await checkpoint(self._database, self._participants)
             finally:

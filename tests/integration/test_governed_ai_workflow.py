@@ -87,7 +87,9 @@ async def test_classify_and_route_task_has_one_deterministic_terminal_route(
     statement: str, route: str
 ) -> None:
     root = runtime()
-    accepted = await root.reference_runtime.classify_and_route_task(statement)
+    original = workflow_command(root)
+    command = replace(original, payload={**original.payload, "statement": statement})
+    accepted = await root.reference_runtime.run_workflow_command(command)
     instance = next(iter(root.reference_runtime.workflow_repository.instances.values()))
     assert accepted.result_status is ResultStatus.ACCEPTED
     assert instance.outcome is not None and instance.outcome.value_reference is not None
@@ -119,6 +121,168 @@ async def test_invalid_reference_input_rejects_before_gateway():
     result = await root.reference_runtime.classify_and_route_task(" ")
     assert result.result_status is ResultStatus.REJECTED
     assert not root.reference_runtime.reference_ai_gateway.store.invocations
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("case_id", "field", "value"),
+    [
+        ("altered-definition-id", "workflow_definition_id", "CallerSelectedAIWorkflow"),
+        ("missing-definition-id", "workflow_definition_id", None),
+        ("altered-workflow-kind", "workflow_kind", "CallerSelectedAIWorkflow"),
+        ("missing-workflow-kind", "workflow_kind", None),
+        ("invalid-workflow-kind", "workflow_kind", 1),
+        ("altered-definition-version", "workflow_definition_version_id", "caller-selected-v2"),
+        ("missing-definition-version", "workflow_definition_version_id", None),
+        ("altered-skill-identity", "skill_version_id", "caller-selected-skill-v1"),
+        ("altered-skill-version", "skill_version_id", "structured-task-kind-skill-v2"),
+        ("caller-selected-name-and-kind", "workflow_definition_id", "CallerSelectedAIWorkflow"),
+    ],
+)
+async def test_structured_ai_workflow_requires_the_exact_approved_identity_tuple(
+    case_id: str, field: str, value: object
+) -> None:
+    """Every tuple mutation is a terminal, replay-stable rejection before Gateway."""
+    root = runtime()
+    runtime_ = root.reference_runtime
+    original = workflow_command(root)
+    payload = dict(original.payload)
+    if case_id == "caller-selected-name-and-kind":
+        payload["workflow_kind"] = "CallerSelectedAIWorkflow"
+    if value is None:
+        payload.pop(field)
+    else:
+        payload[field] = value
+    command = replace(original, payload=payload)
+
+    first = await runtime_.run_workflow_command(command)
+    replay = await runtime_.run_workflow_command(command)
+
+    assert first == replay
+    assert first.result_status is ResultStatus.REJECTED
+    assert first.completed_at is not None
+    assert not runtime_.workflow_repository.instances
+    receipt = runtime_.workflow_repository.receipt_for_command(command.command_id)
+    assert receipt is not None and receipt.state.value == "Completed"
+    assert receipt.result == first and receipt.error is not None
+    assert not runtime_.reference_ai_gateway.store.invocations
+    provider = runtime_.reference_ai_gateway._adapters[  # pyright: ignore[reportPrivateUsage]
+        "mock-economy"
+    ]
+    assert isinstance(provider, DeterministicMockProvider)
+    assert provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_malformed_authoritative_result_id_rejects_before_workflow_creation() -> None:
+    root = runtime()
+    runtime_ = root.reference_runtime
+    original = workflow_command(root)
+    command = replace(
+        original,
+        payload={**original.payload, "authoritative_result_id": "malformed result id!"},
+    )
+
+    first = await runtime_.run_workflow_command(command)
+    replay = await runtime_.run_workflow_command(command)
+
+    assert first == replay
+    assert first.result_status is ResultStatus.REJECTED
+    assert not runtime_.workflow_repository.instances
+    assert not runtime_.reference_ai_gateway.store.invocations
+
+
+@pytest.mark.anyio
+async def test_invalid_authoritative_result_terminalizes_the_workflow_and_replays() -> None:
+    root = runtime()
+    runtime_ = root.reference_runtime
+    command = workflow_command(root, authoritative_result_id="missing-authoritative-result")
+
+    first = await runtime_.run_workflow_command(command)
+    workflow = next(iter(runtime_.workflow_repository.instances.values()))
+    replay = await runtime_.run_workflow_command(command)
+
+    assert first == replay == workflow.outcome
+    assert workflow.state is WorkflowState.FAILED
+    assert workflow.outcome is not None
+    assert workflow.outcome.result_status is ResultStatus.REJECTED
+    assert workflow.error is not None
+    assert len(runtime_.execution_repository.records) == 1
+    execution = next(iter(runtime_.execution_repository.records.values()))
+    assert execution.result is not None
+    assert execution.result.result_status is ResultStatus.FAILED
+    assert execution.terminal_event is not None
+    assert execution.terminal_event.payload["pre_acceptance_rejection"] is True
+    assert not runtime_.reference_ai_gateway.store.invocations
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("rejection", ("missing-binding", "changed-execution", "skill-denied"))
+async def test_engine_owned_pre_ai_rejections_publish_one_terminal_attempt(
+    monkeypatch: pytest.MonkeyPatch, rejection: str
+) -> None:
+    root = runtime()
+    runtime_ = root.reference_runtime
+    original = runtime_.skill_runtime.handle
+    command = workflow_command(root)
+    if rejection == "skill-denied":
+        denied = replace(
+            runtime_.authorization,
+            permissions=runtime_.authorization.permissions - {"skill.execute"},
+        )
+        command = replace(command, metadata=replace(command.metadata, authorization=denied))
+    else:
+
+        async def intercept(candidate: CommandEnvelope) -> ResultEnvelope:
+            changed = candidate
+            if rejection == "missing-binding":
+                changed = replace(
+                    changed,
+                    metadata=replace(changed.metadata, workflow_ai_budget_admission=None),
+                )
+            else:
+                changed = replace(changed, execution_id="changed-execution-identity")
+            return await original(changed)
+
+        monkeypatch.setattr(runtime_.skill_runtime, "handle", intercept)
+
+    first = await runtime_.run_workflow_command(command)
+    workflow = next(iter(runtime_.workflow_repository.instances.values()))
+    replay = await runtime_.run_workflow_command(command)
+
+    assert first == replay == workflow.outcome
+    assert workflow.state is WorkflowState.FAILED
+    assert workflow.outcome is not None
+    assert workflow.outcome.result_status is ResultStatus.REJECTED
+    assert workflow.error is not None
+    assert len(runtime_.execution_repository.records) == 1
+    execution = next(iter(runtime_.execution_repository.records.values()))
+    assert execution.result is not None
+    assert execution.result.result_status in {ResultStatus.REJECTED, ResultStatus.FAILED}
+    assert execution.terminal_event is not None
+    assert execution.terminal_event.payload["pre_acceptance_rejection"] is True
+    assert not runtime_.reference_ai_gateway.store.invocations
+
+
+@pytest.mark.anyio
+async def test_capability_policy_pre_acceptance_denial_terminalizes_the_workflow() -> None:
+    root = runtime()
+    runtime_ = root.reference_runtime
+    implementation = runtime_.skill_runtime._skill_implementations[  # pyright: ignore[reportPrivateUsage]
+        "structured-task-kind-local"
+    ]
+    implementation._policy_context = None  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
+    command = workflow_command(root)
+
+    result = await runtime_.run_workflow_command(command)
+    workflow = next(iter(runtime_.workflow_repository.instances.values()))
+
+    assert result == workflow.outcome
+    assert workflow.state is WorkflowState.FAILED
+    assert workflow.outcome is not None
+    assert workflow.outcome.result_status is ResultStatus.REJECTED
+    assert workflow.error is not None
+    assert not runtime_.reference_ai_gateway.store.invocations
 
 
 @pytest.mark.anyio
@@ -505,6 +669,11 @@ async def test_intercepted_workflow_dispatch_identity_rejected_before_gateway(
     monkeypatch.setattr(runtime_.skill_runtime, "handle", intercept)
     await runtime_.classify_and_route_task("Where is the report?")
     assert len(intercepted) == 1
+    workflow = next(iter(runtime_.workflow_repository.instances.values()))
+    assert workflow.state is WorkflowState.FAILED
+    assert workflow.outcome is not None
+    assert workflow.outcome.result_status is ResultStatus.REJECTED
+    assert len(runtime_.execution_repository.records) == 1
     assert provider.calls == 0
     assert not gateway.store.invocations
     # Engine context is reset after delivery, so genuine direct execution is not reclassified.

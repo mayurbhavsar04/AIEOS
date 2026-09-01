@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
@@ -1281,6 +1282,322 @@ async def database() -> AsyncIterator[PostgresDatabase]:
     await reset(value)
     yield value
     await value.close()
+
+
+def governed_start_command(
+    root: CompositionRoot,
+    *,
+    command_id: str,
+    idempotency_key: str,
+    authoritative_result_id: str | None = None,
+) -> CommandEnvelope:
+    """Build the sole approved structured-AI Workflow start command."""
+    runtime = root.reference_runtime
+    return CommandEnvelope(
+        command_id=command_id,
+        command_type="StartWorkflow",
+        command_version="2.0",
+        correlation_id=f"correlation-{command_id}",
+        causation_id=f"request-{command_id}",
+        target_component="Workflow Engine",
+        initiator="Reference Host",
+        timestamp=runtime.clock.now(),
+        tenant_id=runtime.settings.tenant_id,
+        workspace_id=runtime.settings.workspace_id,
+        payload={
+            "workflow_definition_id": "ClassifyAndRouteTask",
+            "workflow_definition_version_id": "classify-and-route-task-v1",
+            "workflow_kind": "ClassifyAndRouteTask",
+            "skill_version_id": "structured-task-kind-skill-v1",
+            "statement": "Where is the durable report?",
+            "max_attempts": 1,
+            "authoritative_result_id": authoritative_result_id,
+            "workflow_ai_budget_envelope": {
+                "ContractVersion": 1,
+                "GatewayNormalizedCostUnitRegistryVersion": 1,
+                "WorkflowDefinitionVersionId": "classify-and-route-task-v1",
+                "PolicyId": runtime.authorization.policy_id,
+                "PolicyVersionId": runtime.authorization.policy_version_id,
+                "TenantId": runtime.settings.tenant_id,
+                "WorkspaceId": runtime.settings.workspace_id,
+                "BudgetCeiling": {"Amount": "0.01", "CurrencyOrReferenceUnit": "USD"},
+            },
+        },
+        metadata=CommandMetadata(
+            request_id=f"request-{command_id}",
+            idempotency_key=idempotency_key,
+            authorization=runtime.authorization,
+        ),
+    )
+
+
+async def test_postgres_approved_reference_workflow_routes_deterministically(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    root = compose(settings)
+    command_envelope = governed_start_command(
+        root,
+        command_id="e1-approved-command",
+        idempotency_key="e1-approved-idempotency",
+    )
+
+    accepted = await root.reference_runtime.run_workflow_command(command_envelope)
+    workflow = next(iter(root.reference_runtime.workflow_repository.instances.values()))
+    assert accepted.result_status is ResultStatus.ACCEPTED
+    assert workflow.outcome is not None
+    assert workflow.outcome.result_status is ResultStatus.SUCCEEDED
+    assert workflow.outcome.value_reference is not None
+    assert json.loads(workflow.outcome.value_reference)["route"] == "question_queue"
+    assert len(root.reference_runtime.reference_ai_gateway.store.invocations) == 1
+    await root.close()
+
+    restarted = compose(settings)
+    assert await restarted.reference_runtime.run_workflow_command(command_envelope) == accepted
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+    await restarted.close()
+
+
+@pytest.mark.parametrize(
+    ("case_id", "field", "value"),
+    [
+        ("altered-definition-id", "workflow_definition_id", "CallerSelectedAIWorkflow"),
+        ("missing-definition-id", "workflow_definition_id", None),
+        ("altered-workflow-kind", "workflow_kind", "CallerSelectedAIWorkflow"),
+        ("missing-workflow-kind", "workflow_kind", None),
+        ("invalid-workflow-kind", "workflow_kind", 1),
+        ("altered-definition-version", "workflow_definition_version_id", "caller-selected-v2"),
+        ("missing-definition-version", "workflow_definition_version_id", None),
+        ("altered-skill-identity", "skill_version_id", "caller-selected-skill-v1"),
+        ("altered-skill-version", "skill_version_id", "structured-task-kind-skill-v2"),
+        ("caller-selected-name-and-kind", "workflow_definition_id", "CallerSelectedAIWorkflow"),
+    ],
+)
+async def test_postgres_structured_ai_identity_rejections_are_durable_and_replay_stable(
+    database: PostgresDatabase, case_id: str, field: str, value: object
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    root = compose(settings)
+    original = governed_start_command(
+        root,
+        command_id=f"e1-command-{case_id}",
+        idempotency_key=f"e1-idempotency-{case_id}",
+    )
+    payload = dict(original.payload)
+    if case_id == "caller-selected-name-and-kind":
+        payload["workflow_kind"] = "CallerSelectedAIWorkflow"
+    if value is None:
+        payload.pop(field)
+    else:
+        payload[field] = value
+    command_envelope = replace(original, payload=payload)
+
+    first = await root.reference_runtime.run_workflow_command(command_envelope)
+    duplicate = await root.reference_runtime.run_workflow_command(command_envelope)
+    assert first == duplicate
+    assert first.result_status is ResultStatus.REJECTED
+    assert not root.reference_runtime.workflow_repository.instances
+    await root.close()
+
+    restarted = compose(settings)
+    replay = await restarted.reference_runtime.run_workflow_command(command_envelope)
+    assert replay == first
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 0
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.outcome_id == first.result_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+    await restarted.close()
+
+
+async def test_postgres_pre_ai_rejections_terminalize_once_and_survive_restart(
+    database: PostgresDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    malformed_root = compose(settings)
+    malformed_base = governed_start_command(
+        malformed_root,
+        command_id="e2-malformed-command",
+        idempotency_key="e2-malformed-idempotency",
+    )
+    malformed = replace(
+        malformed_base,
+        payload={
+            **malformed_base.payload,
+            "authoritative_result_id": "malformed result id!",
+        },
+    )
+    malformed_result = await malformed_root.reference_runtime.run_workflow_command(malformed)
+    assert malformed_result.result_status is ResultStatus.REJECTED
+    assert not malformed_root.reference_runtime.workflow_repository.instances
+    await malformed_root.close()
+
+    malformed_restarted = compose(settings)
+    assert (
+        await malformed_restarted.reference_runtime.run_workflow_command(malformed)
+        == malformed_result
+    )
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 0
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.outcome_id == malformed_result.result_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+    await malformed_restarted.close()
+
+    await reset(database)
+    invalid_root = compose(settings)
+    invalid = governed_start_command(
+        invalid_root,
+        command_id="e2-invalid-command",
+        idempotency_key="e2-invalid-idempotency",
+        authoritative_result_id="missing-authoritative-result",
+    )
+    invalid_result = await invalid_root.reference_runtime.run_workflow_command(invalid)
+    invalid_workflow = next(
+        iter(invalid_root.reference_runtime.workflow_repository.instances.values())
+    )
+    assert invalid_result == invalid_workflow.outcome
+    assert invalid_workflow.outcome is not None
+    assert invalid_workflow.outcome.result_status is ResultStatus.REJECTED
+    invalid_workflow_id = invalid_workflow.workflow_id
+    invalid_execution_id = invalid_workflow.execution_ids[0]
+    await invalid_root.close()
+
+    invalid_restarted = compose(settings)
+    assert await invalid_restarted.reference_runtime.run_workflow_command(invalid) == invalid_result
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == invalid_workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Skill Runtime",
+                    OutcomeRow.subject_id == invalid_execution_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+    await invalid_restarted.close()
+
+    await reset(database)
+    binding_root = compose(settings)
+    binding_runtime = binding_root.reference_runtime
+    original = binding_runtime.skill_runtime.handle
+
+    async def reject_missing_binding(command_envelope: CommandEnvelope) -> ResultEnvelope:
+        return await original(
+            replace(
+                command_envelope,
+                metadata=replace(command_envelope.metadata, workflow_ai_budget_admission=None),
+            )
+        )
+
+    monkeypatch.setattr(binding_runtime.skill_runtime, "handle", reject_missing_binding)
+    missing_binding = governed_start_command(
+        binding_root,
+        command_id="e2-binding-command",
+        idempotency_key="e2-binding-idempotency",
+    )
+    binding_result = await binding_runtime.run_workflow_command(missing_binding)
+    binding_workflow = next(iter(binding_runtime.workflow_repository.instances.values()))
+    assert binding_result == binding_workflow.outcome
+    assert binding_workflow.outcome is not None
+    assert binding_workflow.outcome.result_status is ResultStatus.REJECTED
+    binding_workflow_id = binding_workflow.workflow_id
+    binding_execution_id = binding_workflow.execution_ids[0]
+    await binding_root.close()
+
+    binding_restarted = compose(settings)
+    assert (
+        await binding_restarted.reference_runtime.run_workflow_command(missing_binding)
+        == binding_result
+    )
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 0
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 0
+        )
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == binding_workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Skill Runtime",
+                    OutcomeRow.subject_id == binding_execution_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+    await binding_restarted.close()
 
 
 async def test_migration_revision_readiness_and_schema_parity(
@@ -3109,8 +3426,9 @@ async def test_structured_cancellation_uses_governed_event_and_workflow_is_termi
         tenant_id=settings.tenant_id,
         workspace_id=settings.workspace_id,
         payload={
-            "workflow_definition_id": "structured-cancellation-workflow",
+            "workflow_definition_id": "ClassifyAndRouteTask",
             "workflow_definition_version_id": "classify-and-route-task-v1",
+            "workflow_kind": "ClassifyAndRouteTask",
             "skill_version_id": "structured-task-kind-skill-v1",
             "max_attempts": 1,
             "statement": "What is the status?",
