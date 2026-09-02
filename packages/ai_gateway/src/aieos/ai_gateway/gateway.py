@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
@@ -113,6 +114,11 @@ class AIInvocationRequest:
     repair_attempts: int = 1
     cache_allowed: bool = True
     deterministic_parameters: tuple[tuple[str, str], ...] = ()
+    workflow_ai_budget_admission: Mapping[str, object] | None = None
+    workflow_id: str | None = None
+    workflow_step_id: str | None = None
+    workflow_definition_version_id: str | None = None
+    skill_version_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +273,28 @@ class AIGateway(Protocol):
     async def invoke(self, request: AIInvocationRequest) -> AIInvocationResponse: ...
 
 
+class WorkflowAdmissionAuthority(Protocol):
+    """Resolve the current Workflow-owned durable admission at the Gateway boundary."""
+
+    async def authoritative_ai_admission(
+        self,
+        *,
+        workflow_id: str,
+        command_id: str,
+        execution_id: str,
+    ) -> Mapping[str, object] | None: ...
+
+    async def owns_ai_dispatch(
+        self,
+        *,
+        workflow_id: str | None,
+        command_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Return target-owned Workflow dispatch authority, independent of caller metadata."""
+        ...
+
+
 @dataclass(slots=True)
 class GatewayInvocation:
     request: AIInvocationRequest
@@ -391,6 +419,7 @@ class ReferenceGatewayStore:
             "repair_attempts": request.repair_attempts,
             "cache_allowed": request.cache_allowed,
             "parameters": sorted(request.deterministic_parameters),
+            "workflow_ai_budget_admission": request.workflow_ai_budget_admission,
         }
         return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -711,6 +740,7 @@ class ReferenceAIGateway:
         heartbeat_interval: float = 10.0,
         health_cooldown: timedelta = timedelta(seconds=30),
         prompt_packages: PromptPackageCatalog | None = None,
+        workflow_admission_authority: WorkflowAdmissionAuthority | None = None,
     ) -> None:
         self._clock = clock
         self._identifiers = identifiers
@@ -728,6 +758,7 @@ class ReferenceAIGateway:
         self._cooldowns: dict[str, datetime] = {}
         self._degraded: set[str] = set()
         self._prompt_packages = prompt_packages
+        self._workflow_admission_authority = workflow_admission_authority
 
     async def _heartbeat(
         self, invocation_id: str, owner: str, generation: int, lost: asyncio.Event
@@ -765,7 +796,7 @@ class ReferenceAIGateway:
         return self._observations
 
     async def accept(self, request: AIInvocationRequest) -> Acceptance:
-        self._preflight(request)
+        await self._preflight(request)
         invocation_id = self._identifiers.new("ai")
         acknowledgement = ResultEnvelope(
             result_id=self._identifiers.new("result"),
@@ -993,6 +1024,18 @@ class ReferenceAIGateway:
                         invocation_id, effect_key=effect_key
                     )
                     if provider_result is None:
+                        # Make the provider crossing recoverable before it starts.
+                        # A restarted worker can now distinguish a never-started
+                        # attempt from one whose provider-side completion must be
+                        # recovered through the adapter's durable effect boundary.
+                        await self.store.reserve_provider_effect(
+                            invocation_id,
+                            effect_key=effect_key,
+                            attempt_number=attempts,
+                            model_key=candidate.model_key,
+                            owner=owner,
+                            generation=generation,
+                        )
                         invocation_call = adapter.invoke(
                             model_key=candidate.model_key,
                             prompt=prompt,
@@ -1557,7 +1600,7 @@ class ReferenceAIGateway:
             terminal=response,
         )
 
-    def _preflight(self, request: AIInvocationRequest) -> None:
+    async def _preflight(self, request: AIInvocationRequest) -> None:
         self._authorizer.require(
             request.authorization,
             permission="ai.invoke",
@@ -1572,6 +1615,91 @@ class ReferenceAIGateway:
             raise ValueError("coarse budget feasibility failed")
         if (request.output_schema is None) != (request.output_schema_identity is None):
             raise ValueError("governed schema material and identity must be bound together")
+        workflow_owned = False
+        authority = self._workflow_admission_authority
+        if authority is not None:
+            workflow_owned = await authority.owns_ai_dispatch(
+                workflow_id=request.workflow_id,
+                command_id=request.command_id,
+                execution_id=request.execution_id,
+            )
+        if workflow_owned and request.workflow_ai_budget_admission is None:
+            raise ValueError("committed Workflow AI admission binding is required")
+        if request.workflow_ai_budget_admission is not None:
+            await self._validate_workflow_admission(request)
+
+    async def _validate_workflow_admission(self, request: AIInvocationRequest) -> None:
+        binding = request.workflow_ai_budget_admission
+        required = {
+            "BindingContractVersion",
+            "TenantId",
+            "WorkspaceId",
+            "WorkflowId",
+            "WorkflowStepId",
+            "CommandId",
+            "ExecutionId",
+            "WorkflowDefinitionVersionId",
+            "PolicyId",
+            "PolicyVersionId",
+            "WorkflowAdmissionStateVersion",
+            "GatewayIdempotencyKey",
+            "CommittedExposure",
+            "CapabilityBinding",
+        }
+        if not isinstance(binding, Mapping) or set(binding) != required:
+            raise ValueError("committed Workflow AI admission binding is required")
+        raw_capability = binding.get("CapabilityBinding")
+        raw_exposure = binding.get("CommittedExposure")
+        state_version = binding.get("WorkflowAdmissionStateVersion")
+        if not isinstance(raw_capability, Mapping) or not isinstance(raw_exposure, Mapping):
+            raise ValueError("Workflow AI admission binding does not match Gateway request")
+        capability = cast(Mapping[str, object], raw_capability)
+        exposure = cast(Mapping[str, object], raw_exposure)
+        if (
+            binding.get("BindingContractVersion") != 1
+            or binding.get("TenantId") != request.tenant_id
+            or binding.get("WorkspaceId") != request.workspace_id
+            or binding.get("WorkflowId") != request.workflow_id
+            or binding.get("WorkflowStepId") != request.workflow_step_id
+            or binding.get("WorkflowDefinitionVersionId") != request.workflow_definition_version_id
+            or binding.get("CommandId") != request.command_id
+            or binding.get("ExecutionId") != request.execution_id
+            or binding.get("PolicyId") != request.authorization.policy_id
+            or binding.get("PolicyVersionId") != request.authorization.policy_version_id
+            or binding.get("GatewayIdempotencyKey") != request.idempotency_key
+            or not isinstance(state_version, int)
+            or state_version < 1
+            or capability
+            != {
+                "SkillVersionId": request.skill_version_id,
+                "CapabilityId": request.capability_id,
+                "CapabilityContractVersionId": request.capability_contract_version_id,
+            }
+            or set(exposure) != {"Amount", "CurrencyOrReferenceUnit"}
+            or exposure.get("CurrencyOrReferenceUnit") != "USD"
+            or not isinstance(exposure.get("Amount"), str)
+        ):
+            raise ValueError("Workflow AI admission binding does not match Gateway request")
+        scale6_amount = cast(str, exposure["Amount"])
+        if (
+            re.fullmatch(
+                r"^(?:0\.[0-9]{0,5}[1-9]|[1-9][0-9]*(?:\.[0-9]{0,5}[1-9])?)$",
+                scale6_amount,
+            )
+            is None
+        ):
+            raise ValueError("Workflow AI admission binding does not match Gateway request")
+        authority = self._workflow_admission_authority
+        if authority is None:
+            raise ValueError("authoritative Workflow AI admission is unavailable")
+        assert request.workflow_id is not None
+        authoritative = await authority.authoritative_ai_admission(
+            workflow_id=request.workflow_id,
+            command_id=request.command_id,
+            execution_id=request.execution_id,
+        )
+        if authoritative != binding:
+            raise ValueError("authoritative Workflow AI admission does not match Gateway request")
 
     def _assemble(self, request: AIInvocationRequest, *, stage: int = 0) -> tuple[str, int, str]:
         if (
@@ -2102,7 +2230,21 @@ class ReferenceAIGateway:
             correlation_id=invocation.request.correlation_id,
             causation_id=invocation.request.causation_id,
             value_reference=f"ai-content:{hashlib.sha256(content.encode()).hexdigest()}",
+            metadata={
+                "gateway_accounting_evidence": {
+                    "evidence_version": 1,
+                    "status": "settled",
+                    "tenant_id": invocation.request.tenant_id,
+                    "workspace_id": invocation.request.workspace_id,
+                    "ai_invocation_id": invocation.invocation_id,
+                    "settled_result_id": "pending_result_binding",
+                    "actual_cost": format(invocation.cumulative_cost, "f").rstrip("0").rstrip("."),
+                    "currency_or_reference_unit": "USD",
+                }
+            },
         )
+        gateway_evidence = cast(dict[str, object], result.metadata["gateway_accounting_evidence"])
+        gateway_evidence["settled_result_id"] = result.result_id
         response = AIInvocationResponse(
             invocation.invocation_id, result, content, usage=usage, route=route, cache_hit=cache_hit
         )

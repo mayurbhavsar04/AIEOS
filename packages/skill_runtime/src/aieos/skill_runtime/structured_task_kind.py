@@ -203,6 +203,15 @@ class StructuredTaskKindClassification:
             result = StructuredTaskKindResult(authoritative)
             return SkillOutput(result.canonical_json(), "", "")
 
+        admission = skill_input.workflow_ai_budget_admission
+        gateway_idempotency_key = (
+            admission.get("GatewayIdempotencyKey")
+            if admission is not None
+            else skill_input.execution_id
+        )
+        if not isinstance(gateway_idempotency_key, str):
+            raise ValueError("governed AI execution requires a Gateway admission binding")
+
         response = await services.ai_gateway.invoke(
             AIInvocationRequest(
                 execution_id=skill_input.execution_id,
@@ -215,7 +224,7 @@ class StructuredTaskKindClassification:
                 causation_id=skill_input.causation_id,
                 authorization=skill_input.authorization,
                 command_id=skill_input.causation_id,
-                idempotency_key=skill_input.execution_id,
+                idempotency_key=gateway_idempotency_key,
                 prompt_template_ref=package.reference,
                 prompt_template_version_ref=package.version_reference,
                 system_instruction_ref=package.system_instruction_reference,
@@ -239,6 +248,13 @@ class StructuredTaskKindClassification:
                 max_provider_attempts=2,
                 repair_attempts=1,
                 cache_allowed=False,
+                workflow_ai_budget_admission=admission,
+                workflow_id=skill_input.workflow_id,
+                workflow_step_id=skill_input.workflow_step_id,
+                workflow_definition_version_id=(
+                    str(admission["WorkflowDefinitionVersionId"]) if admission is not None else None
+                ),
+                skill_version_id=skill_input.skill_version_id,
             )
         )
         return self._complete_ai_path(skill_input, package, response, classification)
@@ -259,7 +275,30 @@ class StructuredTaskKindClassification:
                 "Canonical structured result failed deterministic capability acceptance",
                 retry=RetryClassification.NEVER_RETRY,
             ) from error
-        return SkillOutput(result.canonical_json(), "", response.ai_invocation_id)
+        usage = response.usage
+        raw_gateway_evidence = response.result.metadata.get("gateway_accounting_evidence")
+        gateway_evidence = (
+            dict(cast(Mapping[str, object], raw_gateway_evidence))
+            if isinstance(raw_gateway_evidence, Mapping)
+            else None
+        )
+        return SkillOutput(
+            result.canonical_json(),
+            "",
+            response.ai_invocation_id,
+            gateway_result_id=response.result.result_id,
+            accounting_evidence={
+                "settled_actual_spend_status": "canonical_gateway_store",
+                "gateway_evidence": gateway_evidence,
+                "input_tokens": usage.input_tokens if usage is not None else None,
+                "output_tokens": usage.output_tokens if usage is not None else None,
+                "cached_tokens": usage.cached_tokens if usage is not None else None,
+                "reasoning_tokens": usage.reasoning_tokens if usage is not None else None,
+                "provider_attempt_details": "not_exposed",
+                "fallback_details": "not_exposed",
+                "repair_details": "not_exposed",
+            },
+        )
 
     @staticmethod
     def _require_security_context(skill_input: SkillInput) -> None:

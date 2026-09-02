@@ -23,6 +23,7 @@ class CommandMetadata:
     span_id: str | None = None
     skill_version_id: str | None = None
     authoritative_result_id: str | None = None
+    workflow_ai_budget_admission: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not self.request_id or not self.idempotency_key:

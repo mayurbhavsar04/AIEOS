@@ -21,6 +21,10 @@ class SkillInput:
     authorization: AuthorizationContext
     payload: Mapping[str, object]
     authoritative_result_id: str | None = None
+    workflow_ai_budget_admission: Mapping[str, object] | None = None
+    workflow_id: str | None = None
+    workflow_step_id: str | None = None
+    skill_version_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +33,8 @@ class SkillOutput:
     memory_id: str
     ai_invocation_id: str
     reused_result_id: str | None = None
+    gateway_result_id: str | None = None
+    accounting_evidence: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

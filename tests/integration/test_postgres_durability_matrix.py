@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -15,7 +16,7 @@ import anyio
 import pytest
 from alembic import command
 from alembic.config import Config
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
 from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.exc import IntegrityError
@@ -30,12 +31,14 @@ from aieos.adapters.persistence_postgres import (
     PostgresOutboxStore,
     PostgresProviderEffectBoundary,
     PostgresWorkflowRepository,
+    checkpoint,
 )
 from aieos.adapters.persistence_postgres.models import (
     AIGatewayAttemptRow,
     AIGatewayBudgetRow,
     AIGatewayInvocationRow,
     AIGatewayProviderEffectRow,
+    AIGatewayUsageLedgerRow,
     Base,
     CommandIdempotencyRow,
     DecisionEvidenceRow,
@@ -63,6 +66,8 @@ from aieos.contracts.commands import CommandEnvelope, CommandMetadata
 from aieos.contracts.events import EventEnvelope, EventMetadata
 from aieos.security_support import ScopeAuthorizer
 from aieos.testing import DeterministicClock, DeterministicIdentifiers
+from aieos.workflow_engine import WorkflowDefinition, WorkflowInstance, WorkflowState
+from aieos.workflow_engine.engine import CommandProcessingState
 from aieos_api.composition import CompositionRoot, compose
 from aieos_api.settings import HostSettings, RuntimeAdapter
 
@@ -140,6 +145,7 @@ def durable_ai_gateway(
     database: PostgresDatabase,
     *,
     provider: DeterministicMockProvider | None = None,
+    store: PostgresAIGatewayStore | None = None,
     clock: Any | None = None,
     execution_lease: timedelta = timedelta(seconds=30),
     heartbeat_interval: float = 10.0,
@@ -148,7 +154,7 @@ def durable_ai_gateway(
     identifiers = DeterministicIdentifiers()
     provider = provider or DeterministicMockProvider("mock", prefix="Durable")
     provider.use_effect_boundary(PostgresProviderEffectBoundary(database))
-    store = PostgresAIGatewayStore(database)
+    store = store or PostgresAIGatewayStore(database)
     gateway = ReferenceAIGateway(
         clock=effective_clock,
         identifiers=identifiers,
@@ -508,23 +514,57 @@ async def test_ai_gateway_lease_renewal_blocks_reclaim_beyond_original_ttl(
     )
 
 
+@pytest.mark.parametrize("iteration", range(20))
 async def test_ai_gateway_slow_active_provider_is_heartbeat_renewed(
     database: PostgresDatabase,
+    iteration: int,
 ) -> None:
     class RealtimeClock:
         def now(self) -> datetime:
             return datetime.now(UTC)
 
     class SlowProvider(DeterministicMockProvider):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.dispatch_started = asyncio.Event()
+
         async def invoke(self, **values: Any) -> ProviderResult:
+            self.dispatch_started.set()
             await asyncio.sleep(0.25)
             return await super().invoke(**values)
 
+    class HeartbeatRecordingStore(PostgresAIGatewayStore):
+        def __init__(self, database: PostgresDatabase) -> None:
+            super().__init__(database)
+            self.heartbeat_renewed = asyncio.Event()
+
+        async def renew_execution(
+            self,
+            invocation_id: str,
+            *,
+            owner: str,
+            generation: int,
+            now: datetime,
+            lease: timedelta,
+        ) -> bool:
+            renewed = await super().renew_execution(
+                invocation_id,
+                owner=owner,
+                generation=generation,
+                now=now,
+                lease=lease,
+            )
+            if renewed:
+                self.heartbeat_renewed.set()
+            return renewed
+
     lease = timedelta(seconds=0.1)
     first_provider = SlowProvider("mock", prefix="Slow")
+    first_store = HeartbeatRecordingStore(database)
     first, _, _ = durable_ai_gateway(
         database,
         provider=first_provider,
+        store=first_store,
         clock=RealtimeClock(),
         execution_lease=lease,
         heartbeat_interval=0.02,
@@ -538,7 +578,8 @@ async def test_ai_gateway_slow_active_provider_is_heartbeat_renewed(
     first_task = asyncio.create_task(
         first.invoke(ai_request(idempotency_key="slow-heartbeat-provider"))
     )
-    await asyncio.sleep(0.14)
+    await first_provider.dispatch_started.wait()
+    await first_store.heartbeat_renewed.wait()
     second_task = asyncio.create_task(
         second.invoke(
             ai_request(
@@ -552,6 +593,14 @@ async def test_ai_gateway_slow_active_provider_is_heartbeat_renewed(
     assert two.result.result_id == one.result.result_id
     assert first_provider.calls == 1
     assert second_provider.calls == 0
+    async with database.transaction() as session:
+        effects = tuple(await session.scalars(select(AIGatewayProviderEffectRow)))
+        budgets = tuple(await session.scalars(select(AIGatewayBudgetRow)))
+        usage = tuple(await session.scalars(select(AIGatewayUsageLedgerRow)))
+    assert len(effects) == len(budgets) == len(usage) == 1
+    assert effects[0].state == "completed"
+    assert effects[0].dispatch_count == effects[0].claim_generation == 1
+    assert budgets[0].state == "committed"
 
 
 async def test_ai_gateway_reclaim_increments_generation_and_fences_stale_effect(
@@ -1235,6 +1284,322 @@ async def database() -> AsyncIterator[PostgresDatabase]:
     await value.close()
 
 
+def governed_start_command(
+    root: CompositionRoot,
+    *,
+    command_id: str,
+    idempotency_key: str,
+    authoritative_result_id: str | None = None,
+) -> CommandEnvelope:
+    """Build the sole approved structured-AI Workflow start command."""
+    runtime = root.reference_runtime
+    return CommandEnvelope(
+        command_id=command_id,
+        command_type="StartWorkflow",
+        command_version="2.0",
+        correlation_id=f"correlation-{command_id}",
+        causation_id=f"request-{command_id}",
+        target_component="Workflow Engine",
+        initiator="Reference Host",
+        timestamp=runtime.clock.now(),
+        tenant_id=runtime.settings.tenant_id,
+        workspace_id=runtime.settings.workspace_id,
+        payload={
+            "workflow_definition_id": "ClassifyAndRouteTask",
+            "workflow_definition_version_id": "classify-and-route-task-v1",
+            "workflow_kind": "ClassifyAndRouteTask",
+            "skill_version_id": "structured-task-kind-skill-v1",
+            "statement": "Where is the durable report?",
+            "max_attempts": 1,
+            "authoritative_result_id": authoritative_result_id,
+            "workflow_ai_budget_envelope": {
+                "ContractVersion": 1,
+                "GatewayNormalizedCostUnitRegistryVersion": 1,
+                "WorkflowDefinitionVersionId": "classify-and-route-task-v1",
+                "PolicyId": runtime.authorization.policy_id,
+                "PolicyVersionId": runtime.authorization.policy_version_id,
+                "TenantId": runtime.settings.tenant_id,
+                "WorkspaceId": runtime.settings.workspace_id,
+                "BudgetCeiling": {"Amount": "0.01", "CurrencyOrReferenceUnit": "USD"},
+            },
+        },
+        metadata=CommandMetadata(
+            request_id=f"request-{command_id}",
+            idempotency_key=idempotency_key,
+            authorization=runtime.authorization,
+        ),
+    )
+
+
+async def test_postgres_approved_reference_workflow_routes_deterministically(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    root = compose(settings)
+    command_envelope = governed_start_command(
+        root,
+        command_id="e1-approved-command",
+        idempotency_key="e1-approved-idempotency",
+    )
+
+    accepted = await root.reference_runtime.run_workflow_command(command_envelope)
+    workflow = next(iter(root.reference_runtime.workflow_repository.instances.values()))
+    assert accepted.result_status is ResultStatus.ACCEPTED
+    assert workflow.outcome is not None
+    assert workflow.outcome.result_status is ResultStatus.SUCCEEDED
+    assert workflow.outcome.value_reference is not None
+    assert json.loads(workflow.outcome.value_reference)["route"] == "question_queue"
+    assert len(root.reference_runtime.reference_ai_gateway.store.invocations) == 1
+    await root.close()
+
+    restarted = compose(settings)
+    assert await restarted.reference_runtime.run_workflow_command(command_envelope) == accepted
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+    await restarted.close()
+
+
+@pytest.mark.parametrize(
+    ("case_id", "field", "value"),
+    [
+        ("altered-definition-id", "workflow_definition_id", "CallerSelectedAIWorkflow"),
+        ("missing-definition-id", "workflow_definition_id", None),
+        ("altered-workflow-kind", "workflow_kind", "CallerSelectedAIWorkflow"),
+        ("missing-workflow-kind", "workflow_kind", None),
+        ("invalid-workflow-kind", "workflow_kind", 1),
+        ("altered-definition-version", "workflow_definition_version_id", "caller-selected-v2"),
+        ("missing-definition-version", "workflow_definition_version_id", None),
+        ("altered-skill-identity", "skill_version_id", "caller-selected-skill-v1"),
+        ("altered-skill-version", "skill_version_id", "structured-task-kind-skill-v2"),
+        ("caller-selected-name-and-kind", "workflow_definition_id", "CallerSelectedAIWorkflow"),
+    ],
+)
+async def test_postgres_structured_ai_identity_rejections_are_durable_and_replay_stable(
+    database: PostgresDatabase, case_id: str, field: str, value: object
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    root = compose(settings)
+    original = governed_start_command(
+        root,
+        command_id=f"e1-command-{case_id}",
+        idempotency_key=f"e1-idempotency-{case_id}",
+    )
+    payload = dict(original.payload)
+    if case_id == "caller-selected-name-and-kind":
+        payload["workflow_kind"] = "CallerSelectedAIWorkflow"
+    if value is None:
+        payload.pop(field)
+    else:
+        payload[field] = value
+    command_envelope = replace(original, payload=payload)
+
+    first = await root.reference_runtime.run_workflow_command(command_envelope)
+    duplicate = await root.reference_runtime.run_workflow_command(command_envelope)
+    assert first == duplicate
+    assert first.result_status is ResultStatus.REJECTED
+    assert not root.reference_runtime.workflow_repository.instances
+    await root.close()
+
+    restarted = compose(settings)
+    replay = await restarted.reference_runtime.run_workflow_command(command_envelope)
+    assert replay == first
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 0
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.outcome_id == first.result_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+    await restarted.close()
+
+
+async def test_postgres_pre_ai_rejections_terminalize_once_and_survive_restart(
+    database: PostgresDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    malformed_root = compose(settings)
+    malformed_base = governed_start_command(
+        malformed_root,
+        command_id="e2-malformed-command",
+        idempotency_key="e2-malformed-idempotency",
+    )
+    malformed = replace(
+        malformed_base,
+        payload={
+            **malformed_base.payload,
+            "authoritative_result_id": "malformed result id!",
+        },
+    )
+    malformed_result = await malformed_root.reference_runtime.run_workflow_command(malformed)
+    assert malformed_result.result_status is ResultStatus.REJECTED
+    assert not malformed_root.reference_runtime.workflow_repository.instances
+    await malformed_root.close()
+
+    malformed_restarted = compose(settings)
+    assert (
+        await malformed_restarted.reference_runtime.run_workflow_command(malformed)
+        == malformed_result
+    )
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 0
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.outcome_id == malformed_result.result_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+    await malformed_restarted.close()
+
+    await reset(database)
+    invalid_root = compose(settings)
+    invalid = governed_start_command(
+        invalid_root,
+        command_id="e2-invalid-command",
+        idempotency_key="e2-invalid-idempotency",
+        authoritative_result_id="missing-authoritative-result",
+    )
+    invalid_result = await invalid_root.reference_runtime.run_workflow_command(invalid)
+    invalid_workflow = next(
+        iter(invalid_root.reference_runtime.workflow_repository.instances.values())
+    )
+    assert invalid_result == invalid_workflow.outcome
+    assert invalid_workflow.outcome is not None
+    assert invalid_workflow.outcome.result_status is ResultStatus.REJECTED
+    invalid_workflow_id = invalid_workflow.workflow_id
+    invalid_execution_id = invalid_workflow.execution_ids[0]
+    await invalid_root.close()
+
+    invalid_restarted = compose(settings)
+    assert await invalid_restarted.reference_runtime.run_workflow_command(invalid) == invalid_result
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == invalid_workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Skill Runtime",
+                    OutcomeRow.subject_id == invalid_execution_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+    await invalid_restarted.close()
+
+    await reset(database)
+    binding_root = compose(settings)
+    binding_runtime = binding_root.reference_runtime
+    original = binding_runtime.skill_runtime.handle
+
+    async def reject_missing_binding(command_envelope: CommandEnvelope) -> ResultEnvelope:
+        return await original(
+            replace(
+                command_envelope,
+                metadata=replace(command_envelope.metadata, workflow_ai_budget_admission=None),
+            )
+        )
+
+    monkeypatch.setattr(binding_runtime.skill_runtime, "handle", reject_missing_binding)
+    missing_binding = governed_start_command(
+        binding_root,
+        command_id="e2-binding-command",
+        idempotency_key="e2-binding-idempotency",
+    )
+    binding_result = await binding_runtime.run_workflow_command(missing_binding)
+    binding_workflow = next(iter(binding_runtime.workflow_repository.instances.values()))
+    assert binding_result == binding_workflow.outcome
+    assert binding_workflow.outcome is not None
+    assert binding_workflow.outcome.result_status is ResultStatus.REJECTED
+    binding_workflow_id = binding_workflow.workflow_id
+    binding_execution_id = binding_workflow.execution_ids[0]
+    await binding_root.close()
+
+    binding_restarted = compose(settings)
+    assert (
+        await binding_restarted.reference_runtime.run_workflow_command(missing_binding)
+        == binding_result
+    )
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 0
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 0
+        )
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == binding_workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Skill Runtime",
+                    OutcomeRow.subject_id == binding_execution_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+    await binding_restarted.close()
+
+
 async def test_migration_revision_readiness_and_schema_parity(
     database: PostgresDatabase,
 ) -> None:
@@ -1522,6 +1887,366 @@ async def test_concurrent_duplicate_submission_creates_one_workflow(
         assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
     await left.close()
     await right.close()
+
+
+async def test_warmed_worker_replays_authoritative_direct_workflow_submission(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    first = compose(settings)
+    warmed = compose(settings)
+    for participant in warmed.reference_runtime.durable_participants:
+        await participant.prepare()
+
+    runtime = first.reference_runtime
+    command_envelope = CommandEnvelope(
+        command_id="command-warmed-first",
+        command_type="StartWorkflow",
+        command_version="2.0",
+        correlation_id="correlation-warmed",
+        causation_id="request-warmed",
+        target_component="Workflow Engine",
+        initiator="Reference Host",
+        timestamp=runtime.clock.now(),
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        payload={
+            "workflow_definition_id": "ClassifyAndRouteTask",
+            "workflow_definition_version_id": "classify-and-route-task-v1",
+            "workflow_kind": "ClassifyAndRouteTask",
+            "skill_version_id": "structured-task-kind-skill-v1",
+            "statement": "Where is the warmed-worker report?",
+            "max_attempts": 1,
+            "workflow_ai_budget_envelope": {
+                "ContractVersion": 1,
+                "GatewayNormalizedCostUnitRegistryVersion": 1,
+                "WorkflowDefinitionVersionId": "classify-and-route-task-v1",
+                "PolicyId": runtime.authorization.policy_id,
+                "PolicyVersionId": runtime.authorization.policy_version_id,
+                "TenantId": settings.tenant_id,
+                "WorkspaceId": settings.workspace_id,
+                "BudgetCeiling": {"Amount": "0.01", "CurrencyOrReferenceUnit": "USD"},
+            },
+        },
+        metadata=CommandMetadata(
+            request_id="request-warmed",
+            idempotency_key="idempotency-warmed",
+            authorization=runtime.authorization,
+        ),
+    )
+    first_acknowledgement = await runtime.run_workflow_command(command_envelope)
+    replay_command = replace(
+        command_envelope,
+        command_id="command-warmed-replay",
+        timestamp=command_envelope.timestamp + timedelta(microseconds=1),
+    )
+    replay_acknowledgement = await warmed.reference_runtime.run_workflow_command(replay_command)
+
+    assert replay_acknowledgement == first_acknowledgement
+    assert replay_acknowledgement.subject_reference == first_acknowledgement.subject_reference
+    durable_workflow = warmed.reference_runtime.workflow_repository.instances[
+        first_acknowledgement.subject_reference
+    ]
+    assert durable_workflow.outcome is not None
+    assert len(durable_workflow.ai_admissions or {}) == 1
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(WorkflowRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(ExecutionRow)) == 1
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == first_acknowledgement.subject_reference,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+    await first.close()
+    await warmed.close()
+
+
+async def test_prewarmed_nonterminal_workflow_survives_unrelated_checkpoint(
+    database: PostgresDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    winner = compose(settings)
+    stale = compose(settings)
+    repository = stale.reference_runtime.workflow_repository
+    assert isinstance(repository, PostgresWorkflowRepository)
+    original = winner.reference_runtime.skill_runtime.handle
+    warmed: list[tuple[str, int, bytes]] = []
+
+    async def prewarm_before_delivery(command: CommandEnvelope) -> ResultEnvelope:
+        # A has created W, but has not delivered its first execution or completed its receipt.
+        assert command.workflow_id is not None
+        await checkpoint(database, winner.reference_runtime.durable_participants)
+        for participant in stale.reference_runtime.durable_participants:
+            await participant.prepare()
+        cached = repository.instances[command.workflow_id]
+        assert cached.state is WorkflowState.RUNNING
+        assert cached.outcome is None
+        receipt = next(
+            r for r in repository.command_receipts.values() if r.workflow_id == cached.workflow_id
+        )
+        assert receipt.state is CommandProcessingState.IN_PROGRESS
+        async with database.transaction() as session:
+            row = await session.get(
+                WorkflowRow, (settings.tenant_id, settings.workspace_id, cached.workflow_id)
+            )
+            assert row is not None and row.state == WorkflowState.RUNNING.value
+            assert repository._workflow_versions[cached.workflow_id] == row.version  # pyright: ignore[reportPrivateUsage]
+            warmed.append(
+                (
+                    cached.workflow_id,
+                    row.version,
+                    TypeAdapter(WorkflowInstance).dump_json(cached),
+                )
+            )
+            durable_receipt = await session.get(
+                CommandIdempotencyRow,
+                (
+                    settings.tenant_id,
+                    settings.workspace_id,
+                    "Workflow Engine",
+                    receipt.command.metadata.idempotency_key,
+                ),
+            )
+            assert durable_receipt is not None and not durable_receipt.completed
+        return await original(command)
+
+    monkeypatch.setattr(winner.reference_runtime.skill_runtime, "handle", prewarm_before_delivery)
+    acknowledgement = await winner.reference_runtime.classify_and_route_task(
+        "Where is the authoritative report?"
+    )
+    workflow_id = acknowledgement.subject_reference
+    assert len(warmed) == 1 and warmed[0][0] == workflow_id
+    cached = repository.instances[workflow_id]
+    assert cached.state is WorkflowState.RUNNING and cached.outcome is None
+    receipt = next(r for r in repository.command_receipts.values() if r.workflow_id == workflow_id)
+    assert receipt.state is CommandProcessingState.IN_PROGRESS
+    gateway = winner.reference_runtime.reference_ai_gateway
+    invocation = next(iter(gateway.store.invocations.values()))
+    invocation_id = invocation.invocation_id
+    provider = gateway._adapters["mock-economy"]  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(provider, DeterministicMockProvider) and provider.calls == 1
+
+    async def durable_snapshot(db: PostgresDatabase) -> dict[str, list[dict[str, Any]]]:
+        result: dict[str, list[dict[str, Any]]] = {}
+        async with db.transaction() as session:
+            queries = {
+                "workflow": select(WorkflowRow.__table__).where(
+                    WorkflowRow.workflow_id == workflow_id
+                ),
+                "outcome": select(OutcomeRow.__table__).where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                ),
+                "receipt": select(CommandIdempotencyRow.__table__).where(
+                    CommandIdempotencyRow.target_component == "Workflow Engine",
+                    CommandIdempotencyRow.idempotency_key
+                    == receipt.command.metadata.idempotency_key,
+                ),
+            }
+            for model in (
+                AIGatewayInvocationRow,
+                AIGatewayBudgetRow,
+                AIGatewayUsageLedgerRow,
+                AIGatewayProviderEffectRow,
+                AIGatewayAttemptRow,
+            ):
+                queries[model.__tablename__] = select(model.__table__).where(
+                    model.ai_invocation_id == invocation_id
+                )
+            for name, query in queries.items():
+                rows = (await session.execute(query)).mappings().all()
+                result[name] = sorted((dict(row) for row in rows), key=repr)
+        return result
+
+    terminal = await durable_snapshot(database)
+    assert len(terminal["workflow"]) == len(terminal["outcome"]) == len(terminal["receipt"]) == 1
+    assert terminal["workflow"][0]["version"] > warmed[0][1]
+    assert terminal["workflow"][0]["state"] == WorkflowState.COMPLETED.value
+    assert terminal["receipt"][0]["completed"] is True
+    assert terminal["ai_gateway_invocations"][0]["state"] == "Succeeded"
+    assert terminal["ai_gateway_budgets"][0]["state"] == "committed"
+    assert terminal["ai_gateway_budgets"][0]["reconciled_at"] is not None
+    assert terminal["ai_gateway_usage_ledger"]
+    assert len(terminal["ai_gateway_provider_effects"]) == 1
+    assert terminal["ai_gateway_provider_effects"][0]["state"] == "completed"
+    assert terminal["ai_gateway_provider_effects"][0]["dispatch_count"] == 1
+
+    refresh = repository.refresh_workflow
+    replay = repository.replay_command
+
+    async def forbid_refresh(target_id: str) -> WorkflowInstance | None:
+        assert target_id != workflow_id, "B must not refresh W before its unrelated checkpoint"
+        return await refresh(target_id)
+
+    async def forbid_replay(
+        command: CommandEnvelope,
+    ) -> tuple[CommandEnvelope, ResultEnvelope | None] | None:
+        assert command.metadata.idempotency_key != receipt.command.metadata.idempotency_key
+        return await replay(command)
+
+    monkeypatch.setattr(repository, "refresh_workflow", forbid_refresh)
+    monkeypatch.setattr(repository, "replay_command", forbid_replay)
+    # Non-AI unrelated command makes any extra AI provider dispatch unambiguously a failure.
+    await stale.reference_runtime.run_command(
+        stale.reference_runtime.build_request_command("unrelated hello")
+    )
+    assert repository.instances[workflow_id] is cached
+    assert cached.state is WorkflowState.RUNNING and cached.outcome is None
+    assert repository._workflow_versions[workflow_id] == warmed[0][1]  # pyright: ignore[reportPrivateUsage]
+    assert TypeAdapter(WorkflowInstance).dump_json(cached) == warmed[0][2]
+    assert receipt.state is CommandProcessingState.IN_PROGRESS
+    assert provider.calls == 1
+    stale_provider = stale.reference_runtime.reference_ai_gateway._adapters["mock-economy"]  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(stale_provider, DeterministicMockProvider) and stale_provider.calls == 0
+
+    fresh = compose(settings)
+    for participant in fresh.reference_runtime.durable_participants:
+        await participant.prepare()
+    authoritative = fresh.reference_runtime.workflow_repository.instances[workflow_id]
+    assert authoritative.workflow_id == workflow_id
+    assert authoritative.state is WorkflowState.COMPLETED and authoritative.outcome is not None
+    assert authoritative.outcome.result_id == terminal["outcome"][0]["outcome_id"]
+    assert authoritative.ai_admission_states
+    assert all(
+        state["State"] == "Reconciled" for state in authoritative.ai_admission_states.values()
+    )
+    durable_receipt = next(
+        r
+        for r in fresh.reference_runtime.workflow_repository.command_receipts.values()
+        if r.workflow_id == workflow_id
+    )
+    assert durable_receipt.state is CommandProcessingState.COMPLETED
+    assert fresh.database is not None
+    assert await durable_snapshot(fresh.database) == terminal
+    await winner.close()
+    await stale.close()
+    await fresh.close()
+
+
+async def test_stale_dirty_workflow_snapshot_is_rejected_by_version_fence(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    winner = compose(settings)
+    stale = compose(settings)
+    acknowledgement = await winner.reference_runtime.classify_and_route_task("Where is the report?")
+    workflow_id = acknowledgement.subject_reference
+    for participant in stale.reference_runtime.durable_participants:
+        await participant.prepare()
+    repository = stale.reference_runtime.workflow_repository
+    winner_repository = winner.reference_runtime.workflow_repository
+    assert isinstance(repository, PostgresWorkflowRepository)
+    assert isinstance(winner_repository, PostgresWorkflowRepository)
+    old_version = repository._workflow_versions[workflow_id]  # pyright: ignore[reportPrivateUsage]
+    # B really changes its older snapshot; A then commits a newer authoritative version.
+    repository.instances[workflow_id].state = WorkflowState.RUNNING
+    winner_repository.instances[workflow_id].transition_version += 1
+    await checkpoint(database, (winner_repository,))
+    async with database.transaction() as session:
+        row = await session.get(
+            WorkflowRow, (settings.tenant_id, settings.workspace_id, workflow_id)
+        )
+        assert row is not None and row.version > old_version
+        terminal_payload, terminal_version = row.payload, row.version
+
+    with pytest.raises(RuntimeError, match="durable version fence"):
+        await checkpoint(database, (repository,))
+    assert repository._workflow_versions[workflow_id] == old_version  # pyright: ignore[reportPrivateUsage]
+    fresh = compose(settings)
+    for participant in fresh.reference_runtime.durable_participants:
+        await participant.prepare()
+    assert (
+        fresh.reference_runtime.workflow_repository.instances[workflow_id].state
+        is WorkflowState.COMPLETED
+    )
+    assert fresh.database is not None
+    async with fresh.database.transaction() as session:
+        row = await session.get(
+            WorkflowRow, (settings.tenant_id, settings.workspace_id, workflow_id)
+        )
+        assert row is not None
+        assert (row.payload, row.version) == (terminal_payload, terminal_version)
+    await winner.close()
+    await stale.close()
+    await fresh.close()
+
+
+async def test_postgres_gateway_rejects_forged_and_stale_workflow_admission(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    root = compose(settings)
+    runtime = root.reference_runtime
+    await runtime.classify_and_route_task("Where is the durable report?")
+    gateway = runtime.reference_ai_gateway
+    invocation = next(iter(gateway.store.invocations.values()))
+    replay = await gateway.accept(invocation.request)
+    assert replay.replay
+
+    binding = invocation.request.workflow_ai_budget_admission
+    assert binding is not None
+    forged_binding = {
+        **binding,
+        "CommandId": "forged-command",
+        "ExecutionId": "forged-execution",
+        "GatewayIdempotencyKey": "forged-idempotency",
+    }
+    forged = replace(
+        invocation.request,
+        command_id="forged-command",
+        execution_id="forged-execution",
+        idempotency_key="forged-idempotency",
+        workflow_ai_budget_admission=forged_binding,
+    )
+    with pytest.raises(ValueError, match="authoritative Workflow AI admission"):
+        await gateway.accept(forged)
+
+    workflow_id = cast(str, invocation.request.workflow_id)
+    workflow_adapter = TypeAdapter(WorkflowInstance)
+    async with database.transaction() as session:
+        row = await session.get(
+            WorkflowRow,
+            (settings.tenant_id, settings.workspace_id, workflow_id),
+            with_for_update=True,
+        )
+        assert row is not None
+        workflow = workflow_adapter.validate_json(row.payload)
+        workflow.transition_version += 1
+        row.payload = workflow_adapter.dump_json(workflow)
+    with pytest.raises(ValueError, match="authoritative Workflow AI admission"):
+        await gateway.accept(invocation.request)
+
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 1
+        )
+    await root.close()
 
 
 async def test_scoped_idempotency_key_deduplicates_distinct_command_ids(
@@ -2283,6 +3008,104 @@ async def test_incomplete_publication_and_idempotency_resume_after_restart(
     await recovered.close()
 
 
+async def test_accounting_reconciliation_failure_redelivers_without_false_completion(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+        delivery_backoff_seconds=0.001,
+    )
+    interrupted = compose(settings)
+    runtime = interrupted.reference_runtime
+    consumers = cast(
+        dict[str, list[tuple[str, Any]]],
+        vars(runtime.event_bus)["_consumers"],
+    )
+    durable_consumer = consumers["ExecutionAttemptSucceeded"][0][1]
+
+    class InvalidAccountingOnce:
+        injected = False
+
+        async def consume(self, delivered: EventEnvelope) -> None:
+            if self.injected:
+                await durable_consumer.consume(delivered)
+                return
+            self.injected = True
+            lineage = dict(cast(Mapping[str, object], delivered.payload["audit_lineage"]))
+            accounting = dict(cast(Mapping[str, object], lineage["accounting_evidence"]))
+            gateway_evidence = dict(cast(Mapping[str, object], accounting["gateway_evidence"]))
+            gateway_evidence["actual_cost"] = "not-scale-6"
+            accounting["gateway_evidence"] = gateway_evidence
+            lineage["accounting_evidence"] = accounting
+            await durable_consumer.consume(
+                replace(
+                    delivered,
+                    payload={**delivered.payload, "audit_lineage": lineage},
+                )
+            )
+
+    consumers["ExecutionAttemptSucceeded"] = [("workflow-engine", InvalidAccountingOnce())]
+    acknowledgement = await runtime.classify_and_route_task("Where is reconciliation?")
+    workflow_id = acknowledgement.subject_reference
+
+    async with database.transaction() as session:
+        workflow_row = await session.get(
+            WorkflowRow,
+            (settings.tenant_id, settings.workspace_id, workflow_id),
+        )
+        assert workflow_row is not None and workflow_row.state == "Running"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 0
+        )
+        receipt = await session.scalar(
+            select(DeliveryReceiptRow).where(
+                DeliveryReceiptRow.consumer_name == "workflow-engine",
+                DeliveryReceiptRow.status == "Failed",
+            )
+        )
+        assert receipt is not None
+    await interrupted.close()
+
+    recovered = compose(settings)
+    await asyncio.sleep(0.01)
+    await recovered.reference_runtime.outbox.drain()
+    async with database.transaction() as session:
+        workflow_row = await session.get(
+            WorkflowRow,
+            (settings.tenant_id, settings.workspace_id, workflow_id),
+        )
+        assert workflow_row is not None and workflow_row.state == "Completed"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutcomeRow)
+                .where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+            == 1
+        )
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+        assert (
+            await session.scalar(select(func.count()).select_from(AIGatewayProviderEffectRow)) == 1
+        )
+    recovered_workflow = recovered.reference_runtime.workflow_repository.instances[workflow_id]
+    assert recovered_workflow.outcome is not None
+    await recovered.close()
+
+
 async def test_memory_terminal_checkpoint_rolls_back_and_redelivery_is_exactly_once(
     database: PostgresDatabase,
 ) -> None:
@@ -2433,7 +3256,7 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
         correlation_id="correlation-authoritative-source",
         causation_id="workflow-authoritative-source",
         target_component="Skill Runtime",
-        initiator="Workflow Engine",
+        initiator="Reference Host",
         timestamp=datetime(2026, 8, 15, tzinfo=UTC),
         tenant_id=settings.tenant_id,
         workspace_id=settings.workspace_id,
@@ -2501,6 +3324,82 @@ async def test_authoritative_result_v2_survives_restart_and_duplicate_delivery_z
     await recovered.close()
 
 
+async def test_governed_ai_and_reuse_audit_lineage_survive_postgres_restart(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    first = compose(settings)
+    runtime = first.reference_runtime
+    await runtime.classify_and_route_task("Where is the report?")
+    ai_workflow = next(iter(runtime.workflow_repository.instances.values()))
+    source = next(iter(runtime.execution_repository.records.values())).result
+    assert ai_workflow.outcome is not None and source is not None
+    ai_lineage = cast(Mapping[str, object], ai_workflow.outcome.metadata["audit_lineage"])
+    assert ai_lineage["ai_invocation_id"]
+    invocation_count = len(runtime.reference_ai_gateway.store.invocations)
+
+    reuse_command = CommandEnvelope(
+        command_id="command-durable-workflow-reuse-lineage",
+        command_type="StartWorkflow",
+        command_version="2.0",
+        correlation_id="correlation-durable-workflow-reuse-lineage",
+        causation_id="request-durable-workflow-reuse-lineage",
+        target_component="Workflow Engine",
+        initiator="Reference Host",
+        timestamp=runtime.clock.now(),
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        payload={
+            "workflow_definition_id": "ClassifyAndRouteTask",
+            "workflow_definition_version_id": "classify-and-route-task-v1",
+            "workflow_kind": "ClassifyAndRouteTask",
+            "skill_version_id": "structured-task-kind-skill-v1",
+            "statement": "Where is the report?",
+            "max_attempts": 1,
+            "authoritative_result_id": source.result_id,
+            "workflow_ai_budget_envelope": {
+                "ContractVersion": 1,
+                "GatewayNormalizedCostUnitRegistryVersion": 1,
+                "WorkflowDefinitionVersionId": "classify-and-route-task-v1",
+                "PolicyId": runtime.authorization.policy_id,
+                "PolicyVersionId": runtime.authorization.policy_version_id,
+                "TenantId": settings.tenant_id,
+                "WorkspaceId": settings.workspace_id,
+                "BudgetCeiling": {"Amount": "0.01", "CurrencyOrReferenceUnit": "USD"},
+            },
+        },
+        metadata=CommandMetadata(
+            request_id="request-durable-workflow-reuse-lineage",
+            idempotency_key="idem-durable-workflow-reuse-lineage",
+            authorization=runtime.authorization,
+        ),
+    )
+    await runtime.run_workflow_command(reuse_command)
+    reuse_workflow = tuple(runtime.workflow_repository.instances.values())[-1]
+    assert reuse_workflow.outcome is not None
+    reuse_lineage = cast(Mapping[str, object], reuse_workflow.outcome.metadata["audit_lineage"])
+    assert reuse_lineage["reuse_lineage"] == source.result_id
+    assert "ai_invocation_id" not in reuse_lineage
+    assert len(runtime.reference_ai_gateway.store.invocations) == invocation_count
+    ids = (ai_workflow.workflow_id, reuse_workflow.workflow_id)
+    await first.close()
+
+    restarted = compose(settings)
+    for participant in restarted.reference_runtime.durable_participants:
+        await participant.prepare()
+    durable_ai = restarted.reference_runtime.workflow_repository.instances[ids[0]]
+    durable_reuse = restarted.reference_runtime.workflow_repository.instances[ids[1]]
+    assert durable_ai.outcome is not None and durable_reuse.outcome is not None
+    assert durable_ai.outcome.metadata["audit_lineage"] == ai_lineage
+    assert durable_reuse.outcome.metadata["audit_lineage"] == reuse_lineage
+    async with database.transaction() as session:
+        assert await session.scalar(select(func.count()).select_from(AIGatewayInvocationRow)) == 1
+    await restarted.close()
+
+
 async def test_structured_cancellation_uses_governed_event_and_workflow_is_terminal_after_restart(
     database: PostgresDatabase,
 ) -> None:
@@ -2527,12 +3426,23 @@ async def test_structured_cancellation_uses_governed_event_and_workflow_is_termi
         tenant_id=settings.tenant_id,
         workspace_id=settings.workspace_id,
         payload={
-            "workflow_definition_id": "structured-cancellation-workflow",
-            "workflow_definition_version_id": "v1",
+            "workflow_definition_id": "ClassifyAndRouteTask",
+            "workflow_definition_version_id": "classify-and-route-task-v1",
+            "workflow_kind": "ClassifyAndRouteTask",
             "skill_version_id": "structured-task-kind-skill-v1",
             "max_attempts": 1,
             "statement": "What is the status?",
             "timeout_seconds": 5,
+            "workflow_ai_budget_envelope": {
+                "ContractVersion": 1,
+                "GatewayNormalizedCostUnitRegistryVersion": 1,
+                "WorkflowDefinitionVersionId": "classify-and-route-task-v1",
+                "PolicyId": runtime.authorization.policy_id,
+                "PolicyVersionId": runtime.authorization.policy_version_id,
+                "TenantId": settings.tenant_id,
+                "WorkspaceId": settings.workspace_id,
+                "BudgetCeiling": {"Amount": "0.01", "CurrencyOrReferenceUnit": "USD"},
+            },
         },
         metadata=CommandMetadata(
             request_id="request-structured-cancellation",
@@ -2544,7 +3454,7 @@ async def test_structured_cancellation_uses_governed_event_and_workflow_is_termi
     workflow = next(iter(runtime.workflow_repository.instances.values()))
     execution = next(iter(runtime.execution_repository.records.values()))
     assert execution.result is not None
-    assert execution.result.result_status is ResultStatus.FAILED
+    assert execution.result.result_status is ResultStatus.CANCELLED
     assert execution.terminal_event is not None
     assert execution.terminal_event.event_type == "ExecutionAttemptFailed"
     assert workflow.outcome is not None and workflow.outcome.result_status is ResultStatus.FAILED
@@ -2565,3 +3475,111 @@ async def test_structured_cancellation_uses_governed_event_and_workflow_is_termi
         )
         assert cancelled_events == 0
     await recovered.close()
+
+
+async def test_cancelled_workflow_result_is_immutable_across_restart_and_late_delivery(
+    database: PostgresDatabase,
+) -> None:
+    settings = HostSettings(
+        runtime_adapter=RuntimeAdapter.POSTGRES,
+        database_url=SecretStr(database_url()),
+    )
+    first = compose(settings)
+    runtime = first.reference_runtime
+    instance = WorkflowInstance(
+        workflow_id="workflow-durable-cancelled",
+        workflow_step_id="step-durable-cancelled",
+        definition=WorkflowDefinition("durable-cancel", "v1", "hello-aieos-skill-v1"),
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        request_id="request-durable-cancelled",
+        correlation_id="correlation-durable-cancelled",
+        authorization=runtime.authorization,
+        input_payload={"message": "late delivery"},
+        timeout_seconds=1,
+        state=WorkflowState.RUNNING,
+    )
+    runtime.workflow_repository.add(instance)
+    cancel = CommandEnvelope(
+        command_id="command-durable-cancelled",
+        command_type="CancelWorkflow",
+        command_version="1.0",
+        correlation_id=instance.correlation_id,
+        causation_id=instance.request_id,
+        workflow_id=instance.workflow_id,
+        target_component="Workflow Engine",
+        initiator="test",
+        timestamp=runtime.clock.now(),
+        tenant_id=instance.tenant_id,
+        workspace_id=instance.workspace_id,
+        payload={},
+        metadata=CommandMetadata(
+            request_id=instance.request_id,
+            idempotency_key="durable-cancelled",
+            authorization=runtime.authorization,
+        ),
+    )
+    cancelled = await runtime.run_workflow_command(cancel)
+    await first.close()
+
+    restarted = compose(settings)
+    recovered = restarted.reference_runtime
+    for participant in recovered.durable_participants:
+        await participant.prepare()
+    late_success = EventEnvelope(
+        event_id="event-durable-late-success",
+        event_type="ExecutionAttemptSucceeded",
+        event_version="1.0",
+        occurred_at=recovered.clock.now(),
+        recorded_at=recovered.clock.now(),
+        producer="Skill Runtime",
+        tenant_id=settings.tenant_id,
+        workspace_id=settings.workspace_id,
+        correlation_id=instance.correlation_id,
+        causation_id="command-durable-execution",
+        request_id=instance.request_id,
+        workflow_id=instance.workflow_id,
+        workflow_step_id=instance.workflow_step_id,
+        subject="execution-durable-late",
+        payload={"value_reference": "must-not-replace-cancelled"},
+        metadata=EventMetadata(),
+    )
+    await recovered.workflow_engine.consume(late_success)
+    replayed_cancel = replace(
+        cancel,
+        command_id="command-durable-cancelled-replay",
+        causation_id="request-durable-cancelled-replay",
+        metadata=CommandMetadata(
+            request_id=instance.request_id,
+            idempotency_key="durable-cancelled-replay",
+            authorization=recovered.authorization,
+        ),
+    )
+    assert await recovered.run_workflow_command(replayed_cancel) == cancelled
+
+    durable = recovered.workflow_repository.instances[instance.workflow_id]
+    assert durable.state is WorkflowState.CANCELLED
+    assert durable.outcome == cancelled
+    assert late_success.event_id in durable.processed_event_ids
+    async with database.transaction() as session:
+        terminal_results = tuple(
+            await session.scalars(
+                select(OutcomeRow).where(
+                    OutcomeRow.owner_component == "Workflow Engine",
+                    OutcomeRow.subject_id == instance.workflow_id,
+                    OutcomeRow.terminal.is_(True),
+                )
+            )
+        )
+        terminal_events = tuple(
+            await session.scalars(
+                select(OutboxEventRow).where(
+                    OutboxEventRow.tenant_id == instance.tenant_id,
+                    OutboxEventRow.workspace_id == instance.workspace_id,
+                    OutboxEventRow.event_type.in_(("WorkflowCompleted", "WorkflowFailed")),
+                )
+            )
+        )
+    assert [result.outcome_id for result in terminal_results] == [cancelled.result_id]
+    assert not terminal_events
+    await restarted.close()

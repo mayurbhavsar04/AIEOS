@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
 
-from aieos.ai_gateway import AIGateway
+from aieos.ai_gateway import AIGateway, WorkflowAdmissionAuthority
 from aieos.capability_registry import CapabilityRegistry
 from aieos.contracts import (
     DataClassification,
@@ -33,6 +34,58 @@ from aieos.result_error_support import OutcomeFactory
 from aieos.security_support import AuthorizationFailure, ScopeAuthorizer
 from aieos.skill_registry import SkillRegistry
 from aieos.skill_runtime.ports import Skill, SkillInput, SkillOutput, SkillServices
+
+_WORKFLOW_AMOUNT = re.compile(r"^(?:0\.[0-9]{0,5}[1-9]|[1-9][0-9]*(?:\.[0-9]{0,5}[1-9])?)$")
+
+
+def _validate_workflow_admission_binding(
+    value: Mapping[str, object],
+    *,
+    workflow_id: str,
+    workflow_step_id: str,
+    command_id: str,
+    execution_id: str,
+    tenant_id: str,
+    workspace_id: str,
+    skill_version_id: str,
+    capability_id: str,
+    capability_contract_version_id: str,
+    policy_id: str,
+    policy_version_id: str,
+    workflow_definition_version_id: str,
+    gateway_idempotency_key: str,
+) -> None:
+    raw_committed = value.get("CommittedExposure")
+    if not isinstance(raw_committed, Mapping):
+        raise ValueError("workflow AI admission binding mismatch")
+    committed = cast(Mapping[str, object], raw_committed)
+    amount = committed.get("Amount")
+    if (
+        value.get("BindingContractVersion") != 1
+        or value.get("WorkflowId") != workflow_id
+        or value.get("WorkflowStepId") != workflow_step_id
+        or value.get("CommandId") != command_id
+        or value.get("ExecutionId") != execution_id
+        or value.get("TenantId") != tenant_id
+        or value.get("WorkspaceId") != workspace_id
+        or value.get("PolicyId") != policy_id
+        or value.get("PolicyVersionId") != policy_version_id
+        or value.get("WorkflowDefinitionVersionId") != workflow_definition_version_id
+        or value.get("GatewayIdempotencyKey") != gateway_idempotency_key
+        or not isinstance(value.get("WorkflowAdmissionStateVersion"), int)
+        or cast(int, value.get("WorkflowAdmissionStateVersion")) < 1
+        or value.get("CapabilityBinding")
+        != {
+            "SkillVersionId": skill_version_id,
+            "CapabilityId": capability_id,
+            "CapabilityContractVersionId": capability_contract_version_id,
+        }
+        or set(committed) != {"Amount", "CurrencyOrReferenceUnit"}
+        or committed.get("CurrencyOrReferenceUnit") != "USD"
+        or not isinstance(amount, str)
+        or _WORKFLOW_AMOUNT.fullmatch(amount) is None
+    ):
+        raise ValueError("workflow AI admission binding mismatch")
 
 
 class ExecutionState(StrEnum):
@@ -153,6 +206,7 @@ class SkillDependencyFailure(RuntimeError):
         retry: RetryClassification = RetryClassification.REQUIRES_POLICY_EVALUATION,
         error_code: str = "SKILL_DEPENDENCY_FAILURE",
         ai_invocation_id: str | None = None,
+        pre_acceptance_rejection: bool = False,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -160,6 +214,7 @@ class SkillDependencyFailure(RuntimeError):
         self.retry = retry
         self.error_code = error_code
         self.ai_invocation_id = ai_invocation_id
+        self.pre_acceptance_rejection = pre_acceptance_rejection
 
     @classmethod
     def from_gateway(cls, response: object) -> SkillDependencyFailure:
@@ -197,6 +252,7 @@ class SkillRuntime:
         clock: Clock,
         identifiers: IdentifierFactory,
         observations: ObservationRecorder,
+        workflow_admission_authority: WorkflowAdmissionAuthority | None = None,
         default_timeout_seconds: float = 1.0,
     ) -> None:
         self._repository = repository
@@ -210,6 +266,7 @@ class SkillRuntime:
         self._clock = clock
         self._identifiers = identifiers
         self._observations = observations
+        self._workflow_admission_authority = workflow_admission_authority
         self._default_timeout_seconds = default_timeout_seconds
 
     async def handle(self, command: CommandEnvelope) -> ResultEnvelope:
@@ -222,7 +279,7 @@ class SkillRuntime:
         if command.target_component != self.component_name:
             raise ValueError("Command target does not match Skill Runtime")
         if command.command_type != "DispatchExecutionAttempt" or command.execution_id is None:
-            return self._reject(command, "SKILL_COMMAND_INVALID", "invalid execution Command")
+            return await self._reject(command, "SKILL_COMMAND_INVALID", "invalid execution Command")
         try:
             self._authorizer.require(
                 command.metadata.authorization,
@@ -231,7 +288,7 @@ class SkillRuntime:
                 workspace_id=command.workspace_id,
             )
         except AuthorizationFailure:
-            return self._reject(
+            return await self._reject(
                 command,
                 "SKILL_EXECUTION_UNAUTHORIZED",
                 "execution is unauthorized",
@@ -241,7 +298,15 @@ class SkillRuntime:
             or command.workflow_step_id is None
             or command.metadata.attempt_number is None
         ):
-            return self._reject(command, "SKILL_CONTEXT_INVALID", "execution context is incomplete")
+            return await self._reject(
+                command, "SKILL_CONTEXT_INVALID", "execution context is incomplete"
+            )
+        if command.command_version not in {"1", "1.0", "2", "2.0"}:
+            return await self._reject(
+                command,
+                "SKILL_COMMAND_VERSION_UNSUPPORTED",
+                "unknown execution command version cannot use a legacy compatibility path",
+            )
 
         skill_version_id = (
             command.metadata.skill_version_id
@@ -249,21 +314,75 @@ class SkillRuntime:
             else self._payload_string(command.payload, "skill_version_id")
         )
         if not skill_version_id:
-            return self._reject(command, "SKILL_CONTEXT_INVALID", "SkillVersionId is required")
-        definition = self._skills.resolve(skill_version_id)
-        capability = self._capabilities.resolve(
-            definition.capability_id, definition.capability_contract_version_id
-        )
+            return await self._reject(
+                command, "SKILL_CONTEXT_INVALID", "SkillVersionId is required"
+            )
+        try:
+            definition = self._skills.resolve(skill_version_id)
+            capability = self._capabilities.resolve(
+                definition.capability_id, definition.capability_contract_version_id
+            )
+        except LookupError:
+            return await self._reject(
+                command,
+                "SKILL_OR_CAPABILITY_UNAVAILABLE",
+                "Skill or Capability immutable identity is unavailable",
+            )
         if capability.implementation_reference != definition.implementation_reference:
-            return self._reject(
+            return await self._reject(
                 command,
                 "CAPABILITY_IMPLEMENTATION_MISMATCH",
                 "Skill and Capability resolution evidence disagree",
             )
+        ai_capable_route = (
+            capability.boundary == "AI Gateway"
+            and capability.capability_id == "StructuredTaskKindClassification"
+        )
+        workflow_owned = False
+        if self._workflow_admission_authority is not None:
+            workflow_owned = await self._workflow_admission_authority.owns_ai_dispatch(
+                workflow_id=command.workflow_id,
+                command_id=command.command_id,
+                execution_id=command.execution_id,
+            )
+        # The approved capability identity, not caller-selected command version,
+        # activates the governed admission boundary for Workflow-owned dispatch.
+        if ai_capable_route and workflow_owned and command.metadata.authoritative_result_id is None:
+            binding = command.metadata.workflow_ai_budget_admission
+            if binding is None:
+                return await self._reject(
+                    command,
+                    "WORKFLOW_AI_ADMISSION_REQUIRED",
+                    "governed AI execution requires committed admission",
+                )
+            try:
+                _validate_workflow_admission_binding(
+                    binding,
+                    workflow_id=command.workflow_id,
+                    workflow_step_id=command.workflow_step_id,
+                    command_id=command.command_id,
+                    execution_id=command.execution_id,
+                    tenant_id=command.tenant_id,
+                    workspace_id=command.workspace_id,
+                    skill_version_id=definition.skill_version_id,
+                    capability_id=definition.capability_id,
+                    capability_contract_version_id=definition.capability_contract_version_id,
+                    policy_id=command.metadata.authorization.policy_id,
+                    policy_version_id=command.metadata.authorization.policy_version_id,
+                    workflow_definition_version_id="classify-and-route-task-v1",
+                    gateway_idempotency_key=f"{command.workflow_id}:{command.workflow_step_id}:"
+                    f"{command.command_id}:{command.execution_id}",
+                )
+            except ValueError:
+                return await self._reject(
+                    command,
+                    "WORKFLOW_AI_ADMISSION_INVALID",
+                    "governed AI admission binding mismatch",
+                )
         try:
             implementation = self._skill_implementations[definition.implementation_reference]
         except KeyError:
-            return self._reject(
+            return await self._reject(
                 command, "SKILL_IMPLEMENTATION_MISSING", "approved Skill implementation unavailable"
             )
         binding_validator = getattr(implementation, "validate_registry_binding", None)
@@ -271,7 +390,7 @@ class SkillRuntime:
             try:
                 binding_validator(capability)
             except (LookupError, ValueError):
-                return self._reject(
+                return await self._reject(
                     command,
                     "CAPABILITY_PACKAGE_BINDING_MISMATCH",
                     "Capability Registry and immutable package/schema evidence disagree",
@@ -330,24 +449,29 @@ class SkillRuntime:
                 if key not in {"skill_version_id", "timeout_seconds"}
             },
             authoritative_result_id=command.metadata.authoritative_result_id,
+            workflow_ai_budget_admission=command.metadata.workflow_ai_budget_admission,
+            workflow_id=command.workflow_id,
+            workflow_step_id=command.workflow_step_id,
+            skill_version_id=definition.skill_version_id,
         )
         reused_result_id: str | None = None
+        pre_acceptance_rejection = False
         try:
-            if skill_input.authoritative_result_id is not None:
-                self._authorizer.require(
-                    command.metadata.authorization,
-                    permission="result.read",
-                    tenant_id=command.tenant_id,
-                    workspace_id=command.workspace_id,
-                )
-                # A reusable Result never grants execution authority.  The
-                # target capability has a separate invocation authorization.
+            if command.command_version in {"2", "2.0"}:
                 self._authorizer.require(
                     command.metadata.authorization,
                     permission="ai.invoke",
                     tenant_id=command.tenant_id,
                     workspace_id=command.workspace_id,
                 )
+                if skill_input.authoritative_result_id is not None:
+                    self._authorizer.require(
+                        command.metadata.authorization,
+                        permission="result.read",
+                        tenant_id=command.tenant_id,
+                        workspace_id=command.workspace_id,
+                    )
+            if skill_input.authoritative_result_id is not None:
                 statement = self._payload_string(skill_input.payload, "statement").strip()
                 source = self._repository.resolve_authoritative_result(
                     skill_input.authoritative_result_id,
@@ -373,6 +497,35 @@ class SkillRuntime:
                 output = await asyncio.wait_for(
                     implementation.execute(skill_input, self._services), timeout=timeout
                 )
+        except (AuthorizationFailure, LookupError, PermissionError, ValueError):
+            terminal, error = self._outcomes.unsuccessful(
+                # Keep the existing Skill Runtime disposition for failures raised
+                # by the implementation path.  The pre-acceptance marker lets an
+                # owning Workflow terminalize it as a rejection without changing
+                # direct-dispatch compatibility semantics.
+                status=ResultStatus.FAILED,
+                subject=command.execution_id,
+                producer=self.component_name,
+                tenant_id=command.tenant_id,
+                workspace_id=command.workspace_id,
+                correlation_id=command.correlation_id,
+                causation_id=command.command_id,
+                command_id=command.command_id,
+                error_code="EXECUTION_ATTEMPT_FAILED",
+                category=ErrorCategory.EXECUTION_FAILURE,
+                severity=ErrorSeverity.ERROR,
+                retry=RetryClassification.NEVER_RETRY,
+                message="The execution attempt failed.",
+                metadata={
+                    "ai_invocation_id_status": "not_created",
+                    "capability_id": definition.capability_id,
+                    "capability_contract_version_id": definition.capability_contract_version_id,
+                },
+                predecessor_result_id=acknowledgement.result_id,
+            )
+            record.state = ExecutionState.FAILED
+            event_type = "ExecutionAttemptFailed"
+            pre_acceptance_rejection = True
         except TimeoutError:
             terminal, error = self._outcomes.unsuccessful(
                 status=ResultStatus.TIMED_OUT,
@@ -435,6 +588,9 @@ class SkillRuntime:
             else:
                 record.state = ExecutionState.FAILED
                 event_type = "ExecutionAttemptFailed"
+            pre_acceptance_rejection = failure.pre_acceptance_rejection or (
+                failure.status is ResultStatus.REJECTED and failure.ai_invocation_id is None
+            )
         except Exception:
             terminal, error = self._outcomes.unsuccessful(
                 status=ResultStatus.FAILED,
@@ -462,6 +618,12 @@ class SkillRuntime:
         else:
             is_authoritative_bypass = reused_result_id is not None
             terminal_metadata: dict[str, object] = {
+                "workflow_id": command.workflow_id,
+                "workflow_step_id": command.workflow_step_id,
+                "command_id": command.command_id,
+                "execution_id": command.execution_id,
+                "tenant_id": command.tenant_id,
+                "workspace_id": command.workspace_id,
                 "memory_id": output.memory_id,
                 "capability_id": definition.capability_id,
                 "capability_contract_version_id": definition.capability_contract_version_id,
@@ -500,6 +662,13 @@ class SkillRuntime:
                 )
             else:
                 terminal_metadata["ai_invocation_id"] = output.ai_invocation_id
+                terminal_metadata["gateway_result_id"] = output.gateway_result_id or "not_exposed"
+                terminal_metadata["accounting_evidence"] = output.accounting_evidence or {
+                    "settled_actual_spend_status": "not_exposed",
+                    "provider_attempt_details": "not_exposed",
+                    "fallback_details": "not_exposed",
+                    "repair_details": "not_exposed",
+                }
             terminal = self._outcomes.succeeded(
                 subject=command.execution_id,
                 producer=self.component_name,
@@ -517,12 +686,18 @@ class SkillRuntime:
             event_type = "ExecutionAttemptSucceeded"
         record.result = terminal
         record.error = error
-        record.terminal_event = self._event_envelope(command, event_type, terminal, error)
+        record.terminal_event = self._event_envelope(
+            command,
+            event_type,
+            terminal,
+            error,
+            pre_acceptance_rejection=pre_acceptance_rejection,
+        )
         await self._publish(record.terminal_event)
         self._observe(command, terminal)
         return self._repository.complete_command(command.command_id)
 
-    def _reject(self, command: CommandEnvelope, code: str, message: str) -> ResultEnvelope:
+    async def _reject(self, command: CommandEnvelope, code: str, message: str) -> ResultEnvelope:
         result, error = self._outcomes.unsuccessful(
             status=ResultStatus.REJECTED,
             subject=command.execution_id or command.command_id,
@@ -539,8 +714,53 @@ class SkillRuntime:
             message=message,
         )
         self._repository.remember_completed_command(command, result, error)
+        if await self._is_engine_owned_dispatch(command):
+            assert command.execution_id is not None
+            assert command.workflow_id is not None
+            assert command.workflow_step_id is not None
+            assert command.metadata.attempt_number is not None
+            record = self._repository.records.get(command.execution_id)
+            if record is None:
+                record = ExecutionRecord(
+                    execution_id=command.execution_id,
+                    workflow_id=command.workflow_id,
+                    workflow_step_id=command.workflow_step_id,
+                    attempt_number=command.metadata.attempt_number,
+                    tenant_id=command.tenant_id,
+                    workspace_id=command.workspace_id,
+                    state=ExecutionState.FAILED,
+                    acknowledgement=result,
+                    result=result,
+                    error=error,
+                )
+                self._repository.add(record)
+            if record.terminal_event is None:
+                record.terminal_event = self._event_envelope(
+                    command,
+                    "ExecutionAttemptFailed",
+                    result,
+                    error,
+                    pre_acceptance_rejection=True,
+                )
+                await self._publish(record.terminal_event)
         self._observe(command, result)
         return result
+
+    async def _is_engine_owned_dispatch(self, command: CommandEnvelope) -> bool:
+        authority = self._workflow_admission_authority
+        if (
+            authority is None
+            or command.workflow_id is None
+            or command.execution_id is None
+            or command.workflow_step_id is None
+            or command.metadata.attempt_number is None
+        ):
+            return False
+        return await authority.owns_ai_dispatch(
+            workflow_id=command.workflow_id,
+            command_id=command.command_id,
+            execution_id=command.execution_id,
+        )
 
     def _event_envelope(
         self,
@@ -548,6 +768,8 @@ class SkillRuntime:
         event_type: str,
         result: ResultEnvelope,
         error: ErrorEnvelope | None = None,
+        *,
+        pre_acceptance_rejection: bool = False,
     ) -> EventEnvelope:
         now = self._clock.now()
         return EventEnvelope(
@@ -570,6 +792,8 @@ class SkillRuntime:
                 "result_id": result.result_id,
                 "result_status": result.result_status.value,
                 "error_id": error.error_id if error else None,
+                "error_code": error.error_code if error else None,
+                "pre_acceptance_rejection": pre_acceptance_rejection,
                 "retry_classification": (
                     error.retry_classification.value
                     if error
@@ -577,6 +801,29 @@ class SkillRuntime:
                 ),
                 "attempt_number": command.metadata.attempt_number,
                 "value_reference": result.value_reference,
+                "audit_lineage": {
+                    key: value
+                    for key, value in result.metadata.items()
+                    if key
+                    in {
+                        "workflow_id",
+                        "workflow_step_id",
+                        "command_id",
+                        "execution_id",
+                        "tenant_id",
+                        "workspace_id",
+                        "capability_id",
+                        "capability_contract_version_id",
+                        "ai_invocation_id",
+                        "gateway_result_id",
+                        "reuse_lineage",
+                        "reused_result_id",
+                        "ai_invocation_id_status",
+                        "execution_disposition",
+                        "avoided_model_calls",
+                        "accounting_evidence",
+                    }
+                },
             },
             metadata=EventMetadata(
                 trace_id=command.metadata.trace_id, span_id=command.metadata.span_id

@@ -8,14 +8,14 @@ identity and lineage columns used for constraints and operational queries.
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Protocol, cast
 
 from pydantic import TypeAdapter
-from sqlalchemy import select
+from sqlalchemy import and_, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -100,6 +100,18 @@ def scoped_idempotency_lock_key(command: CommandEnvelope) -> str:
             command.metadata.idempotency_key,
         )
     )
+
+
+def scoped_workflow_lock_key(command: CommandEnvelope) -> str | None:
+    """Return the governed exact-Workflow serialization key when one exists."""
+    if command.workflow_id is None:
+        return None
+    return workflow_lock_key(command.tenant_id, command.workspace_id, command.workflow_id)
+
+
+def workflow_lock_key(tenant_id: str, workspace_id: str, workflow_id: str) -> str:
+    """Return the shared exact-Workflow mutation serialization authority."""
+    return "\x1f".join(("WorkflowAdmission", tenant_id, workspace_id, workflow_id))
 
 
 async def _immutable_outcome(
@@ -193,7 +205,10 @@ async def _idempotency(
             "outcome_id": outcome_id,
             "payload": payload,
         },
-        where=CommandIdempotencyRow.command_hash == command_hash,
+        where=and_(
+            CommandIdempotencyRow.command_hash == command_hash,
+            or_(CommandIdempotencyRow.completed.is_(False), literal(completed)),
+        ),
     )
     await session.execute(statement)
     stored = await session.get(
@@ -249,19 +264,26 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
             tenant_id=tenant_id,
             workspace_id=workspace_id,
         )
+        self._workflow_versions: dict[str, int] = {}
+        self._workflow_baseline: dict[str, bytes] = {}
+        self._receipt_baseline: dict[str, bytes] = {}
+        self._flushed_workflows: dict[str, tuple[int, bytes]] = {}
+        self._flushed_receipts: dict[str, bytes] = {}
 
     async def _load(self) -> None:
         async with self._database.transaction() as session:
-            for payload in await session.scalars(
-                select(WorkflowRow.payload).where(
+            for row in await session.scalars(
+                select(WorkflowRow).where(
                     WorkflowRow.tenant_id == self._tenant_id,
                     WorkflowRow.workspace_id == self._workspace_id,
                 )
             ):
-                instance = _WORKFLOW.validate_json(payload)
+                instance = _WORKFLOW.validate_json(row.payload)
                 if instance.outcome is not None:
                     instance.outcome = _normalize_result(instance.outcome)
-                self.instances.setdefault(instance.workflow_id, instance)
+                self.instances[instance.workflow_id] = instance
+                self._workflow_versions[instance.workflow_id] = row.version
+                self._workflow_baseline[instance.workflow_id] = _WORKFLOW.dump_json(instance)
             receipts = await session.scalars(
                 select(CommandIdempotencyRow.payload).where(
                     CommandIdempotencyRow.tenant_id == self._tenant_id,
@@ -272,18 +294,110 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
             for payload in receipts:
                 receipt = _WORKFLOW_RECEIPT.validate_json(payload)
                 receipt.result = _normalize_result(receipt.result)
-                self.command_receipts.setdefault(receipt.command.command_id, receipt)
+                self.command_receipts[receipt.command.command_id] = receipt
+                self._receipt_baseline[receipt.command.command_id] = _WORKFLOW_RECEIPT.dump_json(
+                    receipt
+                )
+
+    async def refresh_workflow(self, workflow_id: str) -> WorkflowInstance | None:
+        """Replace a warmed worker's cached Workflow with durable authority."""
+        async with self._database.transaction() as session:
+            row = await session.get(
+                WorkflowRow,
+                (self._tenant_id, self._workspace_id, workflow_id),
+            )
+        if row is None:
+            self.instances.pop(workflow_id, None)
+            return None
+        instance = _WORKFLOW.validate_json(row.payload)
+        if instance.outcome is not None:
+            instance.outcome = _normalize_result(instance.outcome)
+        self.instances[workflow_id] = instance
+        self._workflow_versions[workflow_id] = row.version
+        self._workflow_baseline[workflow_id] = _WORKFLOW.dump_json(instance)
+        return instance
+
+    async def replay_command(
+        self, command: CommandEnvelope
+    ) -> tuple[CommandEnvelope, ResultEnvelope | None] | None:
+        """Resolve authoritative scoped replay before creating a WorkflowId."""
+        async with self._database.transaction() as session:
+            row = await session.get(
+                CommandIdempotencyRow,
+                (
+                    command.tenant_id,
+                    command.workspace_id,
+                    "Workflow Engine",
+                    command.metadata.idempotency_key,
+                ),
+                with_for_update=True,
+            )
+            if row is None:
+                return None
+            if row.command_hash != command_intent_hash(command):
+                raise ValueError("IdempotencyKey cannot be reused with changed immutable intent")
+            receipt = _WORKFLOW_RECEIPT.validate_json(row.payload)
+            completed = row.completed
+        receipt.result = _normalize_result(receipt.result)
+        await self.refresh_workflow(receipt.workflow_id)
+        self.command_receipts[receipt.command.command_id] = receipt
+        return receipt.command, receipt.result if completed else None
+
+    async def authoritative_ai_admission(
+        self,
+        *,
+        workflow_id: str,
+        command_id: str,
+        execution_id: str,
+    ) -> Mapping[str, object] | None:
+        """Resolve fresh committed Workflow authority from PostgreSQL."""
+        if await self.refresh_workflow(workflow_id) is None:
+            return None
+        return await super().authoritative_ai_admission(
+            workflow_id=workflow_id,
+            command_id=command_id,
+            execution_id=execution_id,
+        )
+
+    async def owns_ai_dispatch(
+        self,
+        *,
+        workflow_id: str | None,
+        command_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Consult Engine context or durable admission ownership, never parentage."""
+        if self._dispatch_context.get() is not None:
+            return True
+        if workflow_id is None:
+            return False
+        async with self._database.transaction() as session:
+            row = await session.get(
+                WorkflowRow,
+                (self._tenant_id, self._workspace_id, workflow_id),
+            )
+        if row is None:
+            return False
+        instance = _WORKFLOW.validate_json(row.payload)
+        return command_id in (instance.ai_admissions or {}) or command_id in (
+            instance.ai_admission_states or {}
+        )
 
     async def flush_in_transaction(self, session: AsyncSession) -> None:
         for instance in self.instances.values():
-            await session.execute(
+            encoded = _WORKFLOW.dump_json(instance)
+            if self._workflow_baseline.get(instance.workflow_id) == encoded:
+                continue
+            expected_version = self._workflow_versions.get(instance.workflow_id, 0)
+            next_version = expected_version + 1
+            result = await session.execute(
                 insert(WorkflowRow)
                 .values(
                     tenant_id=instance.tenant_id,
                     workspace_id=instance.workspace_id,
                     workflow_id=instance.workflow_id,
                     state=instance.state.value,
-                    version=1,
+                    version=next_version,
                     correlation_id=instance.correlation_id,
                     payload=_WORKFLOW.dump_json(instance),
                 )
@@ -291,10 +405,15 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
                     index_elements=["tenant_id", "workspace_id", "workflow_id"],
                     set_={
                         "state": instance.state.value,
-                        "payload": _WORKFLOW.dump_json(instance),
+                        "version": next_version,
+                        "payload": encoded,
                     },
+                    where=WorkflowRow.version == expected_version,
                 )
+                .returning(WorkflowRow.version)
             )
+            if result.scalar_one_or_none() != next_version:
+                raise RuntimeError("stale Workflow snapshot rejected by durable version fence")
             await session.execute(
                 insert(WorkflowStepRow)
                 .values(
@@ -304,14 +423,14 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
                     workflow_id=instance.workflow_id,
                     state=instance.state.value,
                     attempt_number=instance.attempt_number,
-                    payload=_WORKFLOW.dump_json(instance),
+                    payload=encoded,
                 )
                 .on_conflict_do_update(
                     index_elements=["tenant_id", "workspace_id", "workflow_step_id"],
                     set_={
                         "state": instance.state.value,
                         "attempt_number": instance.attempt_number,
-                        "payload": _WORKFLOW.dump_json(instance),
+                        "payload": encoded,
                     },
                 )
             )
@@ -319,18 +438,31 @@ class PostgresWorkflowRepository(_Prepared, InMemoryWorkflowRepository):
                 await _immutable_outcome(session, instance.outcome, owner="Workflow Engine")
             if instance.error is not None:
                 await _immutable_error(session, instance.error, owner="Workflow Engine")
+            self._flushed_workflows[instance.workflow_id] = (next_version, encoded)
         for receipt in self.command_receipts.values():
+            encoded_receipt = _WORKFLOW_RECEIPT.dump_json(receipt)
+            if self._receipt_baseline.get(receipt.command.command_id) == encoded_receipt:
+                continue
             await _idempotency(
                 session,
                 target="Workflow Engine",
                 command=receipt.command,
                 completed=receipt.state.value == "Completed",
                 outcome_id=receipt.result.result_id,
-                payload=_WORKFLOW_RECEIPT.dump_json(receipt),
+                payload=encoded_receipt,
             )
             await _immutable_outcome(session, receipt.result, owner="Workflow Engine")
             if receipt.error is not None:
                 await _immutable_error(session, receipt.error, owner="Workflow Engine")
+            self._flushed_receipts[receipt.command.command_id] = encoded_receipt
+
+    def checkpoint_completed(self) -> None:
+        for workflow_id, (version, payload) in self._flushed_workflows.items():
+            self._workflow_versions[workflow_id] = version
+            self._workflow_baseline[workflow_id] = payload
+        self._receipt_baseline.update(self._flushed_receipts)
+        self._flushed_workflows.clear()
+        self._flushed_receipts.clear()
 
     def interrupted(self) -> tuple[WorkflowInstance, ...]:
         return tuple(item for item in self.instances.values() if item.outcome is None)
@@ -602,6 +734,10 @@ async def checkpoint(
     async with database.transaction() as session:
         for participant in participants:
             await participant.flush_in_transaction(session)
+    for participant in participants:
+        completed = getattr(participant, "checkpoint_completed", None)
+        if callable(completed):
+            completed()
 
 
 PrepareCallback = Callable[[], Awaitable[None]]

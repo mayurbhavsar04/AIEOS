@@ -1,5 +1,6 @@
 """Explicit composition root for the executable AIEOS reference workflow."""
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -21,11 +22,14 @@ from aieos.adapters.persistence_postgres import (
     PostgresMemoryRepository,
     PostgresOutboxRelay,
     PostgresOutboxStore,
+    PostgresProviderEffectBoundary,
     PostgresRequestRepository,
     PostgresWorkflowRepository,
     TransactionParticipant,
     checkpoint,
     scoped_idempotency_lock_key,
+    scoped_workflow_lock_key,
+    workflow_lock_key,
 )
 from aieos.ai_gateway import (
     AIGateway,
@@ -39,6 +43,7 @@ from aieos.ai_gateway import (
 from aieos.capability_registry import CapabilityImplementation, CapabilityRegistry
 from aieos.contracts import AuthorizationContext, DataClassification, ResultEnvelope
 from aieos.contracts.commands import CommandEnvelope, CommandMetadata
+from aieos.contracts.events import EventEnvelope
 from aieos.domain import (
     Clock,
     DecisionEvidence,
@@ -156,6 +161,53 @@ class CapabilityGatewayRouter:
         return await gateway.invoke(request)
 
 
+class DurableWorkflowEventConsumer:
+    """Serialize and checkpoint event-driven mutations for one exact Workflow."""
+
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        repository: PostgresWorkflowRepository,
+        workflow_engine: WorkflowEngine,
+        participants: tuple[TransactionParticipant, ...],
+    ) -> None:
+        self._database = database
+        self._repository = repository
+        self._workflow_engine = workflow_engine
+        self._participants = participants
+        self._held_workflow_locks: ContextVar[frozenset[str]] = ContextVar(
+            "held_workflow_locks", default=frozenset()
+        )
+
+    async def consume(self, event: EventEnvelope) -> None:
+        if event.workflow_id is None or event.tenant_id is None or event.workspace_id is None:
+            raise ValueError("durable Workflow Event requires exact scoped WorkflowId")
+        # A pre-AI rejection can be raised after a child dispatch identity is
+        # mutated.  Lock and load the Engine's immutable dispatched Workflow,
+        # never the caller-controlled value carried by that rejected Event.
+        workflow_id = self._workflow_engine.pre_acceptance_rejection_workflow_id(event)
+        authoritative_workflow_id = workflow_id or event.workflow_id
+        lock_key = workflow_lock_key(
+            event.tenant_id,
+            event.workspace_id,
+            authoritative_workflow_id,
+        )
+        held = self._held_workflow_locks.get()
+        if lock_key in held:
+            await self._workflow_engine.consume(event)
+            await checkpoint(self._database, self._participants)
+            return
+        async with self._database.command_lock(lock_key):
+            token = self._held_workflow_locks.set(held | {lock_key})
+            try:
+                if await self._repository.refresh_workflow(authoritative_workflow_id) is None:
+                    raise KeyError(f"Workflow does not exist: {authoritative_workflow_id}")
+                await self._workflow_engine.consume(event)
+                await checkpoint(self._database, self._participants)
+            finally:
+                self._held_workflow_locks.reset(token)
+
+
 @dataclass(slots=True)
 class ReferenceRuntime:
     """Composition-owned facade for HelloAIEOSWorkflow."""
@@ -178,6 +230,7 @@ class ReferenceRuntime:
     clock: Clock
     identifiers: IdentifierFactory
     authorization: AuthorizationContext
+    authorizer: ScopeAuthorizer
     decisions: InMemoryDecisionEvidenceRepository
     durable_participants: tuple[TransactionParticipant, ...] = ()
     database: PostgresDatabase | None = None
@@ -199,6 +252,46 @@ class ReferenceRuntime:
             timeout_seconds=timeout_seconds,
         )
         return await self.run_command(command)
+
+    async def classify_and_route_task(
+        self, statement: str, *, budget_ceiling: str = "0.01", command_id: str | None = None
+    ) -> ResultEnvelope:
+        """Run the sole Phase 6 reference Workflow; routes are terminal values."""
+        request_id = self.identifiers.new("request")
+        command = CommandEnvelope(
+            command_id=command_id or self.identifiers.new("command"),
+            command_type="StartWorkflow",
+            command_version="2.0",
+            correlation_id=self.identifiers.new("correlation"),
+            causation_id=request_id,
+            target_component="Workflow Engine",
+            initiator="Reference Host",
+            timestamp=self.clock.now(),
+            tenant_id=self.settings.tenant_id,
+            workspace_id=self.settings.workspace_id,
+            payload={
+                "workflow_definition_id": "ClassifyAndRouteTask",
+                "workflow_definition_version_id": "classify-and-route-task-v1",
+                "workflow_kind": "ClassifyAndRouteTask",
+                "skill_version_id": "structured-task-kind-skill-v1",
+                "statement": statement,
+                "max_attempts": 1,
+                "workflow_ai_budget_envelope": {
+                    "ContractVersion": 1,
+                    "GatewayNormalizedCostUnitRegistryVersion": 1,
+                    "WorkflowDefinitionVersionId": "classify-and-route-task-v1",
+                    "PolicyId": self.authorization.policy_id,
+                    "PolicyVersionId": self.authorization.policy_version_id,
+                    "TenantId": self.settings.tenant_id,
+                    "WorkspaceId": self.settings.workspace_id,
+                    "BudgetCeiling": {"Amount": budget_ceiling, "CurrencyOrReferenceUnit": "USD"},
+                },
+            },
+            metadata=CommandMetadata(
+                request_id=request_id, idempotency_key=request_id, authorization=self.authorization
+            ),
+        )
+        return await self.run_workflow_command(command)
 
     def build_request_command(
         self,
@@ -289,12 +382,28 @@ class ReferenceRuntime:
             raise ValueError("workflow command must target Workflow Engine")
         if self.database is not None:
             async with self.database.command_lock(scoped_idempotency_lock_key(command)):
-                for participant in self.durable_participants:
-                    await participant.prepare()
-                result = await self.dispatcher.dispatch(command)
-                await checkpoint(self.database, self.durable_participants)
-                return result
+                workflow_lock = scoped_workflow_lock_key(command)
+                if workflow_lock is not None:
+                    async with self.database.command_lock(workflow_lock):
+                        return await self._run_workflow_prepared(command)
+                return await self._run_workflow_prepared(command)
         return await self.dispatcher.dispatch(command)
+
+    async def _run_workflow_prepared(self, command: CommandEnvelope) -> ResultEnvelope:
+        for participant in self.durable_participants:
+            await participant.prepare()
+        repository = self.workflow_repository
+        assert isinstance(repository, PostgresWorkflowRepository)
+        replay = await repository.replay_command(command)
+        if replay is not None:
+            stored_command, completed_result = replay
+            if completed_result is not None:
+                return completed_result
+            command = stored_command
+        result = await self.dispatcher.dispatch(command)
+        assert self.database is not None
+        await checkpoint(self.database, self.durable_participants)
+        return result
 
     async def _run_prepared(self, command: CommandEnvelope) -> ResultEnvelope:
         for participant in self.durable_participants:
@@ -318,7 +427,6 @@ def compose(
     resolved_clock = clock or SystemClock()
     resolved_identifiers = identifiers or UuidIdentifierFactory()
     outcomes = OutcomeFactory(resolved_clock, resolved_identifiers)
-    authorizer = ScopeAuthorizer()
     authorization = AuthorizationContext(
         actor_id="reference-user",
         permissions=frozenset(
@@ -337,6 +445,16 @@ def compose(
         workspace_id=resolved.workspace_id,
         policy_id="reference-policy",
         policy_version_id="reference-policy-v1",
+    )
+    authorizer = ScopeAuthorizer(
+        active_policy_versions={
+            (
+                resolved.tenant_id,
+                resolved.workspace_id,
+                authorization.policy_id,
+                authorization.policy_version_id,
+            )
+        }
     )
     observations = InMemoryObservationRecorder(resolved_identifiers)
     dispatcher = InProcessCommandDispatcher()
@@ -413,6 +531,14 @@ def compose(
         delay_seconds=resolved.mock_ai_delay_seconds,
     )
     prompt_packages = PromptPackageCatalog((STRUCTURED_TASK_KIND_PACKAGE,))
+    reference_ai_adapters = {
+        "mock-economy": DeterministicMockProvider("mock-economy", prefix="Economy"),
+        "mock-quality": DeterministicMockProvider("mock-quality", prefix="Quality"),
+    }
+    if database is not None:
+        provider_effect_boundary = PostgresProviderEffectBoundary(database)
+        for adapter in reference_ai_adapters.values():
+            adapter.use_effect_boundary(provider_effect_boundary)
     reference_ai_gateway = ReferenceAIGateway(
         clock=resolved_clock,
         identifiers=resolved_identifiers,
@@ -445,11 +571,9 @@ def compose(
                 pricing_version="reference-2026-08",
             ),
         ),
-        adapters={
-            "mock-economy": DeterministicMockProvider("mock-economy", prefix="Economy"),
-            "mock-quality": DeterministicMockProvider("mock-quality", prefix="Quality"),
-        },
+        adapters=reference_ai_adapters,
         prompt_packages=prompt_packages,
+        workflow_admission_authority=workflow_repository,
     )
     routed_ai_gateway = CapabilityGatewayRouter(ai_gateway, reference_ai_gateway)
     capabilities = CapabilityRegistry(
@@ -516,6 +640,7 @@ def compose(
         clock=resolved_clock,
         identifiers=resolved_identifiers,
         observations=observations,
+        workflow_admission_authority=workflow_repository,
         default_timeout_seconds=resolved.reference_timeout_seconds,
     )
     workflow_engine = WorkflowEngine(
@@ -541,12 +666,22 @@ def compose(
     dispatcher.register("Manager", manager)
     dispatcher.register("Workflow Engine", workflow_engine)
     dispatcher.register("Skill Runtime", skill_runtime)
+    if database is not None:
+        assert isinstance(workflow_repository, PostgresWorkflowRepository)
+        workflow_event_consumer = DurableWorkflowEventConsumer(
+            database,
+            workflow_repository,
+            workflow_engine,
+            durable_participants,
+        )
+    else:
+        workflow_event_consumer = workflow_engine
     for event_type in (
         "ExecutionAttemptSucceeded",
         "ExecutionAttemptFailed",
         "ExecutionAttemptTimedOut",
     ):
-        event_bus.subscribe(event_type, "workflow-engine", workflow_engine)
+        event_bus.subscribe(event_type, "workflow-engine", workflow_event_consumer)
     runtime = ReferenceRuntime(
         settings=resolved,
         dispatcher=dispatcher,
@@ -566,6 +701,7 @@ def compose(
         clock=resolved_clock,
         identifiers=resolved_identifiers,
         authorization=authorization,
+        authorizer=authorizer,
         decisions=decisions,
         durable_participants=durable_participants,
         database=database,

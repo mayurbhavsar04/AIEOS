@@ -63,7 +63,7 @@ def command(
         correlation_id="structured-correlation",
         causation_id="workflow-command",
         target_component="Skill Runtime",
-        initiator="Workflow Engine",
+        initiator="Reference Host",
         timestamp=datetime(2026, 8, 13, tzinfo=UTC),
         tenant_id=root.settings.tenant_id,
         workspace_id=root.settings.workspace_id,
@@ -96,6 +96,8 @@ async def test_composed_capability_resolves_schema_and_uses_real_gateway() -> No
     assert record.result is not None and record.result.result_status is ResultStatus.SUCCEEDED
     assert record.result.value_reference == '{"task_kind":"Question"}'
     invocation = next(iter(runtime.reference_ai_gateway.store.invocations.values()))
+    assert invocation.request.idempotency_key == "execution-structured"
+    assert invocation.request.workflow_ai_budget_admission is None
     assert invocation.request.output_schema_ref == "structured-task-kind-schema-v1"
     assert invocation.request.output_schema is STRUCTURED_TASK_KIND_PACKAGE.output_schema
     assert invocation.request.output_schema_identity == STRUCTURED_TASK_KIND_PACKAGE.identity
@@ -122,6 +124,57 @@ async def test_composed_capability_resolves_schema_and_uses_real_gateway() -> No
     assert capability_record.context.ai_invocation_id == invocation.invocation_id
     assert capability_record.attributes["accounting_correlation"] == "ai_invocation_id"
     assert capability_record.attributes["provider_attempt_count_status"] == "canonical_store"
+
+
+@pytest.mark.anyio
+async def test_direct_phase5_route_does_not_trust_initiator_as_workflow_authority() -> None:
+    root = compose()
+    runtime = root.reference_runtime
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    workflow_owned = replace(command(root), initiator="Workflow Engine")
+    result = await runtime.skill_runtime.handle(workflow_owned)
+    assert result.result_status is ResultStatus.ACCEPTED
+    assert runtime.reference_ai_gateway.store.invocations
+    adapter = runtime.reference_ai_gateway._adapters[  # pyright: ignore[reportPrivateUsage]
+        "mock-economy"
+    ]
+    assert isinstance(adapter, DeterministicMockProvider) and adapter.calls == 1
+
+
+@pytest.mark.anyio
+async def test_direct_phase5_v2_route_does_not_infer_workflow_from_version() -> None:
+    root = compose()
+    runtime = root.reference_runtime
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    legacy = command(root)
+    governed = replace(
+        legacy,
+        command_version="2.0",
+        initiator="Workflow Engine",
+        payload={"statement": "What is the status?"},
+        metadata=replace(
+            legacy.metadata,
+            skill_version_id="structured-task-kind-skill-v1",
+        ),
+    )
+
+    result = await runtime.skill_runtime.handle(governed)
+
+    assert result.result_status is ResultStatus.ACCEPTED
+    assert runtime.reference_ai_gateway.store.invocations
+
+
+@pytest.mark.anyio
+async def test_unknown_workflow_dispatch_version_cannot_use_legacy_fallback() -> None:
+    root = compose()
+    runtime = root.reference_runtime
+    runtime.event_bus._consumers.clear()  # pyright: ignore[reportPrivateUsage]
+    unknown = replace(command(root), command_version="3.0")
+
+    result = await runtime.skill_runtime.handle(unknown)
+
+    assert result.result_status is ResultStatus.REJECTED
+    assert not runtime.reference_ai_gateway.store.invocations
 
 
 @pytest.mark.anyio
