@@ -2,6 +2,7 @@
 
 from .ai_gateway import PostgresAIGatewayStore, PostgresProviderEffectBoundary
 from .database import PostgresDatabase
+from .employee import Digest, OperationResult, PostgresEmployeePersistence, Scope, digest
 from .memory import PostgresMemoryRepository
 from .outbox import BufferedPostgresOutbox, PostgresOutboxRelay, PostgresOutboxStore
 from .runtime import (
@@ -20,6 +21,11 @@ __all__ = (
     "BufferedPostgresOutbox",
     "PostgresAIGatewayStore",
     "PostgresDatabase",
+    "PostgresEmployeePersistence",
+    "Digest",
+    "OperationResult",
+    "Scope",
+    "digest",
     "PostgresDecisionEvidenceRepository",
     "PostgresExecutionRepository",
     "PostgresMemoryRepository",
