@@ -95,6 +95,28 @@ class PostgresEmployeePersistence:
     """
     def __init__(self, session: AsyncSession) -> None: self._session = session
 
+    async def open_manager_receipt(self, scope: Scope, target: str, command_id: str,
+                                   idempotency_key: str, execution_id: str,
+                                   complete_command: bytes, fingerprint: str | None) -> OperationResult:
+        row = (await self._session.execute(text("""INSERT INTO employee_manager_receipts
+          (tenant_id,workspace_id,manager_target,manager_command_id,idempotency_key,employee_execution_id,complete_command,command_profile,command_fingerprint,state)
+          VALUES (:t,:w,:m,:c,:k,:e,:x,:p,:f,'DecisionPending') ON CONFLICT DO NOTHING RETURNING complete_command"""),
+          {"t":scope.tenant_id,"w":scope.workspace_id,"m":target,"c":command_id,"k":idempotency_key,"e":execution_id,"x":complete_command,"p":PROFILE,"f":fingerprint})).scalar_one_or_none()
+        if row is not None: return OperationResult("Opened")
+        old = (await self._session.execute(text("""SELECT complete_command FROM employee_manager_receipts WHERE tenant_id=:t AND workspace_id=:w AND manager_target=:m AND manager_command_id=:c"""),{"t":scope.tenant_id,"w":scope.workspace_id,"m":target,"c":command_id})).scalar_one()
+        return OperationResult("Existing" if old == complete_command else "IdentityConflict")
+
+    async def append_observation(self, scope: Scope, kind: str, source_identity: str,
+                                 evidence: bytes, fingerprint: str | None = None) -> OperationResult:
+        created=(await self._session.execute(text("""INSERT INTO employee_observations
+          (tenant_id,workspace_id,observation_kind,source_identity,evidence,fingerprint)
+          VALUES (:t,:w,:k,:i,:e,:f) ON CONFLICT DO NOTHING RETURNING evidence"""),{"t":scope.tenant_id,"w":scope.workspace_id,"k":kind,"i":source_identity,"e":evidence,"f":fingerprint})).scalar_one_or_none()
+        if created is not None: return OperationResult("Appended")
+        old=(await self._session.execute(text("SELECT evidence FROM employee_observations WHERE tenant_id=:t AND workspace_id=:w AND observation_kind=:k AND source_identity=:i"),{"t":scope.tenant_id,"w":scope.workspace_id,"k":kind,"i":source_identity})).scalar_one()
+        if old == evidence: return OperationResult("Existing")
+        await self._session.execute(text("UPDATE employee_observations SET quarantined=true WHERE tenant_id=:t AND workspace_id=:w AND observation_kind=:k AND source_identity=:i"),{"t":scope.tenant_id,"w":scope.workspace_id,"k":kind,"i":source_identity})
+        return OperationResult("QuarantinedConflict")
+
     async def save_start_workflow_command(
         self, scope: Scope, command_id: str, idempotency_key: str, complete_evidence: bytes,
         fingerprint: str | None, replay_path: str = "FrozenM6PostgresWorkflowHost52271c4",
