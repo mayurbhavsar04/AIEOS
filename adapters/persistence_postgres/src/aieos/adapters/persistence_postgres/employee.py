@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 PROFILE = "AIEOS-M7-CD-v1"
+RESPONSE_TAGS = frozenset({"ManagerRejected", "AcceptedCommandPending", "DispatchUnconfirmed", "RejectedNoWorkflow", "TerminalWithWorkflow", "Acknowledged", "TerminalCapturedIdentityUnresolved"})
 
 
 class UnsafeM7CommandValue(ValueError):
@@ -63,6 +64,23 @@ def encode_start_workflow_evidence(metadata: dict[str, object]) -> bytes:
         raise UnsafeM7CommandValue("attempt_number must be None or exact int 1..2147483647")
     remainder = {key: value for key, value in metadata.items() if key != "attempt_number"}
     return b"m" + encoded_attempt + encode_safe_value(remainder)
+
+
+def reconstruct_attempt_number(evidence: bytes) -> int | None:
+    """Recover only the frozen typed field; malformed evidence fails closed."""
+    if not evidence.startswith(b"m"):
+        raise UnsafeM7CommandValue("invalid StartWorkflow evidence")
+    marker = evidence[1:]
+    if marker.startswith(b"n;"):
+        return None
+    if not marker.startswith(b"i") or b";" not in marker:
+        raise UnsafeM7CommandValue("invalid attempt_number evidence")
+    raw = marker[1:marker.index(b";")]
+    try: value = int(raw.decode("ascii"))
+    except ValueError as error: raise UnsafeM7CommandValue("invalid attempt_number evidence") from error
+    if type(value) is not int or not 1 <= value <= 2_147_483_647:
+        raise UnsafeM7CommandValue("invalid attempt_number evidence")
+    return value
 
 @dataclass(frozen=True)
 class Digest:
@@ -154,6 +172,23 @@ class PostgresEmployeePersistence:
           VALUES (:t,:w,:c,:e,:s) ON CONFLICT DO NOTHING RETURNING conflict_id"""),
           {"t":scope.tenant_id,"w":scope.workspace_id,"c":conflict_id,"e":evidence,"s":authoritative_source_identity})).scalar_one_or_none()
         return OperationResult("Resolved" if row is not None else "ExistingResolution")
+
+    async def capture_response(self, scope: Scope, source_identity: str, response_tag: str,
+                               evidence: bytes, workflow_id: str | None = None) -> OperationResult:
+        if response_tag not in RESPONSE_TAGS:
+            raise ValueError("unknown frozen StartWorkflow response tag")
+        requires_workflow = {"Acknowledged", "TerminalWithWorkflow"}
+        forbids_workflow = {"ManagerRejected", "AcceptedCommandPending", "RejectedNoWorkflow", "TerminalCapturedIdentityUnresolved"}
+        if (response_tag in requires_workflow and not workflow_id) or (response_tag in forbids_workflow and workflow_id is not None):
+            raise ValueError("invalid frozen WorkflowId condition")
+        return await self.append_observation(scope, "WorkflowStartResponse", source_identity, evidence)
+
+    async def advance_administrative_head(self, scope: Scope, target_type: str, target_version_id: str,
+                                          expected_revision: int, evidence: bytes, disposition: str) -> OperationResult:
+        row=(await self._session.execute(text("""UPDATE employee_administrative_heads SET revision=revision+1,
+          decision_evidence=:e,disposition=:d WHERE tenant_id=:t AND workspace_id=:w AND target_type=:k
+          AND target_version_id=:v AND revision=:r RETURNING revision"""),{"t":scope.tenant_id,"w":scope.workspace_id,"k":target_type,"v":target_version_id,"r":expected_revision,"e":evidence,"d":disposition})).scalar_one_or_none()
+        return OperationResult("Advanced" if row is not None else "StaleRevision")
 
     async def save_start_workflow_command(
         self, scope: Scope, command_id: str, idempotency_key: str, complete_evidence: bytes,

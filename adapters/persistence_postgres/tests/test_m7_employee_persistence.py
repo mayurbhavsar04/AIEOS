@@ -5,6 +5,7 @@ from aieos.adapters.persistence_postgres.employee import (
     digest,
     encode_safe_value,
     encode_start_workflow_evidence,
+    reconstruct_attempt_number,
 )
 
 def test_cd_digest_is_lowercase_and_domain_bound() -> None:
@@ -33,3 +34,8 @@ def test_attempt_none_is_present_null_and_distinct_from_one() -> None:
     one = encode_start_workflow_evidence({"attempt_number": 1})
     assert b"n;" in none and none != one
     with pytest.raises(UnsafeM7CommandValue): encode_start_workflow_evidence({})
+
+
+def test_present_null_reconstructs_as_none() -> None:
+    assert reconstruct_attempt_number(encode_start_workflow_evidence({"attempt_number": None})) is None
+    assert reconstruct_attempt_number(encode_start_workflow_evidence({"attempt_number": 1})) == 1
