@@ -117,6 +117,44 @@ class PostgresEmployeePersistence:
         await self._session.execute(text("UPDATE employee_observations SET quarantined=true WHERE tenant_id=:t AND workspace_id=:w AND observation_kind=:k AND source_identity=:i"),{"t":scope.tenant_id,"w":scope.workspace_id,"k":kind,"i":source_identity})
         return OperationResult("QuarantinedConflict")
 
+    async def transition_receipt(self, scope: Scope, target: str, command_id: str,
+                                 expected_revision: int, expected_fence: int,
+                                 state: str) -> OperationResult:
+        """CAS/fence transition; callers supply only a contract-valid state bundle."""
+        row = (await self._session.execute(text("""UPDATE employee_manager_receipts
+          SET state=:s, revision=revision+1 WHERE tenant_id=:t AND workspace_id=:w
+          AND manager_target=:m AND manager_command_id=:c AND revision=:r AND fence=:f
+          RETURNING revision,fence,state"""), {"t":scope.tenant_id,"w":scope.workspace_id,
+          "m":target,"c":command_id,"r":expected_revision,"f":expected_fence,"s":state})).mappings().first()
+        return OperationResult("Transitioned" if row else "FenceLost", dict(row) if row else None)
+
+    async def load_recovery(self, scope: Scope, target: str, command_id: str) -> OperationResult:
+        """Load original command evidence/path; this never regenerates a command."""
+        row = (await self._session.execute(text("""SELECT r.complete_command,r.command_profile,r.state,
+          c.complete_evidence,c.replay_path FROM employee_manager_receipts r
+          LEFT JOIN employee_start_workflow_commands c ON c.tenant_id=r.tenant_id
+          AND c.workspace_id=r.workspace_id AND c.idempotency_key=r.idempotency_key
+          WHERE r.tenant_id=:t AND r.workspace_id=:w AND r.manager_target=:m AND r.manager_command_id=:c"""),
+          {"t":scope.tenant_id,"w":scope.workspace_id,"m":target,"c":command_id})).mappings().first()
+        return OperationResult("Recovered" if row else "NotFound", dict(row) if row else None)
+
+    async def commit_checkpoint(self, scope: Scope, kind: str, execution_id: str,
+                                expected_revision: int, expected_fence: int,
+                                labelled_view: bytes, completeness: str) -> OperationResult:
+        row=(await self._session.execute(text("""UPDATE employee_projection_checkpoints
+          SET revision=revision+1,labelled_view=:v,completeness=:c WHERE tenant_id=:t AND workspace_id=:w
+          AND projection_kind=:k AND employee_execution_id=:e AND revision=:r AND fence=:f RETURNING revision,fence"""),
+          {"t":scope.tenant_id,"w":scope.workspace_id,"k":kind,"e":execution_id,"r":expected_revision,"f":expected_fence,"v":labelled_view,"c":completeness})).mappings().first()
+        return OperationResult("Committed" if row else "FenceLost", dict(row) if row else None)
+
+    async def resolve_conflict(self, scope: Scope, conflict_id: str, evidence: bytes,
+                               authoritative_source_identity: str) -> OperationResult:
+        row=(await self._session.execute(text("""INSERT INTO employee_conflict_resolutions
+          (tenant_id,workspace_id,conflict_id,resolution_evidence,authoritative_source_identity)
+          VALUES (:t,:w,:c,:e,:s) ON CONFLICT DO NOTHING RETURNING conflict_id"""),
+          {"t":scope.tenant_id,"w":scope.workspace_id,"c":conflict_id,"e":evidence,"s":authoritative_source_identity})).scalar_one_or_none()
+        return OperationResult("Resolved" if row is not None else "ExistingResolution")
+
     async def save_start_workflow_command(
         self, scope: Scope, command_id: str, idempotency_key: str, complete_evidence: bytes,
         fingerprint: str | None, replay_path: str = "FrozenM6PostgresWorkflowHost52271c4",
