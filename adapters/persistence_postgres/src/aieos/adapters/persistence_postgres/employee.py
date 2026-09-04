@@ -137,18 +137,19 @@ class PostgresEmployeePersistence:
           {"t": scope.tenant_id, "w": scope.workspace_id, "c": command_id})).scalar_one()
         return OperationResult("Existing" if existing == complete_evidence else "CommandConflict")
 
-    async def commit_admission(self, scope: Scope, principal: str, key: str, caller: Digest,
-                               execution_id: str, snapshot_id: str, command_id: str,
-                               payload: str) -> OperationResult:
+    async def commit_admission(self, scope: Scope, principal: str, key: str, caller_evidence: bytes,
+                               execution_id: str, snapshot_id: str, command_id: str, payload: str,
+                               fingerprint: str | None = None) -> OperationResult:
+        """Atomically bind an idempotency key to exact caller evidence, never its digest."""
         row = (await self._session.execute(text("""
-          INSERT INTO employee_admissions (tenant_id,workspace_id,principal_id,idempotency_key,caller_digest,execution_id,snapshot_id,manager_command_id,payload)
-          VALUES (:t,:w,:p,:k,:d,:e,:s,:c,:v)
+          INSERT INTO employee_admissions (tenant_id,workspace_id,principal_id,idempotency_key,caller_evidence,caller_profile,caller_fingerprint,execution_id,snapshot_id,manager_command_id,payload)
+          VALUES (:t,:w,:p,:k,:b,:q,:f,:e,:s,:c,:v)
           ON CONFLICT (tenant_id,workspace_id,principal_id,idempotency_key) DO NOTHING
-          RETURNING caller_digest,execution_id,snapshot_id,manager_command_id"""),
-          dict(t=scope.tenant_id,w=scope.workspace_id,p=principal,k=key,d=caller.value,e=execution_id,s=snapshot_id,c=command_id,v=payload))).mappings().first()
+          RETURNING caller_evidence,execution_id,snapshot_id,manager_command_id"""),
+          dict(t=scope.tenant_id,w=scope.workspace_id,p=principal,k=key,b=caller_evidence,q=PROFILE,f=fingerprint,e=execution_id,s=snapshot_id,c=command_id,v=payload))).mappings().first()
         if row: return OperationResult("Created", dict(row))
-        old=(await self._session.execute(text("SELECT caller_digest,execution_id,snapshot_id,manager_command_id FROM employee_admissions WHERE tenant_id=:t AND workspace_id=:w AND principal_id=:p AND idempotency_key=:k"),dict(t=scope.tenant_id,w=scope.workspace_id,p=principal,k=key))).mappings().one()
-        return OperationResult("Existing" if old["caller_digest"] == caller.value else "InputConflict", dict(old))
+        old=(await self._session.execute(text("SELECT caller_evidence,execution_id,snapshot_id,manager_command_id FROM employee_admissions WHERE tenant_id=:t AND workspace_id=:w AND principal_id=:p AND idempotency_key=:k"),dict(t=scope.tenant_id,w=scope.workspace_id,p=principal,k=key))).mappings().one()
+        return OperationResult("Existing" if old["caller_evidence"] == caller_evidence else "InputConflict", dict(old))
 
     async def register_source(self, scope: Scope, component: str, version: str, kind: str,
                               source_id: str, source: Digest, payload: str) -> OperationResult:
