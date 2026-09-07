@@ -20,6 +20,30 @@ class UnsafeM7CommandValue(ValueError):
     """Raised before persistence for a value outside the closed M7 safe domain."""
 
 
+@dataclass(frozen=True)
+class DurableReference:
+    tenant_id: str
+    workspace_id: str
+    kind: str
+    identity: str
+
+
+def encode_durable_reference(reference: DurableReference) -> bytes:
+    if not all(type(value) is str and value for value in (reference.tenant_id, reference.workspace_id, reference.kind, reference.identity)):
+        raise UnsafeM7CommandValue("durable reference fields must be non-empty exact strings")
+    return encode_safe_value({"tenantId": reference.tenant_id, "workspaceId": reference.workspace_id, "kind": reference.kind, "identity": reference.identity})
+
+
+def reconstruct_durable_reference(value: object, scope: "Scope") -> DurableReference:
+    if type(value) is not dict or set(value) != {"tenantId", "workspaceId", "kind", "identity"}:
+        raise UnsafeM7CommandValue("invalid durable reference envelope")
+    reference = DurableReference(value["tenantId"], value["workspaceId"], value["kind"], value["identity"])
+    encode_durable_reference(reference)
+    if reference.tenant_id != scope.tenant_id or reference.workspace_id != scope.workspace_id:
+        raise UnsafeM7CommandValue("durable reference scope mismatch")
+    return reference
+
+
 def encode_safe_value(value: object, *, depth: int = 0) -> bytes:
     """Encode only the closed CD-v1 safe-value algebra.
 
