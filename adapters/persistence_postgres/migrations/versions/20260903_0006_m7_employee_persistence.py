@@ -1,20 +1,147 @@
 """M7-C immutable employee persistence foundation."""
+
 from alembic import op
 import sqlalchemy as sa
+
 revision = "20260903_0006"
 down_revision = "20260811_0005"
 branch_labels = depends_on = None
+
+
 def upgrade():
-    op.create_table("employee_admissions", sa.Column("tenant_id",sa.String(128),primary_key=True),sa.Column("workspace_id",sa.String(128),primary_key=True),sa.Column("principal_id",sa.String(128),primary_key=True),sa.Column("idempotency_key",sa.String(256),primary_key=True),sa.Column("caller_evidence",sa.LargeBinary,nullable=False),sa.Column("caller_profile",sa.String(64),nullable=False),sa.Column("caller_fingerprint",sa.String(128)),sa.Column("execution_id",sa.String(128),nullable=False),sa.Column("snapshot_id",sa.String(128),nullable=False),sa.Column("manager_command_id",sa.String(128),nullable=False),sa.Column("payload",sa.Text,nullable=False),sa.UniqueConstraint("tenant_id","workspace_id","execution_id"))
-    op.create_table("employee_source_evidence", sa.Column("tenant_id",sa.String(128),primary_key=True),sa.Column("workspace_id",sa.String(128),primary_key=True),sa.Column("source_component",sa.String(128),primary_key=True),sa.Column("source_contract_version",sa.String(128),primary_key=True),sa.Column("source_kind",sa.String(128),primary_key=True),sa.Column("source_id",sa.String(128),primary_key=True),sa.Column("digest",sa.String(64),nullable=False),sa.Column("profile",sa.String(64),nullable=False),sa.Column("domain",sa.String(256),nullable=False),sa.Column("payload",sa.Text,nullable=False))
-    op.create_table("employee_lineage_conflicts",sa.Column("tenant_id",sa.String(128),primary_key=True),sa.Column("workspace_id",sa.String(128),primary_key=True),sa.Column("source_component",sa.String(128),primary_key=True),sa.Column("source_id",sa.String(128),primary_key=True),sa.Column("existing_digest",sa.String(64),nullable=False),sa.Column("incoming_digest",sa.String(64),nullable=False),sa.Column("state",sa.String(32),nullable=False))
-    op.create_table("employee_manager_handoffs",sa.Column("tenant_id",sa.String(128),primary_key=True),sa.Column("workspace_id",sa.String(128),primary_key=True),sa.Column("intent_id",sa.String(128),primary_key=True),sa.Column("revision",sa.Integer,nullable=False,server_default="0"),sa.Column("fence",sa.Integer,nullable=False,server_default="0"),sa.Column("lease_owner",sa.String(128)),sa.Column("lease_expires_at",sa.DateTime(timezone=True)))
-    op.create_table("employee_start_workflow_commands",sa.Column("tenant_id",sa.String(128),primary_key=True),sa.Column("workspace_id",sa.String(128),primary_key=True),sa.Column("command_id",sa.String(128),primary_key=True),sa.Column("idempotency_key",sa.String(256),nullable=False),sa.Column("complete_evidence",sa.LargeBinary,nullable=False),sa.Column("fingerprint",sa.String(128)),sa.Column("replay_path",sa.String(128),nullable=False),sa.UniqueConstraint("tenant_id","workspace_id","idempotency_key"))
-    op.create_index("ix_employee_source_scope", "employee_source_evidence", ["tenant_id", "workspace_id", "source_id"])
-    op.create_table("employee_manager_receipts",sa.Column("tenant_id",sa.String(128),primary_key=True),sa.Column("workspace_id",sa.String(128),primary_key=True),sa.Column("manager_target",sa.String(128),primary_key=True),sa.Column("manager_command_id",sa.String(128),primary_key=True),sa.Column("idempotency_key",sa.String(256),nullable=False),sa.Column("employee_execution_id",sa.String(128),nullable=False),sa.Column("complete_command",sa.LargeBinary,nullable=False),sa.Column("command_profile",sa.String(64),nullable=False),sa.Column("command_fingerprint",sa.String(128)),sa.Column("revision",sa.Integer,nullable=False,server_default="0"),sa.Column("fence",sa.Integer,nullable=False,server_default="0"),sa.Column("state",sa.String(64),nullable=False),sa.UniqueConstraint("tenant_id","workspace_id","manager_target","idempotency_key"))
-    op.create_table("employee_observations",sa.Column("tenant_id",sa.String(128),primary_key=True),sa.Column("workspace_id",sa.String(128),primary_key=True),sa.Column("observation_kind",sa.String(64),primary_key=True),sa.Column("source_identity",sa.String(256),primary_key=True),sa.Column("evidence",sa.LargeBinary,nullable=False),sa.Column("fingerprint",sa.String(128)),sa.Column("employee_execution_id",sa.String(128)),sa.Column("response_tag",sa.String(64)),sa.Column("workflow_id",sa.String(128)),sa.Column("quarantined",sa.Boolean,nullable=False,server_default=sa.false()))
-    op.create_table("employee_conflict_resolutions",sa.Column("tenant_id",sa.String(128),primary_key=True),sa.Column("workspace_id",sa.String(128),primary_key=True),sa.Column("conflict_id",sa.String(128),primary_key=True),sa.Column("resolution_evidence",sa.LargeBinary,nullable=False),sa.Column("authoritative_source_identity",sa.String(256),nullable=False))
-    op.create_table("employee_projection_checkpoints",sa.Column("tenant_id",sa.String(128),primary_key=True),sa.Column("workspace_id",sa.String(128),primary_key=True),sa.Column("projection_kind",sa.String(128),primary_key=True),sa.Column("employee_execution_id",sa.String(128),primary_key=True),sa.Column("revision",sa.Integer,nullable=False,server_default="0"),sa.Column("fence",sa.Integer,nullable=False,server_default="0"),sa.Column("labelled_view",sa.LargeBinary,nullable=False),sa.Column("completeness",sa.String(64),nullable=False))
-    op.create_table("employee_administrative_heads",sa.Column("tenant_id",sa.String(128),primary_key=True),sa.Column("workspace_id",sa.String(128),primary_key=True),sa.Column("target_type",sa.String(64),primary_key=True),sa.Column("target_version_id",sa.String(128),primary_key=True),sa.Column("revision",sa.Integer,nullable=False,server_default="0"),sa.Column("decision_evidence",sa.LargeBinary,nullable=False),sa.Column("disposition",sa.String(64),nullable=False))
+    op.create_table(
+        "employee_admissions",
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("workspace_id", sa.String(128), primary_key=True),
+        sa.Column("principal_id", sa.String(128), primary_key=True),
+        sa.Column("idempotency_key", sa.String(256), primary_key=True),
+        sa.Column("caller_evidence", sa.LargeBinary, nullable=False),
+        sa.Column("caller_profile", sa.String(64), nullable=False),
+        sa.Column("caller_fingerprint", sa.String(128)),
+        sa.Column("execution_id", sa.String(128), nullable=False),
+        sa.Column("snapshot_id", sa.String(128), nullable=False),
+        sa.Column("manager_command_id", sa.String(128), nullable=False),
+        sa.Column("payload", sa.Text, nullable=False),
+        sa.UniqueConstraint("tenant_id", "workspace_id", "execution_id"),
+    )
+    op.create_table(
+        "employee_source_evidence",
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("workspace_id", sa.String(128), primary_key=True),
+        sa.Column("source_component", sa.String(128), primary_key=True),
+        sa.Column("source_contract_version", sa.String(128), primary_key=True),
+        sa.Column("source_kind", sa.String(128), primary_key=True),
+        sa.Column("source_id", sa.String(128), primary_key=True),
+        sa.Column("digest", sa.String(64), nullable=False),
+        sa.Column("profile", sa.String(64), nullable=False),
+        sa.Column("domain", sa.String(256), nullable=False),
+        sa.Column("payload", sa.Text, nullable=False),
+    )
+    op.create_table(
+        "employee_lineage_conflicts",
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("workspace_id", sa.String(128), primary_key=True),
+        sa.Column("source_component", sa.String(128), primary_key=True),
+        sa.Column("source_id", sa.String(128), primary_key=True),
+        sa.Column("existing_digest", sa.String(64), nullable=False),
+        sa.Column("incoming_digest", sa.String(64), nullable=False),
+        sa.Column("state", sa.String(32), nullable=False),
+    )
+    op.create_table(
+        "employee_manager_handoffs",
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("workspace_id", sa.String(128), primary_key=True),
+        sa.Column("intent_id", sa.String(128), primary_key=True),
+        sa.Column("revision", sa.Integer, nullable=False, server_default="0"),
+        sa.Column("fence", sa.Integer, nullable=False, server_default="0"),
+        sa.Column("lease_owner", sa.String(128)),
+        sa.Column("lease_expires_at", sa.DateTime(timezone=True)),
+    )
+    op.create_table(
+        "employee_start_workflow_commands",
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("workspace_id", sa.String(128), primary_key=True),
+        sa.Column("command_id", sa.String(128), primary_key=True),
+        sa.Column("idempotency_key", sa.String(256), nullable=False),
+        sa.Column("complete_evidence", sa.LargeBinary, nullable=False),
+        sa.Column("fingerprint", sa.String(128)),
+        sa.Column("replay_path", sa.String(128), nullable=False),
+        sa.UniqueConstraint("tenant_id", "workspace_id", "idempotency_key"),
+    )
+    op.create_index(
+        "ix_employee_source_scope",
+        "employee_source_evidence",
+        ["tenant_id", "workspace_id", "source_id"],
+    )
+    op.create_table(
+        "employee_manager_receipts",
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("workspace_id", sa.String(128), primary_key=True),
+        sa.Column("manager_target", sa.String(128), primary_key=True),
+        sa.Column("manager_command_id", sa.String(128), primary_key=True),
+        sa.Column("idempotency_key", sa.String(256), nullable=False),
+        sa.Column("employee_execution_id", sa.String(128), nullable=False),
+        sa.Column("complete_command", sa.LargeBinary, nullable=False),
+        sa.Column("command_profile", sa.String(64), nullable=False),
+        sa.Column("command_fingerprint", sa.String(128)),
+        sa.Column("revision", sa.Integer, nullable=False, server_default="0"),
+        sa.Column("fence", sa.Integer, nullable=False, server_default="0"),
+        sa.Column("state", sa.String(64), nullable=False),
+        sa.UniqueConstraint("tenant_id", "workspace_id", "manager_target", "idempotency_key"),
+    )
+    op.create_table(
+        "employee_observations",
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("workspace_id", sa.String(128), primary_key=True),
+        sa.Column("observation_kind", sa.String(64), primary_key=True),
+        sa.Column("source_identity", sa.String(256), primary_key=True),
+        sa.Column("evidence", sa.LargeBinary, nullable=False),
+        sa.Column("fingerprint", sa.String(128)),
+        sa.Column("employee_execution_id", sa.String(128)),
+        sa.Column("response_tag", sa.String(64)),
+        sa.Column("workflow_id", sa.String(128)),
+        sa.Column("quarantined", sa.Boolean, nullable=False, server_default=sa.false()),
+    )
+    op.create_table(
+        "employee_conflict_resolutions",
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("workspace_id", sa.String(128), primary_key=True),
+        sa.Column("conflict_id", sa.String(128), primary_key=True),
+        sa.Column("resolution_evidence", sa.LargeBinary, nullable=False),
+        sa.Column("authoritative_source_identity", sa.String(256), nullable=False),
+    )
+    op.create_table(
+        "employee_projection_checkpoints",
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("workspace_id", sa.String(128), primary_key=True),
+        sa.Column("projection_kind", sa.String(128), primary_key=True),
+        sa.Column("employee_execution_id", sa.String(128), primary_key=True),
+        sa.Column("revision", sa.Integer, nullable=False, server_default="0"),
+        sa.Column("fence", sa.Integer, nullable=False, server_default="0"),
+        sa.Column("labelled_view", sa.LargeBinary, nullable=False),
+        sa.Column("completeness", sa.String(64), nullable=False),
+    )
+    op.create_table(
+        "employee_administrative_heads",
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("workspace_id", sa.String(128), primary_key=True),
+        sa.Column("target_type", sa.String(64), primary_key=True),
+        sa.Column("target_version_id", sa.String(128), primary_key=True),
+        sa.Column("revision", sa.Integer, nullable=False, server_default="0"),
+        sa.Column("decision_evidence", sa.LargeBinary, nullable=False),
+        sa.Column("disposition", sa.String(64), nullable=False),
+    )
+
+
 def downgrade():
-    op.drop_table("employee_administrative_heads");op.drop_table("employee_projection_checkpoints");op.drop_table("employee_conflict_resolutions");op.drop_table("employee_observations");op.drop_table("employee_manager_receipts");op.drop_index("ix_employee_source_scope", table_name="employee_source_evidence");op.drop_table("employee_start_workflow_commands");op.drop_table("employee_manager_handoffs");op.drop_table("employee_lineage_conflicts");op.drop_table("employee_source_evidence");op.drop_table("employee_admissions")
+    op.drop_table("employee_administrative_heads")
+    op.drop_table("employee_projection_checkpoints")
+    op.drop_table("employee_conflict_resolutions")
+    op.drop_table("employee_observations")
+    op.drop_table("employee_manager_receipts")
+    op.drop_index("ix_employee_source_scope", table_name="employee_source_evidence")
+    op.drop_table("employee_start_workflow_commands")
+    op.drop_table("employee_manager_handoffs")
+    op.drop_table("employee_lineage_conflicts")
+    op.drop_table("employee_source_evidence")
+    op.drop_table("employee_admissions")
