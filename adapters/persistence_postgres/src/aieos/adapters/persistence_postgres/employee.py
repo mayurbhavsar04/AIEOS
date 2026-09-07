@@ -3,6 +3,7 @@
 This module deliberately contains no catalog, admission, or Manager decisions.  It
 only preserves the immutable facts and fenced transitions supplied by M7-D/E.
 """
+# ruff: noqa: E501
 
 from __future__ import annotations
 
@@ -60,7 +61,7 @@ def encode_durable_reference(reference: DurableReference) -> bytes:
     )
 
 
-def reconstruct_durable_reference(value: object, scope: "Scope") -> DurableReference:
+def reconstruct_durable_reference(value: object, scope: Scope) -> DurableReference:
     if type(value) is not dict or set(value) != {"tenantId", "workspaceId", "kind", "identity"}:
         raise UnsafeM7CommandValue("invalid durable reference envelope")
     reference = DurableReference(

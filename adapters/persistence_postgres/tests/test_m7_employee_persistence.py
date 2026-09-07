@@ -1,8 +1,8 @@
 import pytest
 
 from aieos.adapters.persistence_postgres.employee import (
-    UnsafeM7CommandValue,
     DurableReference,
+    UnsafeM7CommandValue,
     digest,
     encode_safe_value,
     encode_start_workflow_evidence,

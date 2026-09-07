@@ -1,7 +1,7 @@
 """M7-C immutable employee persistence foundation."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "20260903_0006"
 down_revision = "20260811_0005"
