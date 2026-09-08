@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Any
+from typing import cast
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,15 +62,27 @@ def encode_durable_reference(reference: DurableReference) -> bytes:
 
 
 def reconstruct_durable_reference(value: object, scope: Scope) -> DurableReference:
-    if type(value) is not dict or set(value) != {"tenantId", "workspaceId", "kind", "identity"}:
+    if type(value) is not dict:
+        raise UnsafeM7CommandValue("invalid durable reference envelope")
+    fields = cast(dict[object, object], value)
+    if set(fields) != {"tenantId", "workspaceId", "kind", "identity"}:
         raise UnsafeM7CommandValue("invalid durable reference envelope")
     reference = DurableReference(
-        value["tenantId"], value["workspaceId"], value["kind"], value["identity"]
+        _reference_string(fields["tenantId"]),
+        _reference_string(fields["workspaceId"]),
+        _reference_string(fields["kind"]),
+        _reference_string(fields["identity"]),
     )
     encode_durable_reference(reference)
     if reference.tenant_id != scope.tenant_id or reference.workspace_id != scope.workspace_id:
         raise UnsafeM7CommandValue("durable reference scope mismatch")
     return reference
+
+
+def _reference_string(value: object) -> str:
+    if type(value) is not str or not value:
+        raise UnsafeM7CommandValue("durable reference fields must be non-empty exact strings")
+    return value
 
 
 def encode_safe_value(value: object, *, depth: int = 0) -> bytes:
@@ -90,20 +102,25 @@ def encode_safe_value(value: object, *, depth: int = 0) -> bytes:
         raw = value.encode("utf-8")
         return b"s" + str(len(raw)).encode("ascii") + b":" + raw
     if type(value) is list or type(value) is tuple:
+        items = cast(list[object] | tuple[object, ...], value)
         return (
             b"a"
-            + str(len(value)).encode("ascii")
+            + str(len(items)).encode("ascii")
             + b":"
-            + b"".join(encode_safe_value(item, depth=depth + 1) for item in value)
+            + b"".join(encode_safe_value(item, depth=depth + 1) for item in items)
         )
     if type(value) is dict:
-        if not all(type(key) is str for key in value):
-            raise UnsafeM7CommandValue("M7 object keys must be exact strings")
-        members = []
-        for key in sorted(value):
+        mapping = cast(dict[object, object], value)
+        keys: list[str] = []
+        for key in mapping:
+            if type(key) is not str:
+                raise UnsafeM7CommandValue("M7 object keys must be exact strings")
+            keys.append(key)
+        members: list[bytes] = []
+        for key in sorted(keys):
             members.append(encode_safe_value(key, depth=depth + 1))
-            members.append(encode_safe_value(value[key], depth=depth + 1))
-        return b"o" + str(len(value)).encode("ascii") + b":" + b"".join(members)
+            members.append(encode_safe_value(mapping[key], depth=depth + 1))
+        return b"o" + str(len(mapping)).encode("ascii") + b":" + b"".join(members)
     raise UnsafeM7CommandValue(f"unsupported M7 safe value: {type(value).__name__}")
 
 
@@ -164,7 +181,7 @@ class Scope:
 @dataclass(frozen=True)
 class OperationResult:
     outcome: str
-    value: dict[str, Any] | None = None
+    value: dict[str, object] | None = None
 
 
 class PostgresEmployeePersistence:
