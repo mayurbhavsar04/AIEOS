@@ -96,6 +96,8 @@ M6_TABLES = {
 }
 
 M7_TABLES = {
+    "employee_durable_references",
+    "employee_observation_conflicts",
     "employee_admissions",
     "employee_source_evidence",
     "employee_lineage_conflicts",
