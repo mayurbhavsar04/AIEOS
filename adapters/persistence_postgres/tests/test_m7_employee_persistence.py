@@ -246,3 +246,22 @@ def test_full_basis_preserves_null_absence_and_host_omitted_fields() -> None:
         replace(original, payload={**original.payload, "extra": None})
     )
     assert "max_attempts" not in reconstruct_start_workflow(first).payload
+
+
+def test_attempt_number_subclass_is_rejected_at_typed_boundary() -> None:
+    class Integer(int):
+        pass
+
+    original = command()
+    with pytest.raises(UnsafeM7CommandValue):
+        encode_start_workflow_evidence(
+            replace(original, metadata=replace(original.metadata, attempt_number=Integer(1)))
+        )
+
+
+@pytest.mark.parametrize("version", [None, 1, [], {}])
+def test_malformed_version_has_a_validation_outcome(version: object) -> None:
+    basis = cast(dict[str, object], decode_safe_value(encode_start_workflow_evidence(command())))
+    basis["command_version"] = version
+    with pytest.raises(UnsafeM7CommandValue):
+        reconstruct_start_workflow(encode_safe_value(basis))

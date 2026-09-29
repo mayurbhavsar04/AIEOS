@@ -115,7 +115,11 @@ def decision() -> bytes:
     )
 
 
-async def admit(repo: PostgresEmployeePersistence, command: CommandEnvelope | None = None) -> str:
+async def admit(
+    repo: PostgresEmployeePersistence,
+    command: CommandEnvelope | None = None,
+    references: dict[str, DurableReference] | None = None,
+) -> str:
     result = await repo.commit_admission_with_pending_command(
         SCOPE,
         "principal",
@@ -130,6 +134,7 @@ async def admit(repo: PostgresEmployeePersistence, command: CommandEnvelope | No
         encode_safe_value({"commandId": "manager-1", "input": "exact"}),
         decision(),
         command or start(),
+        references,
     )
     return result.outcome
 
@@ -883,3 +888,135 @@ async def test_competing_command_under_same_source_result_quarantines_both(
         recovered = await repo.load_recovery(SCOPE, "Manager", "manager-2")
         assert recovered.value is not None and recovered.value["dispatch_allowed"] is False
         assert recovered.value["recovery_blocked"] is not None
+
+
+@pytest.mark.parametrize("dimension", ["tenant", "workspace"])
+async def test_exact_tenant_and_workspace_isolation(
+    database: PostgresDatabase, dimension: str
+) -> None:
+    other = (
+        Scope("other-tenant", SCOPE.workspace_id)
+        if dimension == "tenant"
+        else Scope(SCOPE.tenant_id, "other-workspace")
+    )
+    original = start()
+    scoped = replace(
+        original,
+        tenant_id=other.tenant_id,
+        workspace_id=other.workspace_id,
+        metadata=replace(
+            original.metadata,
+            authorization=replace(
+                original.metadata.authorization,
+                tenant_id=other.tenant_id,
+                workspace_id=other.workspace_id,
+            ),
+        ),
+    )
+    async with database.transaction() as session:
+        repo = PostgresEmployeePersistence(session)
+        await admit(repo)
+        assert (await repo.load_recovery(other, "Manager", "manager-1")).outcome == "NotFound"
+        assert (
+            await repo.open_manager_receipt(
+                other,
+                "Manager",
+                "manager-1",
+                "manager-key",
+                "execution",
+                encode_safe_value({"commandId": "manager-1"}),
+                None,
+            )
+        ).outcome == "Opened"
+        assert (
+            await repo.commit_manager_decision_and_pending_command(
+                other, "Manager", "manager-1", 0, 0, decision(), scoped
+            )
+        ).outcome == "Created"
+        for scope, expected in ((SCOPE, original), (other, scoped)):
+            recovered = await repo.load_recovery(scope, "Manager", "manager-1")
+            assert recovered.value is not None and recovered.value["start_command"] == expected
+        with pytest.raises(UnsafeM7CommandValue):
+            await repo.save_start_workflow_command(
+                other, "start-1", "start-key", encode_start_workflow_evidence(original), None
+            )
+
+
+@pytest.mark.parametrize("tag", ["RejectedNoWorkflow", "TerminalCapturedIdentityUnresolved"])
+async def test_forbidden_workflow_identity_rejected(database: PostgresDatabase, tag: str) -> None:
+    async with database.transaction() as session:
+        with pytest.raises(UnsafeM7CommandValue):
+            await PostgresEmployeePersistence(session).capture_response(
+                SCOPE, "start-1", replace(response(tag), workflow_id="invented")
+            )
+        assert await session.scalar(text("SELECT count(*) FROM employee_observations")) == 0
+
+
+@pytest.mark.parametrize("bindings", [None, [], "invalid", 1])
+async def test_malformed_reference_bindings_block_recovery(
+    database: PostgresDatabase, bindings: object
+) -> None:
+    async with database.transaction() as session:
+        repo = PostgresEmployeePersistence(session)
+        assert await admit(repo) == "Created"
+        await session.execute(
+            text("UPDATE employee_start_workflow_commands SET reference_evidence=:e"),
+            {"e": encode_safe_value(bindings)},
+        )
+        recovered = await repo.load_recovery(SCOPE, "Manager", "manager-1")
+        assert recovered.outcome == "IntegrityConflict" and recovered.value is None
+
+
+@pytest.mark.parametrize("collision", [False, True])
+async def test_atomic_admission_includes_governed_reference_records(
+    database: PostgresDatabase, collision: bool
+) -> None:
+    from aieos.adapters.persistence_postgres.employee_codec import decode_safe_value
+    from aieos.adapters.persistence_postgres.employee_references import encode_durable_reference
+
+    ref = reference()
+    owner = Owner(ref.owner_evidence)
+    owners = {("Owner", "1"): owner}
+    original = start()
+    original = replace(
+        original,
+        payload={
+            **original.payload,
+            "approved_input": decode_safe_value(encode_durable_reference(ref)),
+        },
+    )
+    if collision:
+        async with database.transaction() as session:
+            existing = start("other-command")
+            assert (
+                await PostgresEmployeePersistence(session).save_start_workflow_command(
+                    SCOPE,
+                    existing.command_id,
+                    existing.metadata.idempotency_key,
+                    encode_start_workflow_evidence(existing),
+                    None,
+                )
+            ).outcome == "Created"
+    async with database.transaction() as session:
+        result = await admit(
+            PostgresEmployeePersistence(session, owners), original, {"approved_input": ref}
+        )
+        assert result == ("IdentityConflict" if collision else "Created")
+    async with database.transaction() as session:
+        repo = PostgresEmployeePersistence(session, owners)
+        for table in (
+            "employee_admissions",
+            "employee_manager_receipts",
+            "employee_manager_handoffs",
+            "employee_durable_references",
+        ):
+            assert await session.scalar(text(f"SELECT count(*) FROM {table}")) == (
+                0 if collision else 1
+            )
+        recovered = await repo.load_recovery(SCOPE, "Manager", "manager-1")
+        if collision:
+            assert recovered.outcome == "NotFound"
+        else:
+            assert recovered.outcome == "Recovered" and recovered.value is not None
+            assert recovered.value["start_command"] == original
+            assert recovered.value["dispatch_allowed"] is True

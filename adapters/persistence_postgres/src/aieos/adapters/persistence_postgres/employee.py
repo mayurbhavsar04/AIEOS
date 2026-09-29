@@ -306,9 +306,10 @@ class PostgresEmployeePersistence:
                 return OperationResult("IntegrityConflict")
             if row["reference_evidence"] is not None:
                 try:
-                    bindings = cast(
-                        dict[str, object], decode_safe_value(bytes(row["reference_evidence"]))
-                    )
+                    decoded_bindings = decode_safe_value(bytes(row["reference_evidence"]))
+                    if type(decoded_bindings) is not dict:
+                        return OperationResult("IntegrityConflict")
+                    bindings = cast(dict[str, object], decoded_bindings)
                     for position, encoded_reference in bindings.items():
                         reference = reconstruct_durable_reference(encoded_reference, scope)
                         owner = self._reference_owners.get(
@@ -1131,6 +1132,7 @@ class PostgresEmployeePersistence:
         manager_evidence: bytes,
         decision_evidence: bytes,
         command: CommandEnvelope,
+        references: Mapping[str, DurableReference] | None = None,
     ) -> OperationResult:
         """Compose C-owned writes atomically, with no external dispatch in the transaction."""
         encode_start_workflow_evidence(command)
@@ -1169,7 +1171,14 @@ class PostgresEmployeePersistence:
                 await transaction.rollback()
                 return receipt
             pending = await self.commit_manager_decision_and_pending_command(
-                scope, manager_target, manager_command_id, 0, 0, decision_evidence, command
+                scope,
+                manager_target,
+                manager_command_id,
+                0,
+                0,
+                decision_evidence,
+                command,
+                references,
             )
             if pending.outcome not in {"Created", "Existing"}:
                 await transaction.rollback()

@@ -345,7 +345,7 @@ def reconstruct_start_workflow(evidence: bytes) -> CommandEnvelope:
         _map(budget)
     if (
         basis["command_type"] != "StartWorkflow"
-        or basis["command_version"] not in {"1", "1.0", "2", "2.0"}
+        or identifier(basis["command_version"]) not in {"1", "1.0", "2", "2.0"}
         or basis["target_component"] != "Workflow Engine"
     ):
         raise UnsafeM7CommandValue("unsupported frozen StartWorkflow contract")
