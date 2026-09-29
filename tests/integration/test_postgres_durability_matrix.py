@@ -16,6 +16,7 @@ import anyio
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from pydantic import SecretStr, TypeAdapter
 from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
@@ -33,6 +34,7 @@ from aieos.adapters.persistence_postgres import (
     PostgresWorkflowRepository,
     checkpoint,
 )
+from aieos.adapters.persistence_postgres.database import EXPECTED_ALEMBIC_REVISION
 from aieos.adapters.persistence_postgres.models import (
     AIGatewayAttemptRow,
     AIGatewayBudgetRow,
@@ -74,7 +76,7 @@ from aieos_api.settings import HostSettings, RuntimeAdapter
 pytestmark = [pytest.mark.integration, pytest.mark.postgres_required, pytest.mark.anyio]
 
 ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_TABLES = {
+M6_TABLES = {
     "ai_gateway_attempts",
     "ai_gateway_budgets",
     "ai_gateway_cache",
@@ -93,6 +95,22 @@ EXPECTED_TABLES = {
     "workflows",
 }
 
+M7_TABLES = {
+    "employee_durable_references",
+    "employee_observation_conflicts",
+    "employee_admissions",
+    "employee_source_evidence",
+    "employee_lineage_conflicts",
+    "employee_manager_handoffs",
+    "employee_start_workflow_commands",
+    "employee_manager_receipts",
+    "employee_observations",
+    "employee_conflict_resolutions",
+    "employee_projection_checkpoints",
+    "employee_administrative_heads",
+}
+EXPECTED_TABLES = M6_TABLES | M7_TABLES
+
 
 def database_url() -> str:
     url = os.environ.get("AIEOS_TEST_DATABASE_URL")
@@ -104,16 +122,9 @@ def database_url() -> str:
 
 
 async def reset(database: PostgresDatabase) -> None:
+    tables = ", ".join(sorted(EXPECTED_TABLES - {"alembic_version"}))
     async with database.transaction() as session:
-        await session.execute(
-            text(
-                "TRUNCATE delivery_receipts, outbox_events, outcomes, "
-                "command_idempotency, executions, workflow_steps, workflows, "
-                "decision_evidence, memory_records, ai_gateway_usage_ledger, "
-                "ai_gateway_attempts, ai_gateway_budgets, ai_gateway_cache, "
-                "ai_gateway_invocations CASCADE"
-            )
-        )
+        await session.execute(text(f"TRUNCATE {tables} CASCADE"))
 
 
 def ai_request(**overrides: object) -> AIInvocationRequest:
@@ -1279,9 +1290,18 @@ def event(
 @pytest.fixture
 async def database() -> AsyncIterator[PostgresDatabase]:
     value = PostgresDatabase(database_url())
-    await reset(value)
-    yield value
-    await value.close()
+    try:
+        await reset(value)
+        yield value
+    finally:
+        await value.close()
+
+
+@pytest.fixture
+def migration_config(monkeypatch: pytest.MonkeyPatch) -> Config:
+    # Alembic and the repository must operate on the same test database.
+    monkeypatch.setenv("AIEOS_DATABASE_URL", database_url())
+    return Config(str(ROOT / "alembic.ini"))
 
 
 def governed_start_command(
@@ -1602,48 +1622,76 @@ async def test_postgres_pre_ai_rejections_terminalize_once_and_survive_restart(
 
 async def test_migration_revision_readiness_and_schema_parity(
     database: PostgresDatabase,
+    migration_config: Config,
 ) -> None:
+    assert (
+        ScriptDirectory.from_config(migration_config).get_current_head()
+        == EXPECTED_ALEMBIC_REVISION
+    )
     assert await database.migration_readiness() == {
         "ready": True,
         "status": "compatible",
-        "expected_revision": "20260811_0005",
-        "deployed_revision": "20260811_0005",
+        "expected_revision": EXPECTED_ALEMBIC_REVISION,
+        "deployed_revision": EXPECTED_ALEMBIC_REVISION,
     }
     async with database.engine.connect() as connection:
         tables = await connection.run_sync(lambda sync: set(sync.dialect.get_table_names(sync)))
     assert tables == EXPECTED_TABLES
-    assert set(Base.metadata.tables) == EXPECTED_TABLES - {"alembic_version"}
+    # M7 uses explicit SQL persistence; its tables are not ORM mappings.
+    assert set(Base.metadata.tables) == M6_TABLES - {"alembic_version"}
 
 
+@pytest.mark.parametrize(
+    ("revision", "status"),
+    [
+        (None, "version_table_missing"),
+        ("20260726_9999", "behind_expected_head"),
+        ("diverged_revision", "ahead_or_diverged"),
+    ],
+)
 async def test_readiness_rejects_missing_behind_and_diverged_revision(
     database: PostgresDatabase,
+    migration_config: Config,
+    revision: str | None,
+    status: str,
 ) -> None:
-    async with database.transaction() as session:
-        await session.execute(text("DROP TABLE alembic_version"))
-    assert (await database.migration_readiness())["status"] == "version_table_missing"
-    async with database.transaction() as session:
-        await session.execute(
-            text("CREATE TABLE alembic_version (version_num varchar(32) NOT NULL)")
-        )
-        await session.execute(text("INSERT INTO alembic_version VALUES ('20260726_9999')"))
-    assert (await database.migration_readiness())["status"] == "behind_expected_head"
-    async with database.transaction() as session:
-        await session.execute(text("UPDATE alembic_version SET version_num='diverged_revision'"))
-    assert (await database.migration_readiness())["status"] == "ahead_or_diverged"
-    async with database.transaction() as session:
-        await session.execute(text("UPDATE alembic_version SET version_num='20260811_0005'"))
+    async with database.engine.connect() as connection:
+        original_revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+    assert original_revision == EXPECTED_ALEMBIC_REVISION
+    try:
+        async with database.transaction() as session:
+            if revision is None:
+                await session.execute(text("DROP TABLE alembic_version"))
+            else:
+                await session.execute(
+                    text("UPDATE alembic_version SET version_num=:revision"), {"revision": revision}
+                )
+        assert (await database.migration_readiness())["status"] == status
+    finally:
+        # Only revision metadata was altered. Restore it without replaying DDL,
+        # even when the readiness assertion fails or the version table is absent.
+        await asyncio.to_thread(command.stamp, migration_config, original_revision, purge=True)
+        await database.engine.dispose()
+    assert (await database.migration_readiness())["ready"] is True
 
 
 async def test_explicit_downgrade_and_upgrade_from_empty_database(
     database: PostgresDatabase,
+    migration_config: Config,
 ) -> None:
-    config = Config(str(ROOT / "alembic.ini"))
-    await asyncio.to_thread(command.downgrade, config, "base")
+    try:
+        await asyncio.to_thread(command.downgrade, migration_config, "base")
+        async with database.engine.connect() as connection:
+            names = await connection.run_sync(lambda sync: set(sync.dialect.get_table_names(sync)))
+        assert names <= {"alembic_version"}
+    finally:
+        # Restore real schema changes through migrations, including on assertion failure.
+        await asyncio.to_thread(command.upgrade, migration_config, "head")
+        await database.engine.dispose()
+    assert (await database.migration_readiness())["ready"] is True
     async with database.engine.connect() as connection:
         names = await connection.run_sync(lambda sync: set(sync.dialect.get_table_names(sync)))
-    assert not (EXPECTED_TABLES - {"alembic_version"}) & names
-    await asyncio.to_thread(command.upgrade, config, "head")
-    assert (await database.migration_readiness())["ready"] is True
+    assert names == EXPECTED_TABLES
 
 
 async def test_atomic_state_and_outbox_commit_and_rollback(
@@ -2929,7 +2977,7 @@ async def test_readiness_reports_unreachable_database_without_leaking_credential
         assert status == {
             "ready": False,
             "status": "database_unreachable",
-            "expected_revision": "20260811_0005",
+            "expected_revision": EXPECTED_ALEMBIC_REVISION,
         }
         assert "secret" not in repr(status)
     finally:
